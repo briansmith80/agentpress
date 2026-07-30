@@ -205,18 +205,38 @@ handoff_reason: switching-machines
 >    swallowed rather than surfaced. Fixed by routing through `psCapture` (PowerShell) in
 >    `src/mcp.mjs`, commit `bdca857`. Verified live: `claude mcp list` now shows `wordpress`
 >    and `playwright` as Connected against a real scaffolded site.
-> 3. [ ] **Now in progress: ease-of-use pass.** The tool works correctly but has real rough
->    edges for anyone other than its original builder — see the new "Ease-of-Use Ideas"
->    section below for the candidate list being worked through this session.
+> 3. [x] **Premium plugin auto-install (Oxygen/Breakdance)** — user asked for Oxygen,
+>    Breakdance Elements for Oxygen, and Breakdance Forms for Oxygen to auto-install on every
+>    scaffold. These are commercial, no wordpress.org/public-URL source. Built: a new private
+>    repo `briansmith80/oxygen-premium-plugins` (one release tag per plugin, licensed zip as
+>    the asset) that `syncPremiumPluginsFromGitHub()` pulls via `gh release download` into
+>    `~/.katalyst-laragon/premium-plugins/` on every scaffold, then `installPremiumPlugins()`
+>    installs+activates whichever zips are cached (matched by filename prefix, newest by
+>    mtime if more than one). Both steps are best-effort/non-fatal — no `gh`/network falls
+>    back to the local cache, no matching zip just skips that plugin. Repo overridable via
+>    `KATALYST_PREMIUM_PLUGINS_REPO`. Verified live against `ktest1`: all three show `active`
+>    in `wp plugin list`, and the sync path was specifically re-tested against an emptied
+>    local cache to prove the fresh-machine case. Commit `429febd`. **Not yet done:** license
+>    activation — installing ≠ licensing, Oxygen still shows `update: version higher than
+>    expected` until a license key is entered by hand in `wp-admin`; unknown whether
+>    Oxygen/Breakdance support a headless/define()-based license for automating that too.
+> 4. [ ] **Ease-of-use pass** — still the open thread. Candidates: silent-failure audit of
+>    other `spawnCapture` call sites (the same swallowed-error pattern that caused the MCP
+>    bug), friendlier `doctor` output, less first-run ceremony, clearer scaffold progress
+>    output, auto-suggesting `resume` after a failure. See "Ease-of-Use Ideas" above.
 
 ## Git State
 > - Branch: `main` (pushed: NO as of this edit — commits below are local only on the home
 >   machine; push once the ease-of-use pass is ready to share back)
-> - Last commit: `bdca857 fix(mcp): route claude/codex CLI calls through PowerShell, not raw
->   spawn` (on top of `e3be156` the original handoff commit, `0a100d9` the initial commit)
+> - Last commit: `429febd feat(plugins): auto-install Oxygen/Breakdance from a private GitHub
+>   release cache` (on top of `bdca857` the MCP fix, `f03f264`/`e3be156` earlier handoff
+>   commits, `0a100d9` the initial commit)
 > - Uncommitted: NONE as of this edit
 > - To get current state: `git clone https://github.com/briansmith80/katalyst-laragon.git`
 >   then check `git log` — this file may be ahead of what's pushed, see above
+> - **New external dependency this session:** a second, private repo
+>   `briansmith80/oxygen-premium-plugins` (releases only, no code) now holds the licensed
+>   Oxygen/Breakdance zips this tool pulls from. Keep it private — commercial plugin zips.
 
 ## Context & Gotchas
 > - **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
