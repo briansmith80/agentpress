@@ -15,10 +15,15 @@ handoff_reason: switching-machines
 > A full, working port of [soflyy/katalystwp](https://github.com/soflyy/katalystwp) (a
 > Docker-based WordPress+AI-agent scaffolder) to run natively on Laragon (Windows, no
 > Docker) is built, live-tested end-to-end on this machine, and pushed to a **private**
-> GitHub repo. It works for scaffolding real sites on *this* machine right now. The single
-> most important next action: **decide what "packagable for other users" means** (npm
-> publish? support Nginx? just validate on a second machine first?) — that question was
-> open, unanswered, when this session ended. See "Open Questions" below.
+> GitHub repo. **Update: second-machine validation (the home machine) is now done.** Env
+> defaults (Laragon at `C:\laragon`, Apache active, MySQL root creds) all matched with zero
+> changes needed; the known Apache-reload-staleness failure hit on the very first real run
+> and `resume` recovered it correctly, exactly as designed. One real portability bug *was*
+> found — MCP wiring for Claude/Codex silently failed on this machine (see Context &
+> Gotchas) — and it's now fixed and verified live. Current focus has shifted to **making the
+> tool easier to use** (see Next Steps) now that portability has real (good) signal behind
+> it, rather than the earlier open question of npm-publish vs. Nginx support vs. further
+> validation.
 
 ## Objective / Goal
 > Port katalystwp's developer experience — one command scaffolds a local WordPress site
@@ -47,10 +52,14 @@ handoff_reason: switching-machines
 > **Explicitly NOT done — known gaps, not oversights:**
 > - `--setup-script=` / `--dev-script=` customization hooks from the original: not ported.
 > - Agent CLIs are detected, never auto-installed (`npm i -g`) if missing.
-> - **Only ever tested on this one machine.** Two of the real bugs found during the build
->   turned out to be general Windows/Apache issues (see Gotchas), which is a good sign —
->   but there's no evidence a third, machine-specific issue isn't waiting on a different
->   Laragon install.
+> - ~~Only ever tested on this one machine~~ — **now tested on a second machine (home),
+>   2026-07-30.** Node v22.14.0, Apache (not Nginx) running, MySQL root creds all matched
+>   the tool's default assumptions with zero configuration changes. First scaffold hit the
+>   documented Apache-reload-staleness failure (expected — see Gotchas); `resume <name>`
+>   picked it up and completed correctly. One real bug surfaced: MCP wiring for Claude/Codex
+>   silently no-opped (see Gotchas — now fixed, commit `bdca857`). No `LARAGON_ROOT` or
+>   Nginx-related failures surfaced this time, though that only means this second machine
+>   happened to share the same defaults, not that those gaps are closed.
 > - `LARAGON_ROOT` is **hardcoded** to `C:\laragon` (Laragon's default install path — not
 >   detected).
 > - **Apache-only.** PHP resolution, the vhost lookup, and the Application-Passwords
@@ -172,43 +181,42 @@ handoff_reason: switching-machines
 >    hosts-file line is expected to remain (documented, intentional).
 
 ## Open Questions / Blockers
-> - **[QUESTION]** What does "packagable for other users" actually mean to the user? This
->   was asked at the very end of the session and never answered. The candidate next steps,
->   roughly ordered by effort: (a) just validate on a second machine (e.g. the home machine
->   this handoff is for) — cheapest, highest information value; (b) detect `LARAGON_ROOT`
->   instead of hardcoding it; (c) detect Nginx vs Apache and at minimum fail clearly instead
->   of confusingly; (d) publish to npm so `npm create katalyst-laragon` works for anyone.
->   Don't assume an order — ask, or use (a) as the natural first move since this handoff's
->   own purpose is "try it on a second machine."
-> - **[RISK]** Laragon's `reload` unreliability (see Gotchas) is a property of Laragon
->   itself, observed repeatedly on this one machine. Whether it's equally flaky on the home
->   machine is unknown — could make the first scaffold there confusing if this context isn't
->   read first.
-> - **[RISK]** MySQL root credential on the home machine's Laragon install is unverified —
->   if it's neither empty nor `"root"`, the first scaffold attempt there will fail clearly
->   (with instructions to set `KATALYST_MYSQL_ROOT_PASSWORD`), not silently.
+> - **[RESOLVED]** ~~What does "packagable for other users" mean?~~ Second-machine
+>   validation (2026-07-30) gave real signal: env defaults matched with zero config changes,
+>   `resume` worked correctly under a real (not staged) Apache-reload failure, and only one
+>   actual bug surfaced (MCP wiring — now fixed). That's a good sign the untested-portability
+>   risk was smaller than feared. Still open: whether a *third* machine with a non-default
+>   Laragon path or Nginx would surface the gaps that didn't trigger here — not yet closed,
+>   just not yet hit.
+> - **[NEW FOCUS]** Now shifting to **ease-of-use** rather than further portability
+>   validation — see Next Steps.
+> - **[RISK, still open]** Laragon's `reload` unreliability (see Gotchas) is a property of
+>   Laragon itself — confirmed to reproduce on a second machine too (this is what caused the
+>   first ktest1 scaffold attempt to fail, before `resume` recovered it). Not fixable from
+>   this side; already handled by detect-and-report + `resume`.
+> - **[RISK, closed]** ~~MySQL root credential on the home machine's Laragon install is
+>   unverified~~ — confirmed empty/`"root"` discovery ladder worked with no
+>   `KATALYST_MYSQL_ROOT_PASSWORD` override needed.
 
 ## Next Steps (ordered, actionable)
-> 1. [ ] On the home machine: `git clone https://github.com/briansmith80/katalyst-laragon.git`
->    into `C:\laragon\www\`, confirm Laragon is installed at the default `C:\laragon` path
->    and running Apache (not Nginx), then run `node index.js doctor`.
-> 2. [ ] Scaffold one real throwaway site there end-to-end as a second-machine validation —
->    this directly answers whether the portability gaps in "Current Status" actually matter
->    in practice, or whether this machine's defaults are common enough that it Just Works.
-> 3. [ ] Report back what broke, if anything — that's the real input needed to prioritize
->    the open question above rather than guessing at it.
-> 4. [ ] Once there's real signal from step 2-3, pick from: generalize `LARAGON_ROOT`
->    detection, add Nginx detection/support, or set up npm publish — probably in that order
->    of effort, but let the second-machine results decide.
+> 1. [x] Second-machine validation — done 2026-07-30. See Current Status / Open Questions.
+> 2. [x] MCP wiring bug found and fixed — `claude`/`codex` are npm `.cmd` shims on Windows;
+>    `spawn(shell:false)` silently failed (`ENOENT`) launching them, and the failure was
+>    swallowed rather than surfaced. Fixed by routing through `psCapture` (PowerShell) in
+>    `src/mcp.mjs`, commit `bdca857`. Verified live: `claude mcp list` now shows `wordpress`
+>    and `playwright` as Connected against a real scaffolded site.
+> 3. [ ] **Now in progress: ease-of-use pass.** The tool works correctly but has real rough
+>    edges for anyone other than its original builder — see the new "Ease-of-Use Ideas"
+>    section below for the candidate list being worked through this session.
 
 ## Git State
-> - Branch: `main` (pushed: yes, up to date with `origin/main`: yes)
-> - Last commit: `0a100d9 Initial commit: create-katalyst-laragon` (the only commit — full
->   history of *how* this was built lives in this chat session and the local plan file, not
->   in git history)
-> - Uncommitted: NONE
+> - Branch: `main` (pushed: NO as of this edit — commits below are local only on the home
+>   machine; push once the ease-of-use pass is ready to share back)
+> - Last commit: `bdca857 fix(mcp): route claude/codex CLI calls through PowerShell, not raw
+>   spawn` (on top of `e3be156` the original handoff commit, `0a100d9` the initial commit)
+> - Uncommitted: NONE as of this edit
 > - To get current state: `git clone https://github.com/briansmith80/katalyst-laragon.git`
->   (fresh clone — nothing to fetch/pull yet, this is the only commit)
+>   then check `git log` — this file may be ahead of what's pushed, see above
 
 ## Context & Gotchas
 > - **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
@@ -254,6 +262,36 @@ handoff_reason: switching-machines
 >   passwords, one-time login tokens) was deliberately **excluded** from this handoff and
 >   from git — they're per-site, regenerated on every scaffold, and live only in each site's
 >   own gitignored `.env`.
+
+> - **MCP wiring for Claude/Codex silently no-opped — found on the second machine,
+>   2026-07-30.** `configureClaude`/`configureCodex` in `mcp.mjs` called
+>   `spawn('claude', […], {shell:false})` directly. On Windows, `claude`/`codex` resolve via
+>   PATH to npm-global `.cmd` shims, not `.exe` — confirmed live: bare `spawn('claude', …)`
+>   fails with `Error: spawn claude ENOENT` (same class of issue already solved for `wp.bat`
+>   elsewhere in this codebase, just not applied here). Worse, `spawnCapture` never checked
+>   the exit code, so `sandbox.config.json` recorded `"agents": ["claude"]` even though
+>   nothing was actually registered — the failure was completely silent. Fixed by routing
+>   through `psCapture` (real `powershell.exe`, already used in `agents.mjs` for the same
+>   underlying problem) with each arg single-quoted, and by throwing on a non-zero `add`
+>   exit code. Verified live against a real site (not a unit test): `claude mcp list` went
+>   from showing nothing to showing `wordpress`/`playwright` as Connected. Commit `bdca857`.
+
+## Ease-of-Use Ideas (in progress this session)
+> Started after MCP fix + second-machine validation — the tool is *correct* but has real
+> friction for anyone other than the person who built it. Candidates being worked through,
+> roughly in order of impact:
+> - Silent-failure hardening elsewhere: `spawnCapture`'s pattern of "never throws, caller
+>   must check `.code`" is exactly what caused the MCP bug — audit other call sites in
+>   `plugins.mjs`/`wordpress.mjs`/`mysql.mjs` for the same "assumed success" gap.
+> - Friendlier `doctor` output — it should be the single place a confused user looks first;
+>   make sure it explains *what to do* for every failure mode, not just what's wrong.
+> - Reduce first-run ceremony: hosts-file permission popup, MySQL root credential ladder,
+>   WP-CLI auto-install — bundle these into one clear "first run" explanation instead of
+>   surprising the user mid-scaffold.
+> - `--yes`/non-interactive defaults and clearer progress output during the multi-minute
+>   scaffold (it currently just prints a progress line — a stuck vs. slow run looks the same).
+> - Consider whether `resume` should be auto-suggested (detected + prompted) instead of the
+>   user needing to know the command exists after a failure.
 
 ## Reference Links
 > - Repo: https://github.com/briansmith80/katalyst-laragon
