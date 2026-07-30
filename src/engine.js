@@ -25,7 +25,7 @@ import { installWordPress } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
-import { installAgentConnector, installPlugins } from './plugins.mjs';
+import { installAgentConnector, installPlugins, installPremiumPlugins, syncPremiumPluginsFromGitHub } from './plugins.mjs';
 import { detectAgents } from './agents.mjs';
 import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
@@ -325,6 +325,10 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [] }) 
   // user's own plugin selection).
   await installAgentConnector({ path: publicDir, onStep });
 
+  onStep('syncing premium plugins from GitHub…');
+  await syncPremiumPluginsFromGitHub({ onStep });
+  const premiumPlugins = await installPremiumPlugins({ path: publicDir, onStep });
+
   onStep('detecting AI agent CLIs…');
   const detected = await detectAgents();
   const configuredAgents = [];
@@ -357,6 +361,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [] }) 
   const sandboxConfigPath = join(projectDir, 'sandbox.config.json');
   const sandboxConfig = JSON.parse(await readFile(sandboxConfigPath, 'utf8'));
   if (extraPlugins.length) sandboxConfig.plugins = extraPlugins;
+  if (premiumPlugins.length) sandboxConfig.premiumPlugins = premiumPlugins;
   sandboxConfig.agents = configuredAgents;
   await writeFile(sandboxConfigPath, `${JSON.stringify(sandboxConfig, null, 2)}\n`, 'utf8');
 

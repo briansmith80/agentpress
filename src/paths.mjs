@@ -16,6 +16,7 @@ export const WP_CLI_CACHE_DIR = join(KATALYST_HOME, 'cache');
 export const BACKUPS_DIR = join(KATALYST_HOME, 'backups');
 export const SCAFFOLD_LOCK_PATH = join(KATALYST_HOME, 'scaffold.lock');
 export const REGISTRY_PATH = join(KATALYST_HOME, 'environments.json');
+export const PREMIUM_PLUGINS_DIR = join(KATALYST_HOME, 'premium-plugins');
 export const STAGING_DIR = join(
   process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'),
   'katalyst-laragon',

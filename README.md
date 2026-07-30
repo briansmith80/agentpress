@@ -23,6 +23,33 @@ node index.js my-site --verbose    # stream full output instead of the progress 
 
 Requires Laragon running (Apache + MySQL) before scaffolding — `doctor` confirms this.
 
+### Premium plugins (Oxygen / Breakdance)
+
+Every scaffold auto-installs + activates these, no flag needed:
+
+| Plugin | Release tag |
+|---|---|
+| Oxygen | `oxygen` |
+| Breakdance Elements for Oxygen | `breakdance-elements-for-oxygen` |
+| Breakdance Forms for Oxygen | `breakdance-forms-for-oxygen` |
+
+These are commercial plugins with no public download URL, so there's nothing to fetch from
+wordpress.org — instead, each scaffold first runs `gh release download <tag> --repo
+briansmith80/oxygen-premium-plugins --dir ~/.katalyst-laragon/premium-plugins --clobber`
+(requires `gh` authenticated — already true if you've used `gh auth login`) to refresh a local
+cache at `~/.katalyst-laragon/premium-plugins/` from that private repo of licensed zips, one
+release per plugin. Override the repo with `KATALYST_PREMIUM_PLUGINS_REPO=owner/repo` if you
+have your own.
+
+If GitHub/`gh` isn't reachable, the sync step just logs it and falls through to whatever's
+already in the local cache (or skips that plugin if the cache is empty too) — it never blocks
+a scaffold. Same for a missing zip generally: a missing license shouldn't break a scaffold for
+a plugin you don't have. If more than one zip matches a plugin locally, the newest by file
+modified-time wins.
+
+Installing the plugin doesn't activate its license — if it needs one, that's still a manual
+one-time step in `wp-admin` after the scaffold finishes.
+
 ## What gets scaffolded
 
 ```
