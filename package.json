@@ -1,0 +1,21 @@
+{
+  "name": "create-katalyst-laragon",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Scaffold a local WordPress + AI-agent dev environment on Laragon (Windows, no Docker).",
+  "bin": {
+    "create-katalyst-laragon": "index.js"
+  },
+  "exports": {
+    ".": "./src/engine.js"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "template"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "GPL-2.0-or-later"
+}

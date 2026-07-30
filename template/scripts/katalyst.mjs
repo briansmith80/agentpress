@@ -1,0 +1,306 @@
+#!/usr/bin/env node
+// The per-site interactive menu. Dependency-free by design (no npm installs
+// required to run this) and frozen at scaffold time — `npx
+// create-katalyst-laragon@latest update` is the only thing that refreshes
+// it. Apache/MySQL are shared by every Laragon site, always-on, so unlike
+// the Docker original this menu never starts or stops anything itself.
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { emitKeypressEvents } from 'node:readline';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+
+const VERSION = '__KATALYST_VERSION__';
+const CWD = process.cwd();
+const ENV_PATH = join(CWD, '.env');
+const LOCK_PATH = join(CWD, '.katalyst.lock');
+const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
+
+if (!existsSync(ENV_PATH)) {
+  console.error('✖ No .env here — run this from your katalyst-laragon site directory.');
+  process.exit(1);
+}
+
+function parseEnv(text) {
+  const out = {};
+  for (const line of text.split('\n')) {
+    const m = line.match(/^([A-Z_]+)=(.*)$/);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+const env = parseEnv(readFileSync(ENV_PATH, 'utf8'));
+let cfg = { agents: [] };
+try {
+  cfg = JSON.parse(readFileSync(join(CWD, 'sandbox.config.json'), 'utf8'));
+} catch {
+  // optional file
+}
+
+const HOST = env.SITE_HOST || 'localhost';
+const SITE = `http://${HOST}`;
+
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && !process.env.CI;
+const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;255;45;120m' : '\x1b[38;5;198m';
+const pink = (s) => (COLOR ? `${PINK}${s}\x1b[39m` : s);
+const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
+const link = (url) => (process.stdout.isTTY ? pink(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`) : url);
+
+function openBrowser(url) {
+  if (process.env.KATALYST_NO_OPEN) {
+    console.log(`  ${dim('Open:')} ${url}`);
+    return;
+  }
+  try {
+    spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+  } catch {
+    console.log(`  ${dim('Open:')} ${url}`);
+  }
+}
+
+function openTerminalHere() {
+  try {
+    spawn('cmd', ['/c', 'start', 'cmd', '/k', `cd /d "${CWD}"`], { detached: true, stdio: 'ignore' }).unref();
+  } catch {
+    console.log(`  cd ${CWD}`);
+  }
+}
+
+// One-click already-logged-in wp-admin, via the Agent Connector's
+// AdminLoginLink ability. Duplicated here (rather than imported) on
+// purpose — this file has to stay dependency-free and runnable with zero
+// npm installs, so it carries its own small copy of this PHP payload, same
+// as create-katalyst-laragon's own src/admin-login.mjs and the Docker
+// original's three-copy pattern (documented there as intentional).
+const ADMIN_LOGIN_PHP = `
+$admins = get_users(array('role' => 'administrator', 'number' => 1, 'orderby' => 'ID'));
+$u = $admins ? $admins[0] : null;
+if (!$u) { fwrite(STDERR, 'no administrator user'); exit(1); }
+$cls = 'AgentConnectorForWp\\\\DefaultAbilities\\\\Services\\\\AdminLoginLink';
+if (!class_exists($cls)) { fwrite(STDERR, 'abilities plugin (admin login) not active'); exit(1); }
+$r = $cls::create($u->ID, 'index.php', 300);
+if (is_wp_error($r)) { fwrite(STDERR, $r->get_error_message()); exit(1); }
+echo $r['login_url'];
+`;
+
+/**
+ * Spawns the `wp` shim (installed on PATH by create-katalyst-laragon —
+ * usr\bin\wp.bat) via shell:true. That's the one place in this file that
+ * needs shell:true rather than a direct .exe spawn — but the only dynamic
+ * argument is a temp-file path we generate ourselves, nothing untrusted, so
+ * the cmd.exe quoting risk that matters elsewhere doesn't apply here.
+ */
+function runWpEvalFile(phpCode) {
+  return new Promise((resolve) => {
+    const tmpFile = join(tmpdir(), `katalyst-eval-${randomBytes(6).toString('hex')}.php`);
+    // eval-file needs an actual <?php tag (unlike `wp eval`) — content
+    // outside one is literal output, not executed.
+    const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
+    writeFileSync(tmpFile, content, 'utf8');
+    const child = spawn('wp', ['eval-file', tmpFile, `--path=${join(CWD, 'public')}`], { shell: true });
+    let stdout = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.on('close', (code) => {
+      try {
+        unlinkSync(tmpFile);
+      } catch {
+        // best-effort
+      }
+      resolve({ code, stdout });
+    });
+    child.on('error', () => resolve({ code: null, stdout: '' }));
+  });
+}
+
+/** Links are one-time — mint fresh on every pick, never cache. Falls back to the plain login form if anything's off (matches the scaffolder's own admin-login.mjs). */
+async function adminUrl() {
+  const { code, stdout } = await runWpEvalFile(ADMIN_LOGIN_PHP);
+  const out = stdout.trim();
+  if (code === 0 && /acfw_login=/.test(out)) {
+    try {
+      const u = new URL(out);
+      u.hostname = HOST;
+      u.port = '';
+      return u.toString();
+    } catch {
+      // fall through
+    }
+  }
+  return `${SITE}/wp-admin`;
+}
+
+// --- single-instance lock ---
+// Fixed vs. the Docker original: it probed a stale lock's liveness with
+// `ps -o tty=,etime=,command=`, which is POSIX-only. On Windows that returns
+// nothing, and the original code then treated "no detail" as "assume the
+// lock is real" — wedging the menu forever after a crash. process.kill(pid,
+// 0) is cross-platform (throws ESRCH if the pid is gone, EPERM if alive but
+// not ours), needs no spawn, and has no locale dependency. A wall-clock max
+// age guards against PID reuse.
+const LOCK_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+let lockOwned = false;
+try {
+  const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
+  const age = Date.now() - (existing.startedAt ? Date.parse(existing.startedAt) : 0);
+  if (existing.pid !== process.pid && isPidAlive(existing.pid) && age < LOCK_MAX_AGE_MS) {
+    console.error(`✖ Another katalyst menu (pid ${existing.pid}) already appears to be running here.`);
+    process.exit(1);
+  }
+} catch {
+  // no lock, or unreadable — proceed
+}
+writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+lockOwned = true;
+process.on('exit', () => {
+  if (lockOwned) {
+    try {
+      unlinkSync(LOCK_PATH);
+    } catch {
+      // already gone
+    }
+  }
+});
+
+// --- non-interactive short-circuit ---
+if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  console.log(`WordPress  ${SITE}`);
+  console.log(`Admin      ${SITE}/wp-admin`);
+  console.log('Interactive menu needs a terminal. Commands: npm run wp -- <cmd>');
+  process.exit(0);
+}
+
+/**
+ * Hand-rolled arrow-key select — pure readline raw-mode, no dependency.
+ * Node's keypress parser handles the same escape sequences regardless of
+ * OS, so this needs no Windows-specific branching. Number keys 1-9 jump
+ * straight to that option, matching the Docker original's shortcut.
+ */
+async function choose(message, options) {
+  return new Promise((resolve) => {
+    let cursor = 0;
+    let renderedLines = 0;
+    const render = (final) => {
+      if (renderedLines > 0) process.stdout.write(`\x1b[${renderedLines}A\x1b[J`);
+      const rows = [`${pink('?')} ${message}`];
+      if (final) {
+        rows.push(`${dim('>')} ${options[cursor].label}`);
+      } else {
+        rows.push('');
+        options.forEach((o, i) => {
+          const marker = i === cursor ? pink('>') : ' ';
+          const label = i === cursor ? pink(o.label) : o.label;
+          rows.push(`${marker} ${label}${o.hint ? `  ${dim(o.hint)}` : ''}`);
+        });
+      }
+      process.stdout.write(`${rows.join('\n')}\n`);
+      renderedLines = rows.length;
+    };
+    const finish = (value, final) => {
+      render(final);
+      process.stdin.removeListener('keypress', onKey);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      resolve(value);
+    };
+    const onKey = (str, key) => {
+      if (!key) return;
+      if (key.ctrl && key.name === 'c') return finish(null, false);
+      if (key.name === 'up' || key.name === 'left' || (key.shift && key.name === 'tab')) {
+        cursor = (cursor + options.length - 1) % options.length;
+      } else if (key.name === 'down' || key.name === 'right' || key.name === 'tab') {
+        cursor = (cursor + 1) % options.length;
+      } else if (key.name === 'return') {
+        return finish(options[cursor].value, true);
+      } else if (key.name === 'escape') {
+        return finish(null, false);
+      } else if (/^[1-9]$/.test(str || '') && Number(str) <= options.length) {
+        cursor = Number(str) - 1;
+        return finish(options[cursor].value, true);
+      }
+      render(false);
+    };
+    emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('keypress', onKey);
+    render(false);
+  });
+}
+
+function runInherit(cmd, args = []) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // Agent CLIs installed by their own native installers are real .exe
+      // files (confirmed for Claude Code on this machine) — shell:true is
+      // still used here as a pragmatic default since `cmd` is always one of
+      // our own small hardcoded set, never user input.
+      child = spawn(cmd, args, { cwd: CWD, stdio: 'inherit', shell: true });
+    } catch {
+      resolve();
+      return;
+    }
+    child.on('close', () => resolve());
+    child.on('error', () => resolve());
+  });
+}
+
+async function checkUpdate() {
+  if (process.env.KATALYST_NO_UPDATE_CHECK) return null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/create-katalyst-laragon/latest', {
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.version && data.version !== VERSION ? data.version : null;
+  } catch {
+    return null;
+  }
+}
+
+console.log(`\n  WordPress  ${link(SITE)}`);
+console.log(`  Admin      ${link(`${SITE}/wp-admin`)}`);
+console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
+console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
+
+const latestVersion = await checkUpdate();
+console.log(`Welcome to katalyst-laragon v${VERSION}.\n`);
+
+for (;;) {
+  const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
+  const options = [
+    { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
+    { value: 'site', label: 'Open the site', hint: 'front end' },
+    ...agents.map((a) => ({ value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}` })),
+    { value: 'shell', label: 'Open a terminal here' },
+    ...(latestVersion ? [{ value: 'update', label: 'Update katalyst-laragon', hint: `v${VERSION} → v${latestVersion}` }] : []),
+    { value: 'exit', label: 'Exit' },
+  ];
+  const choice = await choose('What would you like to do?', options);
+
+  if (choice === null || choice === 'exit') {
+    console.log(`\n${dim('cd')} ${CWD} ${dim('&& npm run katalyst')} to come back.\n`);
+    process.exit(0);
+  } else if (choice === 'admin') {
+    openBrowser(await adminUrl());
+  } else if (choice === 'site') {
+    openBrowser(SITE);
+  } else if (choice === 'shell') {
+    openTerminalHere();
+  } else if (choice === 'update') {
+    console.log(`  Run: npx create-katalyst-laragon@${latestVersion} update`);
+  } else if (choice.startsWith('agent:')) {
+    await runInherit(choice.slice('agent:'.length));
+  }
+}

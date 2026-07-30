@@ -1,0 +1,5 @@
+.env
+.katalyst.lock
+/public/wp-content/uploads/
+/public/wp-content/upgrade/
+*.log
