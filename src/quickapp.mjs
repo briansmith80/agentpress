@@ -12,7 +12,9 @@ const ENTRY_NAME = 'KatalystWP';
 // the previous `npx create-katalyst-laragon %s` pointed at an npm package
 // that has never been published, so the tray entry 404'd for everyone.
 const INDEX_JS = fileURLToPath(new URL('../index.js', import.meta.url));
-const ENTRY_LINE = `${ENTRY_NAME}=node "${INDEX_JS}" %s --yes`;
+// %s quoted: an unquoted multi-word entry ("my site") would otherwise split
+// into two argv entries and silently scaffold a site named "my".
+const ENTRY_LINE = `${ENTRY_NAME}=node "${INDEX_JS}" "%s" --yes`;
 
 export async function registerQuickApp() {
   let content;

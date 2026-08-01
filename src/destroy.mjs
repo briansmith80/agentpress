@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
 import { removeDirSafely } from './junctions.mjs';
-import { dropDatabase, resolveRootCredential } from './mysql.mjs';
+import { dropDatabase, parseDbHost, resolveRootCredential } from './mysql.mjs';
 import { runWp } from './wp.mjs';
 import { psRun } from './win.mjs';
 import { WWW_DIR } from './paths.mjs';
@@ -68,10 +68,13 @@ async function removeMcpEntries(agents, siteHostname, onStep) {
       );
     } else {
       const r1 = await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
-      const r2 = await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
-      if (commandNeverRan(r1) || commandNeverRan(r2)) {
-        onStep?.(`  (claude CLI not runnable — MCP entries left in place: ${(r1.stderr || r2.stderr || '').trim().split('\n')[0]})`);
+      if (commandNeverRan(r1)) {
+        onStep?.(`  (claude CLI not runnable — MCP entries left in place: ${(r1.stderr || '').trim().split('\n')[0]})`);
       } else {
+        const r2 = await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
+        if (commandNeverRan(r2)) {
+          onStep?.('  (removed the wordpress MCP entry, but the playwright removal failed — remove it by hand with: claude mcp remove playwright --scope user)');
+        }
         removed.push('claude');
       }
     }
@@ -157,13 +160,22 @@ export async function destroySite({ projectDir, onStep }) {
   }
 
   let dbDropped = false;
+  let dbSkipReason = env.DB_NAME && env.DB_USER ? null : 'no database recorded in .env';
   if (env.DB_NAME && env.DB_USER) {
     onStep?.('dropping the database…');
-    const cred = await resolveRootCredential();
-    if (cred) {
-      const result = await dropDatabase(env.DB_NAME, env.DB_USER, cred);
+    // Target the server the site was PROVISIONED on (.env's DB_HOST carries
+    // host:port) — resolving against the current process's default port
+    // could silently miss the right server, or drop against a different one.
+    const target = parseDbHost(env.DB_HOST);
+    const cred = await resolveRootCredential(target);
+    if (!cred) {
+      dbSkipReason = `could not resolve MySQL root credentials for ${target.host}:${target.port} — the database ${env.DB_NAME} was NOT dropped (is MySQL running? set KATALYST_MYSQL_ROOT_PASSWORD if root has a custom password)`;
+      onStep?.(`  (${dbSkipReason})`);
+    } else {
+      const result = await dropDatabase(env.DB_NAME, env.DB_USER, cred, target);
       if (result.code !== 0) {
-        onStep?.(`  (drop database failed: ${(result.stderr || result.stdout).trim()})`);
+        dbSkipReason = `drop database failed: ${(result.stderr || result.stdout).trim()}`;
+        onStep?.(`  (${dbSkipReason})`);
       } else {
         dbDropped = true;
       }
@@ -185,5 +197,5 @@ export async function destroySite({ projectDir, onStep }) {
   }
   await removeDirSafely(projectDir);
 
-  return { removedAgents, dbDropped, hostname: env.SITE_HOST || vhost?.hostname || null };
+  return { removedAgents, dbDropped, dbSkipReason, hostname: env.SITE_HOST || vhost?.hostname || null };
 }

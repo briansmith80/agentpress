@@ -18,7 +18,10 @@ const LOCK_PATH = join(CWD, '.katalyst.lock');
 // Absolute path baked in at scaffold time — usr\bin is only on PATH when
 // Laragon's "Add to Path" was applied on this machine, so a bare `wp` is
 // not a safe assumption. Falls back to PATH if the file has moved.
-const WP_BAT = '__WP_BAT_ESCAPED__';
+// Double-quoted literal on purpose: `'` is legal in Windows paths (a
+// user-profile Laragon under O'Brien), `"` is not — so this can never
+// break, while a single-quoted literal could.
+const WP_BAT = "__WP_BAT_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
 
 if (!existsSync(ENV_PATH)) {
@@ -106,7 +109,11 @@ function runWpEvalFile(phpCode) {
     const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
     writeFileSync(tmpFile, content, 'utf8');
     const wpCmd = existsSync(WP_BAT) ? `"${WP_BAT}"` : 'wp';
-    const child = spawn(wpCmd, ['eval-file', tmpFile, `--path=${join(CWD, 'public')}`], { shell: true });
+    // Every dynamic arg is quoted: with shell:true Node joins args unquoted
+    // into the cmd.exe line, so an unquoted tmp path breaks the moment TEMP
+    // contains a space (any "First Last" Windows username). wp-cli parses
+    // quoted --path="..." fine.
+    const child = spawn(wpCmd, ['eval-file', `"${tmpFile}"`, `--path="${join(CWD, 'public')}"`], { shell: true });
     let stdout = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.on('close', (code) => {

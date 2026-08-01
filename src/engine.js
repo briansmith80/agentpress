@@ -105,42 +105,59 @@ export function parseArgs(argv) {
  * Self-heals stale locks: Ctrl+C during the multi-minute reload wait (the
  * natural user action) kills the process before any finally runs, and every
  * interrupted run used to cost a manual file deletion. A lock whose recorded
- * pid is dead, or that is older than 30 minutes, is stolen with a note.
- * The returned release also detaches the SIGINT handler it installs.
+ * pid is DEAD is stolen with a note; a live pid is never stolen, however old
+ * the lock. The returned release also detaches the SIGINT handler it
+ * installs.
  */
 async function acquireScaffoldLock() {
   await mkdir(KATALYST_HOME, { recursive: true });
+  const contention = () =>
+    new Error(
+      `Another scaffold appears to be running (lock at ${SCAFFOLD_LOCK_PATH}).\n` +
+        `If nothing is actually running, delete that file and try again.`,
+    );
   let handle;
   try {
     handle = await open(SCAFFOLD_LOCK_PATH, 'wx');
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
+    // Steal ONLY when the recorded pid is dead. Age alone must not steal —
+    // scaffolds legitimately exceed 30 minutes (unattended UAC stall on the
+    // hosts write, slow WordPress/plugin downloads), and stealing a live
+    // run's lock recreates exactly the concurrent-reload hazard the lock
+    // exists to prevent. EPERM from kill(pid, 0) means the process EXISTS
+    // (elevated/another session) — that's alive, not dead (same logic as
+    // template/scripts/katalyst.mjs's isPidAlive). An unreadable/empty lock
+    // that is only seconds old is a concurrent acquirer mid-write, not
+    // debris — the open('wx')+writeFile pair isn't atomic.
     let stale = false;
     try {
-      const lock = JSON.parse(await readFile(SCAFFOLD_LOCK_PATH, 'utf8'));
-      const ageMs = Date.now() - Date.parse(lock.startedAt || 0);
-      let pidAlive = false;
+      const raw = await readFile(SCAFFOLD_LOCK_PATH, 'utf8');
+      const lock = JSON.parse(raw);
+      let pidAlive;
       try {
         process.kill(lock.pid, 0);
         pidAlive = true;
-      } catch {
-        pidAlive = false;
+      } catch (killErr) {
+        pidAlive = killErr.code === 'EPERM';
       }
-      stale = !pidAlive || !(ageMs < 30 * 60 * 1000);
+      stale = !pidAlive;
       if (stale) {
         console.log(`  (removing stale scaffold lock from pid ${lock.pid ?? '?'}, started ${lock.startedAt ?? 'unknown'})`);
       }
     } catch {
-      stale = true; // unreadable lock — treat as debris
+      const ageMs = Date.now() - (await stat(SCAFFOLD_LOCK_PATH).then((s) => s.mtimeMs).catch(() => 0));
+      stale = ageMs > 10_000; // unreadable AND older than the write window — debris
     }
-    if (!stale) {
-      throw new Error(
-        `Another scaffold appears to be running (lock at ${SCAFFOLD_LOCK_PATH}).\n` +
-          `If nothing is actually running, delete that file and try again.`,
-      );
-    }
+    if (!stale) throw contention();
     await rm(SCAFFOLD_LOCK_PATH, { force: true });
-    handle = await open(SCAFFOLD_LOCK_PATH, 'wx');
+    try {
+      handle = await open(SCAFFOLD_LOCK_PATH, 'wx');
+    } catch (retakeErr) {
+      // Lost the steal race to another process — it holds the lock now.
+      if (retakeErr.code === 'EEXIST') throw contention();
+      throw retakeErr;
+    }
   }
   await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2));
   await handle.close();
@@ -163,9 +180,10 @@ async function acquireScaffoldLock() {
 
 let warnedAboutReloadThisSession = false;
 
-/** The one-liner every interrupted-scaffold failure path must end with — resume exists precisely for these states, but nobody finds it in the README mid-failure. */
-function resumeHint(name) {
-  return `\n  When the site responds again, finish the install with: ${CLI} resume ${name}`;
+/** The one-liner every interrupted-scaffold failure path must end with — resume exists precisely for these states, but nobody finds it in the README mid-failure. Echo --plugins so a retried run doesn't silently drop the original request. */
+function resumeHint(name, extraPlugins = []) {
+  const pluginsFlag = extraPlugins.length ? ` --plugins=${extraPlugins.join(',')}` : '';
+  return `\n  When the site responds again, finish the install with: ${CLI} resume ${name}${pluginsFlag}`;
 }
 
 async function confirmScaffold(name, hostname) {
@@ -191,14 +209,14 @@ async function confirmScaffold(name, hostname) {
  * Prints an actionable config-syntax check when Apache genuinely won't come
  * back on its own.
  */
-async function reportApacheStillDown(name, hostname) {
+async function reportApacheStillDown(name, hostname, extraPlugins = []) {
   const test = await testApacheConfig();
   bail(
     `✖ Apache is still down.${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
       `  Start it in Laragon (Start All), then check http://${hostname} — the folder,\n` +
       '  vhost, and hosts entry this run already produced are left in place.\n' +
       '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-      resumeHint(name),
+      resumeHint(name, extraPlugins),
   );
 }
 
@@ -237,7 +255,12 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     const hasEnv = hasFolder && (await fileExists(join(projectDir, '.env')));
     const hasSandbox = hasFolder && (await fileExists(join(projectDir, 'sandbox.config.json')));
     if (hasFolder && !hasEnv) {
-      console.log(`\n  This looks like an interrupted scaffold — try: ${CLI} resume ${name}`);
+      const hasVhost = Boolean(await findVhostForProject(projectDir));
+      console.log(
+        hasVhost
+          ? `\n  This looks like an interrupted scaffold — try: ${CLI} resume ${name}`
+          : `\n  This looks like an interrupted scaffold with no vhost yet — open Laragon, click\n  Reload, wait for it to settle, then run: ${CLI} resume ${name}`,
+      );
     } else if (hasFolder && hasEnv && !hasSandbox) {
       console.log(`\n  This looks like a scaffold that failed near the end — try: ${CLI} resume ${name}`);
     } else if (hasFolder && hasEnv) {
@@ -320,7 +343,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     if (pollResult.hostname) hostname = pollResult.hostname;
 
     if (!pollResult.ok && pollResult.reason === 'apache-down') {
-      await reportApacheStillDown(name, hostname);
+      await reportApacheStillDown(name, hostname, extraPlugins);
       return;
     }
     if (!pollResult.ok) {
@@ -331,7 +354,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
           hostname +
           ' once it settles.\n' +
           '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-          resumeHint(name),
+          resumeHint(name, extraPlugins),
       );
       return;
     }
@@ -361,8 +384,8 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       triggerReload();
       const repoll = await pollForVhost(projectDir, hostname, { timeoutMs: 60_000 });
       if (!repoll.ok) {
-        if (repoll.reason === 'apache-down') await reportApacheStillDown(name, hostname);
-        else bail(`✖ Retry reload did not complete (reason: ${repoll.reason}).${resumeHint(name)}`);
+        if (repoll.reason === 'apache-down') await reportApacheStillDown(name, hostname, extraPlugins);
+        else bail(`✖ Retry reload did not complete (reason: ${repoll.reason}).${resumeHint(name, extraPlugins)}`);
         return;
       }
       await sleep(3000);
@@ -378,7 +401,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
             hostname +
             '.\n' +
             '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-            resumeHint(name),
+            resumeHint(name, extraPlugins),
         );
         return;
       }
@@ -580,6 +603,13 @@ async function resumeCommand(name, { flags = {} } = {}) {
   }
 
   const state = await preflight();
+  if (!state.laragonInstalled) {
+    bail(
+      '✖ No laragon.exe found under the resolved Laragon root. If Laragon is installed somewhere\n' +
+        '  unusual, set KATALYST_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.',
+    );
+    return;
+  }
   if (!state.laragonRunning) {
     bail('✖ Laragon is not running. Start it and try again.');
     return;
@@ -599,7 +629,16 @@ async function resumeCommand(name, { flags = {} } = {}) {
 
   const vhost = await findVhostForProject(projectDir);
   if (!vhost) {
-    bail(`✖ No vhost found for ${projectDir} — this doesn't look like an interrupted scaffold. Use the normal scaffold command instead.`);
+    // The folder exists (checked above) but Laragon hasn't generated its
+    // vhost — an interrupted scaffold killed before the reload finished.
+    // Pointing back at the scaffold command would just loop (it collides on
+    // the folder and points here); the actual fix is a Laragon reload,
+    // which generates vhosts for existing www\ folders.
+    bail(
+      `✖ No vhost exists yet for ${projectDir}.\n` +
+        '  Open Laragon and click Reload (it generates vhosts for folders in www\\), wait for it\n' +
+        '  to settle, then retry this same resume command.',
+    );
     return;
   }
   const { suffix } = await inferHostnameSuffix();
@@ -763,9 +802,10 @@ async function destroyCommand({ yes }) {
 
   console.log(
     `\n✓ Destroyed.${result.removedAgents.length ? ` MCP entries removed for: ${result.removedAgents.join(', ')}.` : ''}` +
-      `${result.dbDropped ? ' Database dropped.' : ' (no database to drop — .env had none)'}\n` +
+      `${result.dbDropped ? ' Database dropped.' : ` (database not dropped: ${result.dbSkipReason})`}\n` +
       (result.hostname ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` : ''),
   );
+  if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
 }
 
 async function fileExists(p) {
@@ -798,15 +838,18 @@ function printUsage() {
   console.log(`
 create-katalyst-laragon v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
 
-Run from this tool's checkout (${ENGINE_DIR}):
+From this tool's checkout (${ENGINE_DIR}):
 
   node index.js doctor              Check this machine's Laragon/PHP/MySQL/Node state
-  node index.js <name>              Scaffold a WordPress site at http://<name>.test
+  node index.js <name>              Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
   node index.js resume <name>       Finish an interrupted scaffold (vhost already up)
   node index.js list                List scaffolded sites
-  node index.js update              Refresh Katalyst's own tooling (run from a site dir)
-  node index.js destroy             Permanently remove a site (run from its directory)
   node index.js register-quick-app  Add a Laragon Quick app entry for this tool
+
+From inside a scaffolded site's directory (using the full path to this checkout):
+
+  ${CLI} update      Refresh Katalyst's own tooling files
+  ${CLI} destroy     Permanently remove that site
 
 Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2  (wordpress.org slugs or .zip URLs)
 Env:   KATALYST_LARAGON_ROOT  KATALYST_MYSQL_ROOT_PASSWORD  KATALYST_MYSQL_PORT  KATALYST_PREMIUM_PLUGINS_REPO
@@ -815,6 +858,25 @@ Env:   KATALYST_LARAGON_ROOT  KATALYST_MYSQL_ROOT_PASSWORD  KATALYST_MYSQL_PORT 
 
 const KNOWN_FLAGS = new Set(['plugins']);
 const KNOWN_COMMANDS = new Set(['doctor', 'list', 'resume', 'update', 'destroy', 'register-quick-app', 'help', 'version']);
+
+function editDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+/** Anything not a known command becomes a SITE NAME and scaffolds — warn when it smells like a typo'd command instead. */
+function closestCommand(word) {
+  for (const cmd of KNOWN_COMMANDS) {
+    if (editDistance(word.toLowerCase(), cmd) <= 2 && word.toLowerCase() !== cmd) return cmd;
+  }
+  return null;
+}
 
 export async function create({ argv = process.argv.slice(2) } = {}) {
   const args = parseArgs(argv);
@@ -877,6 +939,10 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command) {
+    const close = closestCommand(args.command);
+    if (close) {
+      console.log(`⚠ "${args.command}" looks like a mistyped command (did you mean "${close}"?) — treating it as a SITE NAME to scaffold.`);
+    }
     await scaffoldSite(args.command, { flags: args.flags, yes: args.yes });
     return;
   }

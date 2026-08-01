@@ -23,8 +23,8 @@ Codex, OpenCode), and a one-click already-logged-in wp-admin link.
 **Install**
 
 ```bash
-# Clone anywhere EXCEPT into C:\laragon\www — Laragon would give the tool
-# folder its own vhost on the next reload.
+# Clone anywhere EXCEPT into Laragon's www folder (C:\laragon\www by default) —
+# Laragon would give the tool folder its own vhost on the next reload.
 git clone https://github.com/briansmith80/katalyst-laragon.git
 cd katalyst-laragon
 node index.js doctor    # always run this first — ends with "Ready to scaffold: YES/NO"
@@ -57,18 +57,26 @@ Then, per site you want refreshed: `cd` into the site directory and run
 
 ## Usage
 
+From the tool's checkout:
+
 ```bash
-node index.js <name>              # scaffold a WordPress site at http://<name>.test
+node index.js <name>              # scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
 node index.js resume <name>        # finish an interrupted scaffold
 node index.js doctor               # check this machine's Laragon/PHP/MySQL/Node state
 node index.js list                 # list scaffolded sites
-node index.js update               # refresh a site's Katalyst-owned files (run from its dir)
-node index.js destroy              # permanently remove a site (run from its dir)
 node index.js register-quick-app   # add a Laragon Quick app entry for this tool
 
 # flags
 node index.js my-site --plugins=akismet,seo-by-rank-math
 node index.js my-site --yes        # non-interactive (skips the confirmation prompt)
+```
+
+From inside a scaffolded site's directory (`node index.js` only resolves in the checkout, so
+use the full path):
+
+```bash
+node <path-to-checkout>\index.js update    # refresh the site's Katalyst-owned files
+node <path-to-checkout>\index.js destroy   # permanently remove the site
 ```
 
 Environment variables (all optional): `KATALYST_LARAGON_ROOT` (Laragon install folder if not
@@ -112,7 +120,7 @@ zips **private**.
 ## What gets scaffolded
 
 ```
-C:\laragon\www\<name>\
+<laragon>\www\<name>\
   public\               WordPress core (Apache's document root)
     .htaccess           permalinks + the Authorization-header fix Application Passwords need
     .user.ini           per-site PHP limits (mod_fcgid ignores .htaccess php_value)

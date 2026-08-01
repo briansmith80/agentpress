@@ -6,9 +6,9 @@ import { dirname, join, relative } from 'node:path';
 
 const RENAME = { gitignore: '.gitignore' };
 
-/** Strips or keeps `# >>> agent:<name> … # <<< agent:<name>` blocks depending on whether that agent was selected — used in package.json/README so unselected agents leave no trace. */
+/** Strips or keeps `# >>> agent:<name> … # <<< agent:<name>` blocks depending on whether that agent was selected — used in package.json/README so unselected agents leave no trace. `\r?\n` because template checkouts can be CRLF or LF depending on each clone's core.autocrlf. */
 export function applyAgentSections(content, agents) {
-  return content.replace(/[ \t]*# >>> agent:(\w+)\n([\s\S]*?)[ \t]*# <<< agent:\1\n/g, (_, name, body) =>
+  return content.replace(/[ \t]*# >>> agent:(\w+)\r?\n([\s\S]*?)[ \t\r]*# <<< agent:\1\r?\n/g, (_, name, body) =>
     agents.includes(name) ? body : '',
   );
 }
@@ -43,7 +43,10 @@ export async function copyTemplates(srcDir, destDir, vars, { skip = new Set(), a
     let content = await readFile(join(srcDir, relPath), 'utf8');
     content = applyAgentSections(content, agents);
     for (const [key, value] of Object.entries(vars)) {
-      content = content.replaceAll(`__${key}__`, value);
+      // Function form disables $-pattern expansion in the replacement —
+      // a literal `$&` in a value (legal in Windows dir names) would
+      // otherwise re-insert the token into the rendered file.
+      content = content.replaceAll(`__${key}__`, () => value);
     }
     await writeFile(destPath, content, 'utf8');
   }
@@ -61,7 +64,7 @@ export async function copyTemplates(srcDir, destDir, vars, { skip = new Set(), a
 export async function mergePackageJson(templatePath, targetPath, vars) {
   let rendered = await readFile(templatePath, 'utf8');
   for (const [key, value] of Object.entries(vars)) {
-    rendered = rendered.replaceAll(`__${key}__`, value);
+    rendered = rendered.replaceAll(`__${key}__`, () => value);
   }
   const tpl = JSON.parse(rendered);
   let existing = {};
@@ -75,7 +78,10 @@ export async function mergePackageJson(templatePath, targetPath, vars) {
   for (const [key, value] of Object.entries(existing.scripts || {})) {
     if (!known.has(key)) scripts[key] = value;
   }
-  const merged = { ...existing, ...tpl, scripts };
-  if (existing.name) merged.name = existing.name;
+  // Template supplies DEFAULTS, existing user fields WIN (version,
+  // description, dependencies, ...) — the tool only owns `scripts`. The
+  // previous ...existing-then-...tpl order silently reset a user's own
+  // version/description on every update.
+  const merged = { ...tpl, ...existing, scripts };
   await writeFile(targetPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
 }

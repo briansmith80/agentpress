@@ -101,8 +101,11 @@ export async function runMysql(sql, { user, password, database, host = '127.0.0.
  * Ladder: an explicit override env var, then the two conventional local
  * defaults. Deliberately does NOT persist whatever's found — the plan
  * favors not caching root at all over a half-baked encrypted-storage story.
+ * `host`/`port` matter for destroy: the site records where it was
+ * provisioned in .env's DB_HOST, and probing the CURRENT process's default
+ * port instead could resolve credentials against a different server.
  */
-export async function resolveRootCredential() {
+export async function resolveRootCredential({ host = '127.0.0.1', port = MYSQL_PORT } = {}) {
   const candidates = [
     process.env.KATALYST_MYSQL_ROOT_PASSWORD !== undefined
       ? { password: process.env.KATALYST_MYSQL_ROOT_PASSWORD, source: 'KATALYST_MYSQL_ROOT_PASSWORD env var' }
@@ -111,10 +114,17 @@ export async function resolveRootCredential() {
     { password: 'root', source: 'password "root"' },
   ].filter(Boolean);
   for (const c of candidates) {
-    const result = await runMysql('SELECT 1;', { user: 'root', password: c.password });
+    const result = await runMysql('SELECT 1;', { user: 'root', password: c.password, host, port });
     if (result.code === 0) return c;
   }
   return null;
+}
+
+/** Splits an .env DB_HOST ("127.0.0.1" or "127.0.0.1:3307") back into connection opts. */
+export function parseDbHost(dbHost) {
+  if (!dbHost) return { host: '127.0.0.1', port: MYSQL_PORT };
+  const m = String(dbHost).match(/^(.*?)(?::(\d+))?$/);
+  return { host: m[1] || '127.0.0.1', port: m[2] ? Number(m[2]) : MYSQL_PORT };
 }
 
 /** DB names: max 64 chars. User names: max 32. Truncate + short content hash rather than blindly chopping, so two names that only differ after the cutoff don't collide. */
@@ -169,7 +179,7 @@ export async function provisionDatabase(siteName, cred) {
   return { dbName, dbUser, dbPassword, dbHost: MYSQL_PORT === 3306 ? '127.0.0.1' : `127.0.0.1:${MYSQL_PORT}` };
 }
 
-export async function dropDatabase(dbName, dbUser, cred) {
+export async function dropDatabase(dbName, dbUser, cred, { host = '127.0.0.1', port = MYSQL_PORT } = {}) {
   const sql = [`DROP DATABASE IF EXISTS \`${dbName}\`;`, `DROP USER IF EXISTS '${dbUser}'@'127.0.0.1';`].join('\n');
-  return runMysql(sql, { user: 'root', password: cred.password });
+  return runMysql(sql, { user: 'root', password: cred.password, host, port });
 }

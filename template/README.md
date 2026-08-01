@@ -37,6 +37,8 @@ cd <this site's directory>
 node <path-to-checkout>\index.js update
 ```
 
-Refreshes `scripts/`, `wp-cli.yml`, this README, and `package.json`'s own scripts (any script
-you added under a different name is preserved, and so are any dependencies you added). Never
-touches `.env`, `sandbox.config.json`, or anything under `public/`.
+Refreshes `scripts/`, `wp-cli.yml`, `.gitignore`, this README, and `package.json`'s own
+scripts (any script you added under a different name is preserved, and so are any
+dependencies you added). Never touches `.env`, `sandbox.config.json`, or anything under
+`public/`. If you hand-edited `.gitignore` or this README, re-apply those edits after
+updating.
