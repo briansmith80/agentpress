@@ -264,14 +264,34 @@ handoff_reason: switching-machines
 >    **E2E-validated live:** katalysttest3 scaffolded through the real reload-staleness
 >    failure → resume → all checks green (permalinks, .env 404, 3 premium plugins active,
 >    pinned MCP Connected, absolute-path `npm run wp` working).
-> 7. [ ] **Remaining, deliberately deferred:** collaborator invite for the friend (owner
->    action — needs their GitHub username); npm publish (revisit later; the name
->    create-katalyst-laragon is still unreserved — squat risk noted); single-global-MCP
->    limitation (documented in README, revisit if concurrent multi-site MCP ever matters);
->    Windows DNS-cache note (after Stop All → Start All a new .test host may need
->    `ipconfig /flushdns` — hit once during E2E, worth adding to the failure message
->    someday); low-severity review leftovers (Quick-app command-word names shadow
->    scaffolding, e.g. typing "doctor" in the tray dialog runs doctor).
+> 7. [x] **Instant mode + npm publish — done 2026-08-01, v0.3.0.** The two structural pain
+>    points are gone:
+>    - **Zero-reload scaffolds:** new `setup` command installs one wildcard vhost
+>      (`zzz-katalyst-wildcard.conf`, mod_vhost_alias, VirtualDocumentRoot to
+>      `www/<name>/public`, `zzz-` so exact confs win under Apache's first-match order).
+>      After ONE Apache restart ever, scaffolds skip the whole reload/poll/verify pipeline;
+>      the tool writes the hosts entry itself via one elevated PS call (declined UAC
+>      degrades to printed instructions, scaffold still completes); all probes run over
+>      loopback with a Host header (DNS-free). Validated live: `instanttest1` scaffolded
+>      start-to-finish in one command, permalinks/.htaccess working under the wildcard's
+>      `<Directory "www/*/public">` grant, all plugins + MCP green. The reload-staleness
+>      failure (3-for-3 before) is architecturally gone. Also fixed: TCP preflight probes
+>      retry before declaring a port closed (two live false "Apache not listening" bails).
+>    - **Published to npm:** `create-katalyst-laragon@0.3.0`, public registry, account
+>      `briansmith80` (2FA passkey; publishes need a real terminal for the browser
+>      confirmation — non-TTY shells get EOTP with no web fallback, learned the hard way).
+>      Friend install is now: `npx create-katalyst-laragon@latest doctor` → `setup` →
+>      `<name>`. No git, no clone, no collaborator invite needed for the tool. CLI prints
+>      npx-form advice when running from a package (verified via clean `npx -y ...@0.3.0`
+>      run); site menu's update check re-enabled; Quick-app registers the npx form when
+>      package-installed.
+> 8. [ ] **Remaining, deliberately deferred:** GitHub repo visibility (code is now public
+>    on npm anyway — making the repo public would let the friend file issues; owner's
+>    call); collaborator invite only needed if the friend should pull pre-release git
+>    states; single-global-MCP limitation (documented in README); low-severity review
+>    leftovers (Quick-app command-word names shadow scaffolding); test-site cleanup on this
+>    machine (ktest1, katalysttest2, katalysttest3, instanttest1 all still live — destroy
+>    when done testing).
 
 ## Git State
 > - Branch: `main`, pushed to `origin/main` 2026-08-01 (work machine: `git pull` to catch
