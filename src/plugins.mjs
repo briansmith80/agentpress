@@ -26,11 +26,25 @@ async function premiumPluginsRepo() {
   return DEFAULT_PREMIUM_PLUGINS_REPO;
 }
 
-/** The user's setup-time selection: absent key = all plugins (back-compat), [] = none. Exported so setup's wizard and the sync/install steps agree on one source of truth. */
-export async function selectedPremiumPlugins() {
-  const config = await loadConfig();
-  if (!Array.isArray(config.premiumPlugins)) return PREMIUM_PLUGINS;
-  return PREMIUM_PLUGINS.filter((p) => config.premiumPlugins.includes(p.slug));
+/**
+ * Availability report for the setup assistant and the scaffold-time picker:
+ * which premium plugins have a usable zip in the local cache right now.
+ * Selection is PER-PROJECT (chosen at scaffold time — a shop needs Woo, a
+ * brochure site doesn't); setup's job is only making plugins AVAILABLE.
+ */
+export async function premiumPluginAvailability() {
+  const out = [];
+  for (const plugin of PREMIUM_PLUGINS) {
+    const zip = await findLatestZip(plugin);
+    out.push({ ...plugin, available: Boolean(zip), zip });
+  }
+  return out;
+}
+
+/** Resolves a scaffold's premium selection to plugin entries; `selection` is a list of slugs (unknown slugs dropped). */
+function resolveSelection(selection) {
+  if (!Array.isArray(selection)) return PREMIUM_PLUGINS;
+  return PREMIUM_PLUGINS.filter((p) => selection.includes(p.slug));
 }
 
 // Pinned to a tested release, not /latest/ — these download at scaffold time
@@ -122,7 +136,7 @@ async function findLatestZip(plugin) {
  * so a connection killed mid-transfer can't leave a truncated zip shadowing
  * a good older one.
  */
-export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
+export async function syncPremiumPluginsFromGitHub({ selection, onStep } = {}) {
   try {
     await mkdir(PREMIUM_PLUGINS_DIR, { recursive: true });
   } catch (err) {
@@ -130,8 +144,8 @@ export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
     return;
   }
 
-  const selected = await selectedPremiumPlugins();
-  if (!selected.length) return; // user opted out of premium plugins in setup
+  const selected = resolveSelection(selection);
+  if (!selected.length) return; // this project opted out of premium plugins
 
   const ghProbe = await spawnCapture('gh', ['--version']);
   if (ghProbe.code === null) {
@@ -185,9 +199,9 @@ export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
  * the real thing. Returns the slugs actually installed and verified active,
  * for `sandbox.config.json` bookkeeping.
  */
-export async function installPremiumPlugins({ path, onStep }) {
+export async function installPremiumPlugins({ path, selection, onStep }) {
   const installed = [];
-  const selected = await selectedPremiumPlugins();
+  const selected = resolveSelection(selection);
   for (const plugin of selected) {
     const { slug, filePrefix, requires = [] } = plugin;
     if (await isPluginActive(path, slug)) {

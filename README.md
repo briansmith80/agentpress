@@ -35,11 +35,12 @@ and use `node index.js …` instead of the npx form. Zero dependencies, no `npm 
 
 `setup` does two one-time things:
 
-1. **Asks your preferences** — which premium plugins (Oxygen / the Breakdance extensions)
-   scaffolds should auto-install, and your Oxygen license key (one key covers the
-   extensions too). Answers are saved to `~/.katalyst-laragon/config.json` and used by
-   every future scaffold; re-run `setup` any time to change them (Enter keeps the current
-   answer).
+1. **Gets your premium plugins in place** — shows which ones (Oxygen / the Breakdance
+   extensions) already have a licensed zip available on this machine, opens the drop
+   folder for you and re-scans after you add zips, and captures your Oxygen license key
+   (one key covers the extensions too; saved to `~/.katalyst-laragon/config.json`).
+   Setup makes plugins **available** — you choose which ones each individual project
+   actually gets when you scaffold it.
 2. **Installs a single wildcard vhost** into Laragon's Apache. This needs one
    **Stop All → Start All** in Laragon (the only restart it will ever ask for) — run
    `setup` again afterwards to confirm it's active. From then on, scaffolding a site
@@ -90,8 +91,11 @@ auto-detected), `KATALYST_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"ro
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
-Every scaffold auto-installs + activates these three, **if** it can find a licensed zip for
-them; missing ones are skipped without breaking anything:
+Selection is **per project**: every scaffold shows the plugins that are available on your
+machine and asks which ones THIS site should get (a shop needs WooCommerce, a brochure site
+doesn't). Scripted runs control it with `--premium=all`, `--premium=none`, or
+`--premium=oxygen,breakdance-forms-for-oxygen` (`--yes` alone installs all available;
+picking an extension automatically includes Oxygen). The supported set:
 
 | Plugin slug                          | Accepted zip filenames                       |
 | ------------------------------------ | -------------------------------------------- |

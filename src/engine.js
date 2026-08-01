@@ -26,7 +26,7 @@ import { installWordPress } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
-import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, PREMIUM_PLUGINS, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
+import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, premiumPluginAvailability, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { detectAgents } from './agents.mjs';
 import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
@@ -194,6 +194,67 @@ let warnedAboutReloadThisSession = false;
 function resumeHint(name, extraPlugins = []) {
   const pluginsFlag = extraPlugins.length ? ` --plugins=${extraPlugins.join(',')}` : '';
   return `\n  When the site responds again, finish the install with: ${CLI} resume ${name}${pluginsFlag}`;
+}
+
+/**
+ * Per-PROJECT premium plugin selection — some projects need WooCommerce,
+ * most don't, so the choice belongs at scaffold time, not machine setup.
+ * Resolution order: --premium=slug1,slug2 | all | none (scripted runs) →
+ * interactive picker (available zips default Yes) → non-interactive default
+ * of "all available". Choosing an extension pulls Oxygen in with it — the
+ * extensions are inert without the builder.
+ */
+async function choosePremiumPlugins({ flagValue, yes }) {
+  const availability = await premiumPluginAvailability();
+  const available = availability.filter((p) => p.available);
+
+  if (typeof flagValue === 'string') {
+    const value = flagValue.trim().toLowerCase();
+    if (value === 'none') return [];
+    if (value === 'all') return available.map((p) => p.slug);
+    const requested = value.split(',').map((s) => s.trim()).filter(Boolean);
+    const known = new Set(availability.map((p) => p.slug));
+    const selection = requested.filter((s) => {
+      if (!known.has(s)) {
+        console.log(`⚠ Unknown premium plugin "${s}" in --premium — ignoring it.`);
+        return false;
+      }
+      return true;
+    });
+    if (selection.some((s) => s.startsWith('breakdance-')) && !selection.includes('oxygen')) selection.unshift('oxygen');
+    return selection;
+  }
+
+  if (yes || !process.stdin.isTTY) return available.map((p) => p.slug);
+
+  if (!available.length) {
+    console.log(`  (no premium plugin zips on this machine — run \`${CLI} setup\` to add them; continuing without)`);
+    return [];
+  }
+
+  console.log('\nWhich premium plugins should THIS project get?');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const selection = [];
+  try {
+    for (const plugin of availability) {
+      if (!plugin.available) {
+        console.log(`  ✖ ${plugin.label} — no zip on this machine (run setup to add it), skipping`);
+        continue;
+      }
+      const answer = (await rl.question(`  Install ${plugin.label}? [Y/n]: `)).trim();
+      if (answer === '' || /^y(es)?$/i.test(answer)) selection.push(plugin.slug);
+    }
+  } finally {
+    rl.close();
+  }
+  if (selection.some((s) => s.startsWith('breakdance-')) && !selection.includes('oxygen')) {
+    const oxygen = available.find((p) => p.slug === 'oxygen');
+    if (oxygen) {
+      console.log('  (adding Oxygen Builder — the selected extensions need it)');
+      selection.unshift('oxygen');
+    }
+  }
+  return selection;
 }
 
 async function confirmScaffold(name, hostname) {
@@ -382,6 +443,8 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   // dcotor` would stage a folder and restart Apache machine-wide.
   if (!yes && !(await confirmScaffold(name, hostname))) return;
 
+  const premiumSelection = await choosePremiumPlugins({ flagValue: typeof flags.premium === 'string' ? flags.premium : undefined, yes });
+
   const release = await acquireScaffoldLock();
   try {
     console.log(`→ Staging ${name} …`);
@@ -410,7 +473,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         return;
       }
       console.log(`✓ http://${hostname} is live (served by the wildcard vhost)`);
-      await finishInstall({ name, hostname, projectDir, extraPlugins });
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection });
       return;
     }
 
@@ -492,7 +555,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     }
 
     console.log(`✓ http://${hostname} is live and serving from public\\`);
-    await finishInstall({ name, hostname, projectDir, extraPlugins });
+    await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection });
   } catch (err) {
     bail(`✖ Scaffold failed: ${err.message}`);
     await rmWithRetry(stagingDir).catch(() => {});
@@ -515,7 +578,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
  * a Laragon reload staleness failure leaves behind, see laragon.mjs's file
  * header) doesn't need its own copy of this sequence.
  */
-async function finishInstall({ name, hostname, projectDir, extraPlugins = [] }) {
+async function finishInstall({ name, hostname, projectDir, extraPlugins = [], premiumSelection }) {
   if (!(await mysqlUp())) {
     throw new Error(`MySQL is not listening on :${MYSQL_PORT} — start it in Laragon, then retry.`);
   }
@@ -562,7 +625,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [] }) 
     'utf8',
   );
 
-  await finishExtras({ name, hostname, projectDir, extraPlugins, adminUser, adminPassword, adminEmail, siteUrl: wp.url });
+  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: wp.url });
 }
 
 /**
@@ -575,7 +638,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [] }) 
  * and re-scaffolding collided. sandbox.config.json is the real completion
  * marker; every step before it is idempotent on re-run.
  */
-async function finishExtras({ name, hostname, projectDir, extraPlugins = [], adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl }) {
+async function finishExtras({ name, hostname, projectDir, extraPlugins = [], premiumSelection, adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl }) {
   const publicDir = join(projectDir, 'public');
   const onStep = (msg) => console.log(`  … ${msg}`);
 
@@ -589,8 +652,8 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], adm
   await installAgentConnector({ path: publicDir, onStep });
 
   onStep('syncing premium plugins from GitHub…');
-  await syncPremiumPluginsFromGitHub({ onStep });
-  const premiumPlugins = await installPremiumPlugins({ path: publicDir, onStep });
+  await syncPremiumPluginsFromGitHub({ selection: premiumSelection, onStep });
+  const premiumPlugins = await installPremiumPlugins({ path: publicDir, selection: premiumSelection, onStep });
   await applyLicenses({ path: publicDir, slugs: premiumPlugins, onStep });
   await updateAllPlugins({ path: publicDir, onStep });
 
@@ -758,6 +821,13 @@ async function resumeCommand(name, { flags = {} } = {}) {
   }
   console.log(`✓ http://${hostname} is live and serving from public\\`);
 
+  // Resume finishes the job without a picker — default is every available
+  // plugin, same as a --yes scaffold; pass --premium= to override.
+  const premiumSelection = await choosePremiumPlugins({
+    flagValue: typeof flags.premium === 'string' ? flags.premium : undefined,
+    yes: true,
+  });
+
   const release = await acquireScaffoldLock();
   try {
     if (hasEnv) {
@@ -767,13 +837,14 @@ async function resumeCommand(name, { flags = {} } = {}) {
         hostname,
         projectDir,
         extraPlugins,
+        premiumSelection,
         adminUser: env.WP_ADMIN_USER || 'admin',
         adminPassword: env.WP_ADMIN_PASSWORD || '(see .env)',
         adminEmail: env.WP_ADMIN_EMAIL || 'admin@example.com',
         siteUrl: `http://${hostname}`,
       });
     } else {
-      await finishInstall({ name, hostname, projectDir, extraPlugins });
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection });
     }
   } catch (err) {
     bail(`✖ Resume failed: ${err.message}\n  Safe to retry: ${CLI} resume ${name}`);
@@ -916,48 +987,64 @@ async function fileExists(p) {
   }
 }
 
+function printAvailabilityTable(availability) {
+  console.log('\nPremium plugins on this machine:');
+  for (const p of availability) {
+    console.log(`  ${p.available ? '✓' : '✖'} ${p.label.padEnd(52)} ${p.available ? basename(p.zip) : 'no zip yet'}`);
+  }
+}
+
 /**
- * The one-time preferences wizard half of setup: which premium plugins
- * scaffolds should auto-install, and the Oxygen license key. Everything
- * lands in ~/.katalyst-laragon/config.json and every future scaffold reads
- * it from there. Re-running keeps current answers on plain Enter. TTY-only
- * — non-interactive runs keep whatever the config already says.
+ * The machine-setup assistant half of setup: gets the premium plugin ZIPS
+ * into place (with hand-holding — open the folder, re-scan after dropping
+ * files in) and captures the license key. It deliberately does NOT ask
+ * which plugins to install: that choice is per-PROJECT and happens at
+ * scaffold time (a shop needs WooCommerce, a brochure site doesn't).
+ * TTY-only — non-interactive runs change nothing.
  */
 async function setupPreferences() {
   if (!process.stdin.isTTY) return;
   const config = await loadConfig();
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    console.log('\nPremium plugins (optional — Enter keeps the current answer):');
-    const current = Array.isArray(config.premiumPlugins) ? config.premiumPlugins : PREMIUM_PLUGINS.map((p) => p.slug);
-    const chosen = [];
-    for (const plugin of PREMIUM_PLUGINS) {
-      const now = current.includes(plugin.slug);
-      const answer = (await rl.question(`  Auto-install ${plugin.label}? [${now ? 'Y/n' : 'y/N'}]: `)).trim();
-      const wanted = answer === '' ? now : /^y(es)?$/i.test(answer);
-      if (wanted) chosen.push(plugin.slug);
-    }
-    config.premiumPlugins = chosen;
-
-    if (chosen.includes('oxygen')) {
-      const existing = config.licenses?.oxygen || null;
-      const hint = existing ? `Enter keeps the saved key (${existing.slice(0, 4)}…)` : 'Enter to skip — you can activate in wp-admin instead';
-      const answer = (await rl.question(`  Oxygen license key (one key covers the extensions too; ${hint}): `)).trim();
-      if (answer) {
-        config.licenses = { ...(config.licenses || {}), oxygen: answer };
-        if (!/^[a-f0-9]{32}$/i.test(answer)) {
-          console.log('  (saved — note it does not look like the usual 32-character key, double-check if activation fails)');
-        }
+    let availability = await premiumPluginAvailability();
+    printAvailabilityTable(availability);
+    const missing = availability.filter((p) => !p.available);
+    if (missing.length) {
+      const dir = join(KATALYST_HOME, 'premium-plugins');
+      console.log(`\n  To make a plugin available, drop your licensed zip into:\n    ${dir}`);
+      console.log(`  Expected filenames: ${missing.map((p) => `${p.slug}[-*].zip`).join(', ')}`);
+      console.log('  (Or keep them in your own private GitHub releases repo — premiumPluginsRepo in config.json, see the README.)');
+      const open = (await rl.question('  Open that folder in Explorer now so you can drop zips in? [y/N]: ')).trim();
+      if (/^y(es)?$/i.test(open)) {
+        const { spawn } = await import('node:child_process');
+        await mkdir(dir, { recursive: true });
+        spawn('explorer', [dir], { detached: true, stdio: 'ignore' }).unref();
+        await rl.question('  Press Enter when you have added your zips (or Enter to continue without)… ');
+        availability = await premiumPluginAvailability();
+        printAvailabilityTable(availability);
       }
     }
 
-    await saveConfig(config);
-    const summary = chosen.length ? chosen.join(', ') : 'none';
-    console.log(`✓ Saved to ${join(KATALYST_HOME, 'config.json')} — premium plugins: ${summary}${config.licenses?.oxygen ? ', Oxygen license on file' : ''}`);
-    if (chosen.length) {
-      console.log(`  (zips: drop your licensed ${chosen.map((s) => `${s}*.zip`).join(', ')} into ${join(KATALYST_HOME, 'premium-plugins')},`);
-      console.log('   or point premiumPluginsRepo at your own private GitHub releases repo — see the README)');
+    const existing = config.licenses?.oxygen || null;
+    const hint = existing ? `Enter keeps the saved key (${existing.slice(0, 4)}…)` : 'Enter to skip — you can activate in wp-admin instead';
+    const answer = (await rl.question(`\n  Oxygen license key (one key covers all the extensions; ${hint}): `)).trim();
+    if (answer) {
+      config.licenses = { ...(config.licenses || {}), oxygen: answer };
+      if (!/^[a-f0-9]{32}$/i.test(answer)) {
+        console.log('  (saved — note it does not look like the usual 32-character key, double-check if activation fails)');
+      }
     }
+
+    // Per-project selection made this obsolete — a stale machine-wide list
+    // would silently filter the scaffold-time picker.
+    delete config.premiumPlugins;
+    await saveConfig(config);
+    const availableCount = availability.filter((p) => p.available).length;
+    console.log(
+      `✓ Saved. ${availableCount}/${availability.length} premium plugins available${config.licenses?.oxygen ? ', Oxygen license on file' : ''}.` +
+        ' You will pick which ones each project gets when you scaffold it.',
+    );
   } finally {
     rl.close();
   }
@@ -1035,12 +1122,12 @@ From inside a scaffolded site's directory:
   ${CLI} update      Refresh Katalyst's own tooling files
   ${CLI} destroy     Permanently remove that site
 
-Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2  (wordpress.org slugs or .zip URLs)
+Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
 Env:   KATALYST_LARAGON_ROOT  KATALYST_MYSQL_ROOT_PASSWORD  KATALYST_MYSQL_PORT  KATALYST_PREMIUM_PLUGINS_REPO
 `);
 }
 
-const KNOWN_FLAGS = new Set(['plugins']);
+const KNOWN_FLAGS = new Set(['plugins', 'premium']);
 const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'destroy', 'register-quick-app', 'help', 'version']);
 
 function editDistance(a, b) {
