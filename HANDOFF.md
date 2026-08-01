@@ -220,17 +220,39 @@ handoff_reason: switching-machines
 >    activation — installing ≠ licensing, Oxygen still shows `update: version higher than
 >    expected` until a license key is entered by hand in `wp-admin`; unknown whether
 >    Oxygen/Breakdance support a headless/define()-based license for automating that too.
-> 4. [ ] **Ease-of-use pass** — still the open thread. Candidates: silent-failure audit of
->    other `spawnCapture` call sites (the same swallowed-error pattern that caused the MCP
->    bug), friendlier `doctor` output, less first-run ceremony, clearer scaffold progress
->    output, auto-suggesting `resume` after a failure. See "Ease-of-Use Ideas" above.
+> 4. [x] **Full fresh-scaffold validation** — `node index.js katalysttest2 --yes` end-to-end
+>    through the real CLI (not direct function calls). Hit the real Apache-reload-staleness
+>    failure again (reproducible, not a one-off); `resume` recovered it correctly. Confirmed
+>    together in one real run: permalinks (200), `.env` blocked (404), all 3 premium plugins
+>    active, MCP wordpress/playwright Connected and correctly re-pointed at the new site.
+>    **Finding, not a bug:** MCP wiring is `--scope user` (global) — scaffolding a second site
+>    silently overwrote `ktest1`'s wordpress MCP connection. Only one site's MCP connection
+>    can be live at a time, machine-wide. Worth revisiting if multi-site concurrent MCP use
+>    ever matters (would mean per-project `--scope local`/`.mcp.json` instead).
+> 5. [x] **Ease-of-use pass, round 1: silent-failure audit.** Prompted by the MCP bug's root
+>    cause (spawnCapture never checked, callers assumed success) — audited every
+>    spawnCapture/psCapture call site in the codebase. Found two more real bugs, both in
+>    `destroy.mjs`, both now fixed (commit `f397835`):
+>    - `removeMcpEntries()` had the *exact same* `spawn('claude'/'codex', …)` shim bug as the
+>      original MCP issue, just never patched when `mcp.mjs` was fixed — `destroy` reported
+>      MCP entries removed without the removal call ever actually running. Fixed by
+>      extracting the PowerShell-invocation logic into a shared `psRun()` in `win.mjs` (used
+>      by both `mcp.mjs` and `destroy.mjs` now) instead of duplicating or missing the fix.
+>    - `dbDropped` was set unconditionally after `dropDatabase()` regardless of its exit code.
+>    Everything else (`wordpress.mjs`, `mysql.mjs`, `laragon.mjs`, `doctor.mjs`,
+>    `admin-login.mjs`, and the no-spawn modules) already checks exit codes correctly or is
+>    read-only/informational where a wrong read isn't dangerous — nothing else found.
+> 6. [ ] **Ease-of-use pass, round 2 — still open.** Remaining candidates: friendlier `doctor`
+>    output, less first-run ceremony, clearer scaffold progress output, auto-suggesting
+>    `resume` after a failure, and deciding whether the single-global-MCP-connection
+>    limitation (finding above) needs addressing.
 
 ## Git State
 > - Branch: `main` (pushed: NO as of this edit — commits below are local only on the home
 >   machine; push once the ease-of-use pass is ready to share back)
-> - Last commit: `429febd feat(plugins): auto-install Oxygen/Breakdance from a private GitHub
->   release cache` (on top of `bdca857` the MCP fix, `f03f264`/`e3be156` earlier handoff
->   commits, `0a100d9` the initial commit)
+> - Last commit: `f397835 fix(destroy): route claude/codex MCP removal through PowerShell too`
+>   (on top of `429febd` the premium-plugins feature, `bdca857` the MCP fix, `f03f264`/
+>   `e3be156` earlier handoff commits, `0a100d9` the initial commit)
 > - Uncommitted: NONE as of this edit
 > - To get current state: `git clone https://github.com/briansmith80/katalyst-laragon.git`
 >   then check `git log` — this file may be ahead of what's pushed, see above
