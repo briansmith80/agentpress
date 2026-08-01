@@ -110,9 +110,18 @@ zips. Two ways, use either or both:
    Requires `gh` installed and `gh auth login` done. When GitHub is unreachable the tool
    falls back to whatever's already in the local cache.
 
-Installing a plugin doesn't activate its license — if it needs a key, that's still a manual
-one-time step in wp-admin after the scaffold finishes. And keep any repo holding licensed
-zips **private**.
+**License auto-activation:** put your Oxygen license key in
+`~/.katalyst-laragon/config.json` once and every scaffold activates it automatically (via
+Oxygen's own `wp oxygen license` command; the Elements/Forms extensions are covered by the
+same key):
+
+```json
+{ "licenses": { "oxygen": "your-32-char-license-key" } }
+```
+
+Without a configured key, the scaffold prints a reminder and you activate once in wp-admin
+instead. Keep any repo holding licensed zips **private**, and treat `config.json` as
+private too — it holds your license key.
 
 ## What gets scaffolded
 

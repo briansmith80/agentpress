@@ -203,6 +203,50 @@ export async function installPremiumPlugins({ path, onStep }) {
 }
 
 /**
+ * Applies configured license keys after the premium plugins land. Oxygen 6
+ * ships an official WP-CLI command for this (`wp oxygen license <key>`,
+ * registered under BREAKDANCE_MODE) that stores the key AND validates it
+ * against the vendor; the Elements/Forms extensions carry no licensing of
+ * their own — one key covers all three (verified by reading the plugin
+ * source). Keys come from ~/.katalyst-laragon/config.json:
+ *   { "licenses": { "oxygen": "<32-char key>" } }
+ * (env override: KATALYST_OXYGEN_LICENSE). Best-effort, never fatal —
+ * validation needs the network, and an invalid/expired key is reported,
+ * not thrown. The key transits argv of a local shell:false spawn, same
+ * momentary-exposure acceptance as `wp config create --dbpass`.
+ */
+export async function applyLicenses({ path, slugs = [], onStep }) {
+  if (!slugs.includes('oxygen')) return;
+  let key = process.env.KATALYST_OXYGEN_LICENSE || null;
+  if (!key) {
+    try {
+      const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
+      key = config.licenses?.oxygen || null;
+    } catch {
+      // no config — nothing to apply
+    }
+  }
+  if (!key) {
+    onStep?.(`(no Oxygen license key configured — add {"licenses":{"oxygen":"<key>"}} to ${CONFIG_PATH} to auto-activate, or enter it once in wp-admin)`);
+    return;
+  }
+  onStep?.('activating the Oxygen license…');
+  const result = await runWp(['oxygen', 'license', key], { path });
+  const output = `${result.stdout}${result.stderr}`;
+  const status = output.match(/Status:\s*(.+)/)?.[1]?.trim();
+  const activation = output.match(/Activation:\s*(.+)/)?.[1]?.trim();
+  if (result.code === 0 && /Success: License key set/i.test(output)) {
+    onStep?.(`Oxygen license active${status ? ` (${status}${activation ? `, ${activation}` : ''})` : ''}`);
+  } else {
+    onStep?.(
+      `(Oxygen license key was submitted but did not validate${status ? ` — status: ${status}` : ''}; ` +
+        'check the key in wp-admin ▸ Oxygen ▸ License, or fix it in ' +
+        `${CONFIG_PATH})`,
+    );
+  }
+}
+
+/**
  * The MCP gateway (agent-connector-for-wp) + its abilities companion
  * (universal-abilities-plugin), both from GitHub release zips (not
  * wordpress.org). Guarded by `wp plugin is-active` so a git checkout a
