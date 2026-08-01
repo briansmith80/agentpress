@@ -62,16 +62,17 @@ handoff_reason: switching-machines
 >   silently no-opped (see Gotchas — now fixed, commit `bdca857`). No `LARAGON_ROOT` or
 >   Nginx-related failures surfaced this time, though that only means this second machine
 >   happened to share the same defaults, not that those gaps are closed.
-> - `LARAGON_ROOT` is **hardcoded** to `C:\laragon` (Laragon's default install path — not
->   detected).
-> - **Apache-only.** PHP resolution, the vhost lookup, and the Application-Passwords
->   Authorization-header fix all assume Apache. Laragon also supports Nginx; nothing
->   detects that or fails gracefully — it would just break confusingly.
-> - Not published to npm. `npm create katalyst-laragon` does not work; only
->   `node index.js <name>` from a clone does.
-> - The repo is **private**. User explicitly chose private-for-now specifically because of
->   the gaps above — flip to public once they're closed and it's been tried on a second
->   machine.
+> - ~~`LARAGON_ROOT` is hardcoded~~ — **RESOLVED 2026-08-01 (v0.2.0)**: auto-detected via
+>   env var → default path → the running laragon.exe's own directory (`paths.mjs`).
+> - ~~Apache-only with no detection~~ — **partially RESOLVED 2026-08-01**: still
+>   Apache-only, but Nginx mode and foreign :80 owners (IIS) are now detected and refused
+>   with clear instructions in preflight and doctor, instead of failing confusingly.
+> - Not published to npm (deliberate — distribution decision made 2026-08-01: private repo
+>   + friend as read collaborator, `git pull` as the update channel; all `npx` references
+>   removed from code/docs until a real publish happens). `node index.js <name>` from a
+>   clone is the interface.
+> - The repo is **private**. Decision 2026-08-01: stays private for v0.2.0; friend gets a
+>   collaborator invite (owner action, needs their GitHub username).
 
 ## What Changed This Session
 > Built from an empty directory to the current state in one long session (research → plan
@@ -244,23 +245,44 @@ handoff_reason: switching-machines
 >    Everything else (`wordpress.mjs`, `mysql.mjs`, `laragon.mjs`, `doctor.mjs`,
 >    `admin-login.mjs`, and the no-spawn modules) already checks exit codes correctly or is
 >    read-only/informational where a wrong read isn't dangerous — nothing else found.
-> 6. [ ] **Ease-of-use pass, round 2 — still open.** Remaining candidates: friendlier `doctor`
->    output, less first-run ceremony, clearer scaffold progress output, auto-suggesting
->    `resume` after a failure, and deciding whether the single-global-MCP-connection
->    limitation (finding above) needs addressing.
+> 6. [x] **Friend-readiness overhaul — done 2026-08-01, v0.2.0 (9 commits, `7d6198d`..
+>    `5831e1f`).** Driven by a 13-agent audit (59 findings, blockers adversarially verified)
+>    then a 10-agent review of the fix batch (6 confirmed findings, all fixed). Shipped:
+>    LARAGON_ROOT auto-detection; Nginx/IIS-on-:80 detection with clear refusals;
+>    ExecutionPolicy Bypass (stock-Windows .ps1 shims); EXDEV staging fallback;
+>    `wp config create --force` (unblocked a real resume dead-end); post-.env resume via a
+>    finishInstall/finishExtras split with sandbox.config.json as the completion marker;
+>    stale-lock self-heal (dead-pid-only steal) + SIGINT cleanup; scaffold confirmation
+>    prompt + did-you-mean for typo'd commands; exit codes on all failure paths; doctor
+>    rewrite with "Ready to scaffold: YES/NO"; every failure message names the exact
+>    recovery command; MariaDB naming + KATALYST_MYSQL_PORT (threaded into destroy via
+>    .env's DB_HOST); premium sync hardening (atomic downloads, slug verification, config
+>    file for the repo override); pinned MCP-proxy/agent-connector versions; cross-site MCP
+>    removal guard in destroy; absolute wp.bat path in scaffolded sites; all `npx`
+>    references replaced with clone-based commands; README rewritten for a stranger
+>    (getting-started, bring-your-own premium plugins, uninstall checklist).
+>    **E2E-validated live:** katalysttest3 scaffolded through the real reload-staleness
+>    failure → resume → all checks green (permalinks, .env 404, 3 premium plugins active,
+>    pinned MCP Connected, absolute-path `npm run wp` working).
+> 7. [ ] **Remaining, deliberately deferred:** collaborator invite for the friend (owner
+>    action — needs their GitHub username); npm publish (revisit later; the name
+>    create-katalyst-laragon is still unreserved — squat risk noted); single-global-MCP
+>    limitation (documented in README, revisit if concurrent multi-site MCP ever matters);
+>    Windows DNS-cache note (after Stop All → Start All a new .test host may need
+>    `ipconfig /flushdns` — hit once during E2E, worth adding to the failure message
+>    someday); low-severity review leftovers (Quick-app command-word names shadow
+>    scaffolding, e.g. typing "doctor" in the tray dialog runs doctor).
 
 ## Git State
-> - Branch: `main` (pushed: NO as of this edit — commits below are local only on the home
->   machine; push once the ease-of-use pass is ready to share back)
-> - Last commit: `f397835 fix(destroy): route claude/codex MCP removal through PowerShell too`
->   (on top of `429febd` the premium-plugins feature, `bdca857` the MCP fix, `f03f264`/
->   `e3be156` earlier handoff commits, `0a100d9` the initial commit)
+> - Branch: `main`, pushed to `origin/main` 2026-08-01 (work machine: `git pull` to catch
+>   up — do NOT re-clone, just pull).
+> - Last commit at push time: `5831e1f fix(review): lock-steal races, destroy DB-port
+>   targeting, quoting, doc contradictions`. Version: 0.2.0.
 > - Uncommitted: NONE as of this edit
-> - To get current state: `git clone https://github.com/briansmith80/katalyst-laragon.git`
->   then check `git log` — this file may be ahead of what's pushed, see above
-> - **New external dependency this session:** a second, private repo
->   `briansmith80/oxygen-premium-plugins` (releases only, no code) now holds the licensed
->   Oxygen/Breakdance zips this tool pulls from. Keep it private — commercial plugin zips.
+> - **External dependency:** a second, private repo `briansmith80/oxygen-premium-plugins`
+>   (releases only, no code) holds the licensed Oxygen/Breakdance zips this tool pulls
+>   from. Keep it private — commercial plugin zips. Overridable per-user via
+>   KATALYST_PREMIUM_PLUGINS_REPO or ~/.katalyst-laragon/config.json.
 
 ## Context & Gotchas
 > - **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
