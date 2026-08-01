@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './doctor.mjs';
-import { KATALYST_HOME, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
+import { KATALYST_HOME, LARAGON_ROOT, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
 import {
   findVhostForProject,
@@ -45,6 +45,14 @@ function bail(msg) {
 
 /** The command a user should type to run this tool — clone-based reality, not the unpublished npm name. */
 const CLI = `node ${join(ENGINE_DIR, 'index.js')}`;
+
+/**
+ * The wp.bat shim path, backslash-doubled for templating into JS/JSON
+ * source text (`C:\laragon\...` would otherwise render as invalid escape
+ * sequences in both). Scaffolded sites get the absolute path because
+ * usr\bin is only on PATH when Laragon's "Add to Path" was applied.
+ */
+const WP_BAT_ESCAPED = join(LARAGON_ROOT, 'usr', 'bin', 'wp.bat').replace(/\\/g, '\\\\');
 
 /**
  * Hand-rolled, no dep — extended from the original katalystwp parser to also
@@ -505,6 +513,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], adm
     KATALYST_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: adminUser,
     WP_ADMIN_EMAIL: adminEmail,
+    WP_BAT_ESCAPED,
   });
 
   const sandboxConfigPath = join(projectDir, 'sandbox.config.json');
@@ -684,6 +693,7 @@ async function updateProject({ yes }) {
     KATALYST_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: env.WP_ADMIN_USER || 'admin',
     WP_ADMIN_EMAIL: env.WP_ADMIN_EMAIL || 'admin@example.com',
+    WP_BAT_ESCAPED,
   };
 
   console.log(
@@ -772,7 +782,7 @@ async function fileExists(p) {
 async function registerQuickAppCommand() {
   const result = await registerQuickApp();
   if (!result.added) {
-    console.log(`Already registered (${result.reason}).`);
+    console.log(`Not added: ${result.reason}.`);
     return;
   }
   console.log(

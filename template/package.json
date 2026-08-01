@@ -5,6 +5,6 @@
   "description": "Local WordPress dev site on Laragon, scaffolded by create-katalyst-laragon.",
   "scripts": {
     "katalyst": "node scripts/katalyst.mjs",
-    "wp": "wp"
+    "wp": "\"__WP_BAT_ESCAPED__\""
   }
 }

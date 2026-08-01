@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The per-site interactive menu. Dependency-free by design (no npm installs
-// required to run this) and frozen at scaffold time — `npx
-// create-katalyst-laragon@latest update` is the only thing that refreshes
-// it. Apache/MySQL are shared by every Laragon site, always-on, so unlike
+// required to run this) and frozen at scaffold time — the katalyst-laragon
+// checkout's `update` command is the only thing that refreshes it.
+// Apache/MySQL are shared by every Laragon site, always-on, so unlike
 // the Docker original this menu never starts or stops anything itself.
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { emitKeypressEvents } from 'node:readline';
@@ -15,6 +15,10 @@ const VERSION = '__KATALYST_VERSION__';
 const CWD = process.cwd();
 const ENV_PATH = join(CWD, '.env');
 const LOCK_PATH = join(CWD, '.katalyst.lock');
+// Absolute path baked in at scaffold time — usr\bin is only on PATH when
+// Laragon's "Add to Path" was applied on this machine, so a bare `wp` is
+// not a safe assumption. Falls back to PATH if the file has moved.
+const WP_BAT = '__WP_BAT_ESCAPED__';
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
 
 if (!existsSync(ENV_PATH)) {
@@ -86,11 +90,13 @@ echo $r['login_url'];
 `;
 
 /**
- * Spawns the `wp` shim (installed on PATH by create-katalyst-laragon —
- * usr\bin\wp.bat) via shell:true. That's the one place in this file that
- * needs shell:true rather than a direct .exe spawn — but the only dynamic
- * argument is a temp-file path we generate ourselves, nothing untrusted, so
- * the cmd.exe quoting risk that matters elsewhere doesn't apply here.
+ * Spawns the `wp` shim via shell:true — preferring the absolute WP_BAT path
+ * baked in at scaffold time (usr\bin may not be on PATH on this machine),
+ * falling back to a bare `wp` from PATH. That's the one place in this file
+ * that needs shell:true rather than a direct .exe spawn — but the only
+ * dynamic argument is a temp-file path we generate ourselves, nothing
+ * untrusted, so the cmd.exe quoting risk that matters elsewhere doesn't
+ * apply here.
  */
 function runWpEvalFile(phpCode) {
   return new Promise((resolve) => {
@@ -99,7 +105,8 @@ function runWpEvalFile(phpCode) {
     // outside one is literal output, not executed.
     const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
     writeFileSync(tmpFile, content, 'utf8');
-    const child = spawn('wp', ['eval-file', tmpFile, `--path=${join(CWD, 'public')}`], { shell: true });
+    const wpCmd = existsSync(WP_BAT) ? `"${WP_BAT}"` : 'wp';
+    const child = spawn(wpCmd, ['eval-file', tmpFile, `--path=${join(CWD, 'public')}`], { shell: true });
     let stdout = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.on('close', (code) => {
@@ -114,7 +121,7 @@ function runWpEvalFile(phpCode) {
   });
 }
 
-/** Links are one-time — mint fresh on every pick, never cache. Falls back to the plain login form if anything's off (matches the scaffolder's own admin-login.mjs). */
+/** Links are one-time — mint fresh on every pick, never cache. Falls back to the plain login form if anything's off (matches the scaffolder's own admin-login.mjs), saying so instead of degrading silently. */
 async function adminUrl() {
   const { code, stdout } = await runWpEvalFile(ADMIN_LOGIN_PHP);
   const out = stdout.trim();
@@ -128,6 +135,7 @@ async function adminUrl() {
       // fall through
     }
   }
+  console.log(dim('  (one-click login unavailable — opening the normal login form; credentials are in .env)'));
   return `${SITE}/wp-admin`;
 }
 
@@ -256,7 +264,11 @@ function runInherit(cmd, args = []) {
 }
 
 async function checkUpdate() {
-  if (process.env.KATALYST_NO_UPDATE_CHECK) return null;
+  // Opt-IN, not opt-out: create-katalyst-laragon is not published to npm,
+  // so until it is, polling the registry can only ever 404 — or worse,
+  // recommend whatever a name-squatter publishes under it. Enable with
+  // KATALYST_UPDATE_CHECK=1 once the real package exists.
+  if (!process.env.KATALYST_UPDATE_CHECK) return null;
   try {
     const res = await fetch('https://registry.npmjs.org/create-katalyst-laragon/latest', {
       signal: AbortSignal.timeout(2500),
@@ -299,7 +311,7 @@ for (;;) {
   } else if (choice === 'shell') {
     openTerminalHere();
   } else if (choice === 'update') {
-    console.log(`  Run: npx create-katalyst-laragon@${latestVersion} update`);
+    console.log('  In your katalyst-laragon checkout: git pull, then run its update command from this directory.');
   } else if (choice.startsWith('agent:')) {
     await runInherit(choice.slice('agent:'.length));
   }

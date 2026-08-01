@@ -59,7 +59,10 @@ export async function copyTemplates(srcDir, destDir, vars, { skip = new Set(), a
  * (dependencies, type, engines, ...) on every `update`.
  */
 export async function mergePackageJson(templatePath, targetPath, vars) {
-  const rendered = (await readFile(templatePath, 'utf8')).replaceAll('__PROJECT_NAME__', vars.PROJECT_NAME);
+  let rendered = await readFile(templatePath, 'utf8');
+  for (const [key, value] of Object.entries(vars)) {
+    rendered = rendered.replaceAll(`__${key}__`, value);
+  }
   const tpl = JSON.parse(rendered);
   let existing = {};
   try {

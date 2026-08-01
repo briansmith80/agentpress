@@ -1,6 +1,6 @@
 {
   "name": "create-katalyst-laragon",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Scaffold a local WordPress + AI-agent dev environment on Laragon (Windows, no Docker).",
   "bin": {
@@ -17,5 +17,19 @@
   "engines": {
     "node": ">=18"
   },
+  "os": [
+    "win32"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/briansmith80/katalyst-laragon.git"
+  },
+  "keywords": [
+    "laragon",
+    "wordpress",
+    "scaffold",
+    "mcp",
+    "windows"
+  ],
   "license": "GPL-2.0-or-later"
 }

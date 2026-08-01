@@ -1,5 +1,12 @@
 .env
 .katalyst.lock
+# wp-config.php holds the same DB credentials .env does — pushing a scaffolded
+# site to your own repo must not leak either.
+/public/wp-config.php
 /public/wp-content/uploads/
 /public/wp-content/upgrade/
+# Commercial plugin code (Oxygen/Breakdance) shouldn't land in public repos.
+/public/wp-content/plugins/oxygen*/
+/public/wp-content/plugins/breakdance*/
 *.log
+node_modules/

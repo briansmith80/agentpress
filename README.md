@@ -4,11 +4,62 @@ A Laragon-native port of [katalystwp](https://github.com/soflyy/katalystwp) — 
 local WordPress + AI-agent dev site the same way, but on [Laragon](https://laragon.org)
 (native Windows: Apache + MySQL + PHP + Node, no Docker) instead of Docker Compose.
 
+One command gives you: a site at `http://<name>.test` with its own database and dedicated
+MySQL user, permalinks working, the [Agent Connector](https://github.com/soflyy/agent-connector-for-wp)
+MCP gateway installed, MCP wiring for any AI agent CLI on your machine (Claude Code, Cursor,
+Codex, OpenCode), and a one-click already-logged-in wp-admin link.
+
+## Getting started (fresh machine)
+
+**Prerequisites**
+
+- Windows with [Laragon](https://laragon.org) installed and running **Apache** (not Nginx)
+  and **MySQL**. The default `C:\laragon` install location is auto-detected; anywhere else
+  works too (set `KATALYST_LARAGON_ROOT` if detection can't find it).
+- Node.js 18 or newer.
+- Optional: the [GitHub CLI](https://cli.github.com) (`gh`) — only used to auto-sync premium
+  plugin zips, everything else works without it.
+
+**Install**
+
+```bash
+# Clone anywhere EXCEPT into C:\laragon\www — Laragon would give the tool
+# folder its own vhost on the next reload.
+git clone https://github.com/briansmith80/katalyst-laragon.git
+cd katalyst-laragon
+node index.js doctor    # always run this first — ends with "Ready to scaffold: YES/NO"
+```
+
+There is no `npm install` step — the tool has zero dependencies.
+
+**First scaffold — what to expect**
+
+```bash
+node index.js my-site
+```
+
+- It asks for confirmation, then warns you: creating a site triggers a Laragon reload that
+  briefly restarts Apache/MySQL for **every** site on the machine.
+- A Windows permission prompt may appear for the hosts-file update — approve it.
+- The first run downloads WP-CLI and WordPress core, so expect a few minutes.
+- **If it fails partway** (Laragon's reload is genuinely flaky once Apache has been running
+  a while): do a full **Stop All → Start All** in Laragon, then run
+  `node index.js resume my-site`. The failure message tells you this too.
+
+**Updating the tool**
+
+```bash
+git pull    # in this checkout
+```
+
+Then, per site you want refreshed: `cd` into the site directory and run
+`node <path-to-this-checkout>\index.js update`.
+
 ## Usage
 
 ```bash
 node index.js <name>              # scaffold a WordPress site at http://<name>.test
-node index.js resume <name>        # finish a scaffold that got through vhost creation but not further
+node index.js resume <name>        # finish an interrupted scaffold
 node index.js doctor               # check this machine's Laragon/PHP/MySQL/Node state
 node index.js list                 # list scaffolded sites
 node index.js update               # refresh a site's Katalyst-owned files (run from its dir)
@@ -17,38 +68,46 @@ node index.js register-quick-app   # add a Laragon Quick app entry for this tool
 
 # flags
 node index.js my-site --plugins=akismet,seo-by-rank-math
-node index.js my-site --yes        # non-interactive
-node index.js my-site --verbose    # stream full output instead of the progress line
+node index.js my-site --yes        # non-interactive (skips the confirmation prompt)
 ```
 
-Requires Laragon running (Apache + MySQL) before scaffolding — `doctor` confirms this.
+Environment variables (all optional): `KATALYST_LARAGON_ROOT` (Laragon install folder if not
+auto-detected), `KATALYST_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
+`KATALYST_MYSQL_PORT` (when MySQL isn't on 3306), `KATALYST_PREMIUM_PLUGINS_REPO` (see below).
 
-### Premium plugins (Oxygen / Breakdance)
+## Premium plugins (Oxygen / Breakdance) — bring your own
 
-Every scaffold auto-installs + activates these, no flag needed:
+Every scaffold auto-installs + activates these three, **if** it can find a licensed zip for
+them; missing ones are skipped without breaking anything:
 
-| Plugin | Release tag |
+| Plugin slug | Accepted zip filenames |
 |---|---|
-| Oxygen | `oxygen` |
-| Breakdance Elements for Oxygen | `breakdance-elements-for-oxygen` |
-| Breakdance Forms for Oxygen | `breakdance-forms-for-oxygen` |
+| `oxygen` | `oxygen.zip` or `oxygen-*.zip` |
+| `breakdance-elements-for-oxygen` | `breakdance-elements-for-oxygen[-*].zip` |
+| `breakdance-forms-for-oxygen` | `breakdance-forms-for-oxygen[-*].zip` |
 
-These are commercial plugins with no public download URL, so there's nothing to fetch from
-wordpress.org — instead, each scaffold first runs `gh release download <tag> --repo
-briansmith80/oxygen-premium-plugins --dir ~/.katalyst-laragon/premium-plugins --clobber`
-(requires `gh` authenticated — already true if you've used `gh auth login`) to refresh a local
-cache at `~/.katalyst-laragon/premium-plugins/` from that private repo of licensed zips, one
-release per plugin. Override the repo with `KATALYST_PREMIUM_PLUGINS_REPO=owner/repo` if you
-have your own.
+These are commercial plugins with no public download URL, so you supply your own licensed
+zips. Two ways, use either or both:
 
-If GitHub/`gh` isn't reachable, the sync step just logs it and falls through to whatever's
-already in the local cache (or skips that plugin if the cache is empty too) — it never blocks
-a scaffold. Same for a missing zip generally: a missing license shouldn't break a scaffold for
-a plugin you don't have. If more than one zip matches a plugin locally, the newest by file
-modified-time wins.
+1. **Drop zips in the local cache** (simplest, no GitHub needed):
+   `~/.katalyst-laragon/premium-plugins/` — filenames must match the table above. Newest by
+   file-modified-time wins when several match.
+2. **Your own private GitHub repo of releases** (syncs across your machines): create a
+   private repo with one release per plugin — the release **tag** must be exactly the plugin
+   slug, with the zip attached as an asset. Then point the tool at it, either with the
+   `KATALYST_PREMIUM_PLUGINS_REPO=you/your-repo` env var or persistently in
+   `~/.katalyst-laragon/config.json`:
 
-Installing the plugin doesn't activate its license — if it needs one, that's still a manual
-one-time step in `wp-admin` after the scaffold finishes.
+   ```json
+   { "premiumPluginsRepo": "you/your-repo" }
+   ```
+
+   Requires `gh` installed and `gh auth login` done. When GitHub is unreachable the tool
+   falls back to whatever's already in the local cache.
+
+Installing a plugin doesn't activate its license — if it needs a key, that's still a manual
+one-time step in wp-admin after the scaffold finishes. And keep any repo holding licensed
+zips **private**.
 
 ## What gets scaffolded
 
@@ -66,10 +125,13 @@ C:\laragon\www\<name>\
 
 Each site gets its own MySQL database and dedicated user (never root), its own vhost
 (Laragon auto-detects `public/` as the document root), and — if any AI agent CLIs are
-detected on the machine (Claude Code, Cursor, Codex, OpenCode) — MCP wiring to the site's
-WordPress REST API and a stdio Playwright server, plus a one-click already-logged-in
-`wp-admin` link via the [Agent Connector](https://github.com/soflyy/agent-connector-for-wp)
-plugin (always installed).
+detected on the machine — MCP wiring to the site's WordPress REST API and a stdio Playwright
+server, plus a one-click already-logged-in `wp-admin` link via the Agent Connector plugin
+(always installed).
+
+**Note:** the MCP wiring is machine-global (one `wordpress` entry per agent CLI), so it always
+points at the **most recently scaffolded** site. Scaffolding a second site re-points it;
+destroying an old site leaves a newer site's wiring alone.
 
 ## Architecture
 
@@ -78,11 +140,11 @@ Source lives in `src/`, one module per concern:
 | Module | Owns |
 |---|---|
 | `engine.js` | CLI dispatch, the scaffold/resume/update/destroy flows, the cross-process lock |
-| `laragon.mjs` | reload + poll, vhost reverse-lookup by ROOT, verify-and-repair, hosts snapshot |
+| `laragon.mjs` | preflight (who owns :80), reload + poll, vhost reverse-lookup by ROOT, verify-and-repair, hosts snapshot |
 | `wp.mjs` | the `spawn(php.exe, …, {shell:false})` primitive every `wp` call goes through |
-| `mysql.mjs` | root credential discovery, per-site DB/user provisioning |
+| `mysql.mjs` | root credential discovery, per-site DB/user provisioning (MySQL + MariaDB) |
 | `wordpress.mjs` | core download/extract (bypasses a broken `wp core download` on Windows), `wp-config.php`, permalinks |
-| `plugins.mjs` | plugin install/activate, the Agent Connector pair |
+| `plugins.mjs` | plugin install/activate, the Agent Connector pair, premium plugin sync/install |
 | `junctions.mjs` | the sibling-checkout → wp-content workflow, junction-safe directory removal |
 | `mcp.mjs` / `admin-login.mjs` | MCP server config per agent, the one-click login mint |
 | `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine |
@@ -95,23 +157,31 @@ design (no npm installs needed to run it). It necessarily duplicates a few small
 project documented for its own three-copy pattern) — that duplication is intentional, not
 an oversight.
 
+## Uninstalling the tool
+
+Nothing here runs in the background; removing it is deleting things. In order:
+
+1. `node index.js destroy` from inside each scaffolded site you want gone (this cleans the
+   DB, vhost, MCP entries, and folder for that site).
+2. Delete this checkout.
+3. Optional leftovers, harmless if kept: `~/.katalyst-laragon\` (registry, hosts backups,
+   premium plugin zips — note those zips are your licensed property),
+   `<laragon>\usr\bin\wp-cli.phar` + `wp.bat` (shared WP-CLI install), the `KatalystWP` line
+   in `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#laragon magic!`
+   hosts entries for destroyed sites (Laragon prunes these on reload).
+
 ## Known limitations
 
+- **Apache only.** Nginx mode is detected and refused with a clear message rather than
+  supported. Switch Laragon to Apache to use this tool.
 - **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
-  Confirmed live, repeatedly: it can leave Apache serving a stale in-memory config (or
-  crash it outright) with no code-side fix that doesn't make things worse — see the file
-  header comments in `laragon.mjs` for the full story, including a self-relaunch approach
-  that was tried and reverted because it introduced a *worse* failure mode (silently serving
-  a stale config). When this happens, a full Stop All → Start All in Laragon resolves it;
-  the tool detects and reports this rather than guessing.
-- **~~Re-running a failed scaffold doesn't resume~~ — fixed: `resume <name>`.** If a run fails
-  after the vhost exists but before WordPress finishes installing (the exact state a reload
-  staleness failure leaves — see above), `node index.js resume <name>` picks up from there:
-  confirms the vhost is reachable, then runs the DB/WordPress/plugins/MCP pipeline. Verified
-  live on a real interrupted scaffold. Note it only covers *this* failure point — a run that
-  fails earlier (during vhost creation itself) still needs a fresh scaffold, not resume.
+  Confirmed live, repeatedly, on two machines: it can leave Apache serving a stale in-memory
+  config (or crash it outright) with no code-side fix that doesn't make things worse — see
+  the file header comments in `laragon.mjs` for the full story. When it happens: full
+  Stop All → Start All in Laragon, then `node index.js resume <name>`. The tool detects and
+  reports this rather than guessing.
+- **One MCP connection per agent CLI, machine-wide** — see the note above.
 - **`--setup-script=`/`--dev-script=` are not implemented.** The original's customization
-  hooks (run a script during provisioning, keep a dev server running alongside the stack)
-  didn't make it into this port — not in the CLI flags, not in `sandbox.config.json`'s schema.
+  hooks didn't make it into this port.
 - **Agent CLIs are detected, never installed.** If a selected agent isn't found on PATH, the
-  tool currently just skips MCP wiring for it — it doesn't offer to `npm install -g` it.
+  tool skips MCP wiring for it.

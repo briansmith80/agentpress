@@ -3,14 +3,30 @@
 // authoritative — this just gives Quick app a way to call into it.
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BACKUPS_DIR, LARAGON_ROOT } from './paths.mjs';
 
 const SITES_CONF = join(LARAGON_ROOT, 'usr', 'sites.conf');
 const ENTRY_NAME = 'KatalystWP';
-const ENTRY_LINE = `${ENTRY_NAME}=npx create-katalyst-laragon %s`;
+// The real clone-based invocation, resolved from this file's own location —
+// the previous `npx create-katalyst-laragon %s` pointed at an npm package
+// that has never been published, so the tray entry 404'd for everyone.
+const INDEX_JS = fileURLToPath(new URL('../index.js', import.meta.url));
+const ENTRY_LINE = `${ENTRY_NAME}=node "${INDEX_JS}" %s --yes`;
 
 export async function registerQuickApp() {
-  const content = await readFile(SITES_CONF, 'utf8');
+  let content;
+  try {
+    content = await readFile(SITES_CONF, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return {
+        added: false,
+        reason: `Laragon's Quick-app config (${SITES_CONF}) doesn't exist yet — open Laragon once so it creates it, or skip this optional step`,
+      };
+    }
+    throw err;
+  }
   if (new RegExp(`^${ENTRY_NAME}=`, 'm').test(content)) {
     return { added: false, reason: `"${ENTRY_NAME}" is already in sites.conf` };
   }

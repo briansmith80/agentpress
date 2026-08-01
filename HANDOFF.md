@@ -1,13 +1,15 @@
 ---
 session_date: 2026-07-30T16:53:29Z
 author: claude-code
-operator: brian.smith@cognitomedia.com
 repo: briansmith80/katalyst-laragon
 branch: main
 base: main
 status: in-progress
 handoff_reason: switching-machines
 ---
+
+> **Maintainer session notes — not user documentation.** If you just cloned this repo,
+> start at [README.md](README.md); nothing below is needed to use the tool.
 
 # Handoff — `create-katalyst-laragon`: Laragon-native port of soflyy/katalystwp
 
