@@ -53,6 +53,10 @@ export const PREMIUM_PLUGINS = [
   { slug: 'oxygen', filePrefix: 'oxygen-', label: 'Oxygen Builder' },
   { slug: 'breakdance-elements-for-oxygen', filePrefix: 'breakdance-elements-for-oxygen-', label: 'Breakdance Elements for Oxygen' },
   { slug: 'breakdance-forms-for-oxygen', filePrefix: 'breakdance-forms-for-oxygen-', label: 'Breakdance Forms for Oxygen' },
+  // The Woo integration only hard-requires Oxygen, but it's pointless
+  // without WooCommerce itself — `requires` installs wordpress.org deps
+  // first (idempotent) when this plugin is selected.
+  { slug: 'breakdance-woocommerce-for-oxygen', filePrefix: 'breakdance-woocommerce-for-oxygen-', label: 'Breakdance WooCommerce for Oxygen (installs WooCommerce too)', requires: ['woocommerce'] },
 ];
 
 function fail(step, result) {
@@ -185,7 +189,7 @@ export async function installPremiumPlugins({ path, onStep }) {
   const installed = [];
   const selected = await selectedPremiumPlugins();
   for (const plugin of selected) {
-    const { slug, filePrefix } = plugin;
+    const { slug, filePrefix, requires = [] } = plugin;
     if (await isPluginActive(path, slug)) {
       installed.push(slug);
       continue;
@@ -194,6 +198,14 @@ export async function installPremiumPlugins({ path, onStep }) {
     if (!zipPath) {
       onStep?.(`skipping ${slug} — no ${filePrefix}*.zip (or ${slug}.zip) in ${PREMIUM_PLUGINS_DIR}; drop your licensed zip there to enable`);
       continue;
+    }
+    for (const dep of requires) {
+      if (await isPluginActive(path, dep)) continue;
+      onStep?.(`installing ${dep} (required by ${slug})…`);
+      const depResult = await runWp(['plugin', 'install', dep, '--activate'], { path });
+      if (depResult.code !== 0) {
+        onStep?.(`  (couldn't install ${dep}: ${(depResult.stderr || depResult.stdout).trim().split('\n')[0]} — installing ${slug} anyway)`);
+      }
     }
     onStep?.(`installing ${slug} from ${zipPath}…`);
     const result = await runWp(['plugin', 'install', zipPath, '--force', '--activate'], { path });
@@ -248,6 +260,27 @@ export async function applyLicenses({ path, slugs = [], onStep }) {
         `${CONFIG_PATH})`,
     );
   }
+}
+
+/**
+ * Brings every installed plugin up to date at the end of the scaffold —
+ * wordpress.org plugins update from the directory, and the Oxygen family
+ * updates from the vendor because this runs AFTER applyLicenses (the
+ * Breakdance extension system authorizes update checks against the active
+ * license; the WooCommerce-for-Oxygen shim zip in particular ships old and
+ * relies on exactly this to reach the current build). Best-effort: a dead
+ * network or a vendor hiccup reports and moves on.
+ */
+export async function updateAllPlugins({ path, onStep }) {
+  onStep?.('updating all plugins to their latest versions…');
+  const result = await runWp(['plugin', 'update', '--all'], { path });
+  if (result.code !== 0) {
+    onStep?.(`  (plugin updates failed — not fatal: ${(result.stderr || result.stdout).trim().split('\n')[0]})`);
+    return;
+  }
+  const updated = (result.stdout.match(/^\| \S+ \| [\d.]/gm) || []).length;
+  const summary = result.stdout.match(/(Updated \d+ of \d+ plugins|Plugin already updated|No plugin updates (available|found))/i)?.[0];
+  onStep?.(summary ? summary : updated ? `updated ${updated} plugin(s)` : 'plugins are up to date');
 }
 
 /**

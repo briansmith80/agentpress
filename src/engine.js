@@ -26,7 +26,7 @@ import { installWordPress } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
-import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, PREMIUM_PLUGINS, syncPremiumPluginsFromGitHub } from './plugins.mjs';
+import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, PREMIUM_PLUGINS, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { detectAgents } from './agents.mjs';
 import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
@@ -592,6 +592,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], adm
   await syncPremiumPluginsFromGitHub({ onStep });
   const premiumPlugins = await installPremiumPlugins({ path: publicDir, onStep });
   await applyLicenses({ path: publicDir, slugs: premiumPlugins, onStep });
+  await updateAllPlugins({ path: publicDir, onStep });
 
   onStep('detecting AI agent CLIs…');
   const detected = await detectAgents();

@@ -93,11 +93,16 @@ auto-detected), `KATALYST_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"ro
 Every scaffold auto-installs + activates these three, **if** it can find a licensed zip for
 them; missing ones are skipped without breaking anything:
 
-| Plugin slug                        | Accepted zip filenames                     |
-| ---------------------------------- | ------------------------------------------ |
-| `oxygen`                         | `oxygen.zip` or `oxygen-*.zip`         |
-| `breakdance-elements-for-oxygen` | `breakdance-elements-for-oxygen[-*].zip` |
-| `breakdance-forms-for-oxygen`    | `breakdance-forms-for-oxygen[-*].zip`    |
+| Plugin slug                          | Accepted zip filenames                       |
+| ------------------------------------ | -------------------------------------------- |
+| `oxygen`                           | `oxygen.zip` or `oxygen-*.zip`           |
+| `breakdance-elements-for-oxygen`   | `breakdance-elements-for-oxygen[-*].zip`   |
+| `breakdance-forms-for-oxygen`      | `breakdance-forms-for-oxygen[-*].zip`      |
+| `breakdance-woocommerce-for-oxygen` | `breakdance-woocommerce-for-oxygen[-*].zip` (auto-installs WooCommerce alongside) |
+
+After the license activates, the scaffold runs `wp plugin update --all`, so every plugin —
+including the Oxygen family, via the vendor's licensed update channel — comes out at its
+latest version.
 
 These are commercial plugins with no public download URL, so you supply your own licensed
 zips. Two ways, use either or both:
