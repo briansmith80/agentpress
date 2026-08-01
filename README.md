@@ -33,12 +33,20 @@ and use `node index.js …` instead of the npx form. Zero dependencies, no `npm 
 
 **`setup` and instant mode**
 
-`setup` installs a single wildcard vhost into Laragon's Apache, once. It needs one
-**Stop All → Start All** in Laragon (the only restart it will ever ask for) — run `setup`
-again afterwards to confirm it's active. From then on, scaffolding a site involves **no
-Laragon reload at all**: no machine-wide Apache/MySQL blip, no multi-minute vhost polling,
-and none of Laragon's reload-staleness failures. A new site is live the instant its folder
-exists; the only prompt left is one Windows UAC prompt per site for its hosts entry.
+`setup` does two one-time things:
+
+1. **Asks your preferences** — which premium plugins (Oxygen / the Breakdance extensions)
+   scaffolds should auto-install, and your Oxygen license key (one key covers the
+   extensions too). Answers are saved to `~/.katalyst-laragon/config.json` and used by
+   every future scaffold; re-run `setup` any time to change them (Enter keeps the current
+   answer).
+2. **Installs a single wildcard vhost** into Laragon's Apache. This needs one
+   **Stop All → Start All** in Laragon (the only restart it will ever ask for) — run
+   `setup` again afterwards to confirm it's active. From then on, scaffolding a site
+   involves **no Laragon reload at all**: no machine-wide Apache/MySQL blip, no
+   multi-minute vhost polling, and none of Laragon's reload-staleness failures. A new site
+   is live the instant its folder exists; the only prompt left is one Windows UAC prompt
+   per site for its hosts entry.
 
 Without `setup`, everything still works through the classic Laragon-reload flow — it's just
 slower and occasionally needs `resume` after Laragon's flaky reload (the failure message

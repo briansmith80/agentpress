@@ -26,7 +26,8 @@ import { installWordPress } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
-import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, syncPremiumPluginsFromGitHub } from './plugins.mjs';
+import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, PREMIUM_PLUGINS, syncPremiumPluginsFromGitHub } from './plugins.mjs';
+import { loadConfig, saveConfig } from './config.mjs';
 import { detectAgents } from './agents.mjs';
 import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
@@ -915,10 +916,58 @@ async function fileExists(p) {
 }
 
 /**
+ * The one-time preferences wizard half of setup: which premium plugins
+ * scaffolds should auto-install, and the Oxygen license key. Everything
+ * lands in ~/.katalyst-laragon/config.json and every future scaffold reads
+ * it from there. Re-running keeps current answers on plain Enter. TTY-only
+ * — non-interactive runs keep whatever the config already says.
+ */
+async function setupPreferences() {
+  if (!process.stdin.isTTY) return;
+  const config = await loadConfig();
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log('\nPremium plugins (optional — Enter keeps the current answer):');
+    const current = Array.isArray(config.premiumPlugins) ? config.premiumPlugins : PREMIUM_PLUGINS.map((p) => p.slug);
+    const chosen = [];
+    for (const plugin of PREMIUM_PLUGINS) {
+      const now = current.includes(plugin.slug);
+      const answer = (await rl.question(`  Auto-install ${plugin.label}? [${now ? 'Y/n' : 'y/N'}]: `)).trim();
+      const wanted = answer === '' ? now : /^y(es)?$/i.test(answer);
+      if (wanted) chosen.push(plugin.slug);
+    }
+    config.premiumPlugins = chosen;
+
+    if (chosen.includes('oxygen')) {
+      const existing = config.licenses?.oxygen || null;
+      const hint = existing ? `Enter keeps the saved key (${existing.slice(0, 4)}…)` : 'Enter to skip — you can activate in wp-admin instead';
+      const answer = (await rl.question(`  Oxygen license key (one key covers the extensions too; ${hint}): `)).trim();
+      if (answer) {
+        config.licenses = { ...(config.licenses || {}), oxygen: answer };
+        if (!/^[a-f0-9]{32}$/i.test(answer)) {
+          console.log('  (saved — note it does not look like the usual 32-character key, double-check if activation fails)');
+        }
+      }
+    }
+
+    await saveConfig(config);
+    const summary = chosen.length ? chosen.join(', ') : 'none';
+    console.log(`✓ Saved to ${join(KATALYST_HOME, 'config.json')} — premium plugins: ${summary}${config.licenses?.oxygen ? ', Oxygen license on file' : ''}`);
+    if (chosen.length) {
+      console.log(`  (zips: drop your licensed ${chosen.map((s) => `${s}*.zip`).join(', ')} into ${join(KATALYST_HOME, 'premium-plugins')},`);
+      console.log('   or point premiumPluginsRepo at your own private GitHub releases repo — see the README)');
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+/**
  * One-time instant-mode enablement: writes the wildcard vhost conf, then
  * either confirms it's live (Apache restarted since) or tells the user to
  * do the single Stop All → Start All this will ever need. Safe to re-run
- * any time — it's how you verify after the restart, too.
+ * any time — it's how you verify after the restart, too. Also runs the
+ * preferences wizard (premium plugins + license key).
  */
 async function setupCommand() {
   const state = await preflight();
@@ -926,6 +975,9 @@ async function setupCommand() {
     bail('✖ Laragon is in Nginx mode — instant mode is Apache-only. Switch to Apache first.');
     return;
   }
+
+  await setupPreferences();
+
   if (!wildcardConfInstalled()) {
     const { suffix, path } = await installWildcardConf();
     console.log(`✓ Wildcard vhost installed at ${path} (serves *${suffix} from www\\<name>\\public)`);

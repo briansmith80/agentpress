@@ -2,10 +2,11 @@
 // policy from the Docker original — this layer never touched Docker
 // directly (it always went through `wp` in the workspace container), so it
 // carries over unchanged except for dropping the exec prefix.
-import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runWp, spawnCapture } from './wp.mjs';
 import { CONFIG_PATH, PREMIUM_PLUGINS_DIR } from './paths.mjs';
+import { loadConfig } from './config.mjs';
 
 // One release tag per plugin (mirrors the `universal-abilities-plugin`
 // tag-per-asset pattern used for the connector below) in a private repo of
@@ -18,15 +19,18 @@ const DEFAULT_PREMIUM_PLUGINS_REPO = 'briansmith80/oxygen-premium-plugins';
 
 async function premiumPluginsRepo() {
   if (process.env.KATALYST_PREMIUM_PLUGINS_REPO) return process.env.KATALYST_PREMIUM_PLUGINS_REPO;
-  try {
-    const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
-    if (typeof config.premiumPluginsRepo === 'string' && config.premiumPluginsRepo.trim()) {
-      return config.premiumPluginsRepo.trim();
-    }
-  } catch {
-    // no config file — use the default
+  const config = await loadConfig();
+  if (typeof config.premiumPluginsRepo === 'string' && config.premiumPluginsRepo.trim()) {
+    return config.premiumPluginsRepo.trim();
   }
   return DEFAULT_PREMIUM_PLUGINS_REPO;
+}
+
+/** The user's setup-time selection: absent key = all plugins (back-compat), [] = none. Exported so setup's wizard and the sync/install steps agree on one source of truth. */
+export async function selectedPremiumPlugins() {
+  const config = await loadConfig();
+  if (!Array.isArray(config.premiumPlugins)) return PREMIUM_PLUGINS;
+  return PREMIUM_PLUGINS.filter((p) => config.premiumPlugins.includes(p.slug));
 }
 
 // Pinned to a tested release, not /latest/ — these download at scaffold time
@@ -45,10 +49,10 @@ const UNIVERSAL_ABILITIES_URL =
  * scaffold picks it up; if it's missing, the plugin is skipped with a clear
  * message rather than failing the scaffold.
  */
-const PREMIUM_PLUGINS = [
-  { slug: 'oxygen', filePrefix: 'oxygen-' },
-  { slug: 'breakdance-elements-for-oxygen', filePrefix: 'breakdance-elements-for-oxygen-' },
-  { slug: 'breakdance-forms-for-oxygen', filePrefix: 'breakdance-forms-for-oxygen-' },
+export const PREMIUM_PLUGINS = [
+  { slug: 'oxygen', filePrefix: 'oxygen-', label: 'Oxygen Builder' },
+  { slug: 'breakdance-elements-for-oxygen', filePrefix: 'breakdance-elements-for-oxygen-', label: 'Breakdance Elements for Oxygen' },
+  { slug: 'breakdance-forms-for-oxygen', filePrefix: 'breakdance-forms-for-oxygen-', label: 'Breakdance Forms for Oxygen' },
 ];
 
 function fail(step, result) {
@@ -122,6 +126,9 @@ export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
     return;
   }
 
+  const selected = await selectedPremiumPlugins();
+  if (!selected.length) return; // user opted out of premium plugins in setup
+
   const ghProbe = await spawnCapture('gh', ['--version']);
   if (ghProbe.code === null) {
     onStep?.(
@@ -133,7 +140,7 @@ export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
 
   const repo = await premiumPluginsRepo();
   const tmpDir = join(PREMIUM_PLUGINS_DIR, '.sync-tmp');
-  for (const { slug } of PREMIUM_PLUGINS) {
+  for (const { slug } of selected) {
     try {
       await rm(tmpDir, { recursive: true, force: true });
       await mkdir(tmpDir, { recursive: true });
@@ -176,7 +183,8 @@ export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
  */
 export async function installPremiumPlugins({ path, onStep }) {
   const installed = [];
-  for (const plugin of PREMIUM_PLUGINS) {
+  const selected = await selectedPremiumPlugins();
+  for (const plugin of selected) {
     const { slug, filePrefix } = plugin;
     if (await isPluginActive(path, slug)) {
       installed.push(slug);
@@ -219,12 +227,8 @@ export async function applyLicenses({ path, slugs = [], onStep }) {
   if (!slugs.includes('oxygen')) return;
   let key = process.env.KATALYST_OXYGEN_LICENSE || null;
   if (!key) {
-    try {
-      const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
-      key = config.licenses?.oxygen || null;
-    } catch {
-      // no config — nothing to apply
-    }
+    const config = await loadConfig();
+    key = config.licenses?.oxygen || null;
   }
   if (!key) {
     onStep?.(`(no Oxygen license key configured — add {"licenses":{"oxygen":"<key>"}} to ${CONFIG_PATH} to auto-activate, or enter it once in wp-admin)`);
