@@ -20,63 +20,60 @@ Codex, OpenCode), and a one-click already-logged-in wp-admin link.
 - Optional: the [GitHub CLI](https://cli.github.com) (`gh`) — only used to auto-sync premium
   plugin zips, everything else works without it.
 
-**Install**
+**Install — nothing to install**
 
 ```bash
-# Clone anywhere EXCEPT into Laragon's www folder (C:\laragon\www by default) —
-# Laragon would give the tool folder its own vhost on the next reload.
-git clone https://github.com/briansmith80/katalyst-laragon.git
-cd katalyst-laragon
-node index.js doctor    # always run this first — ends with "Ready to scaffold: YES/NO"
+npx create-katalyst-laragon@latest doctor   # env check — ends with "Ready to scaffold: YES/NO"
+npx create-katalyst-laragon@latest setup    # one-time: enables instant scaffolds (see below)
+npx create-katalyst-laragon@latest my-site  # scaffold
 ```
 
-There is no `npm install` step — the tool has zero dependencies.
+(Developing the tool itself? `git clone` this repo — anywhere EXCEPT Laragon's `www` folder —
+and use `node index.js …` instead of the npx form. Zero dependencies, no `npm install` step.)
+
+**`setup` and instant mode**
+
+`setup` installs a single wildcard vhost into Laragon's Apache, once. It needs one
+**Stop All → Start All** in Laragon (the only restart it will ever ask for) — run `setup`
+again afterwards to confirm it's active. From then on, scaffolding a site involves **no
+Laragon reload at all**: no machine-wide Apache/MySQL blip, no multi-minute vhost polling,
+and none of Laragon's reload-staleness failures. A new site is live the instant its folder
+exists; the only prompt left is one Windows UAC prompt per site for its hosts entry.
+
+Without `setup`, everything still works through the classic Laragon-reload flow — it's just
+slower and occasionally needs `resume` after Laragon's flaky reload (the failure message
+walks you through it).
 
 **First scaffold — what to expect**
 
-```bash
-node index.js my-site
-```
-
-- It asks for confirmation, then warns you: creating a site triggers a Laragon reload that
-  briefly restarts Apache/MySQL for **every** site on the machine.
-- A Windows permission prompt may appear for the hosts-file update — approve it.
+- Confirmation prompt, then a UAC prompt for the hosts entry — approve it.
 - The first run downloads WP-CLI and WordPress core, so expect a few minutes.
-- **If it fails partway** (Laragon's reload is genuinely flaky once Apache has been running
-  a while): do a full **Stop All → Start All** in Laragon, then run
-  `node index.js resume my-site`. The failure message tells you this too.
 
 **Updating the tool**
 
-```bash
-git pull    # in this checkout
-```
-
-Then, per site you want refreshed: `cd` into the site directory and run
-`node <path-to-this-checkout>\index.js update`.
+The npx form always runs `@latest` — there is nothing to update. A git checkout updates
+with `git pull`.
 
 ## Usage
 
-From the tool's checkout:
+`npx create-katalyst-laragon@latest <command>` from anywhere (or `node index.js <command>`
+from a git checkout):
 
 ```bash
-node index.js <name>              # scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
-node index.js resume <name>        # finish an interrupted scaffold
-node index.js doctor               # check this machine's Laragon/PHP/MySQL/Node state
-node index.js list                 # list scaffolded sites
-node index.js register-quick-app   # add a Laragon Quick app entry for this tool
+… <name>              # scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
+… setup                # one-time: enable instant scaffolds (no Laragon reloads)
+… resume <name>        # finish an interrupted scaffold
+… doctor               # check this machine's Laragon/PHP/MySQL/Node state
+… list                 # list scaffolded sites
+… register-quick-app   # add a Laragon Quick app entry for this tool
+
+# from inside a scaffolded site's directory:
+… update               # refresh the site's Katalyst-owned files
+… destroy              # permanently remove the site
 
 # flags
-node index.js my-site --plugins=akismet,seo-by-rank-math
-node index.js my-site --yes        # non-interactive (skips the confirmation prompt)
-```
-
-From inside a scaffolded site's directory (`node index.js` only resolves in the checkout, so
-use the full path):
-
-```bash
-node <path-to-checkout>\index.js update    # refresh the site's Katalyst-owned files
-node <path-to-checkout>\index.js destroy   # permanently remove the site
+… my-site --plugins=akismet,seo-by-rank-math
+… my-site --yes        # non-interactive (skips the confirmation prompt)
 ```
 
 Environment variables (all optional): `KATALYST_LARAGON_ROOT` (Laragon install folder if not
@@ -88,11 +85,11 @@ auto-detected), `KATALYST_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"ro
 Every scaffold auto-installs + activates these three, **if** it can find a licensed zip for
 them; missing ones are skipped without breaking anything:
 
-| Plugin slug | Accepted zip filenames |
-|---|---|
-| `oxygen` | `oxygen.zip` or `oxygen-*.zip` |
+| Plugin slug                        | Accepted zip filenames                     |
+| ---------------------------------- | ------------------------------------------ |
+| `oxygen`                         | `oxygen.zip` or `oxygen-*.zip`         |
 | `breakdance-elements-for-oxygen` | `breakdance-elements-for-oxygen[-*].zip` |
-| `breakdance-forms-for-oxygen` | `breakdance-forms-for-oxygen[-*].zip` |
+| `breakdance-forms-for-oxygen`    | `breakdance-forms-for-oxygen[-*].zip`    |
 
 These are commercial plugins with no public download URL, so you supply your own licensed
 zips. Two ways, use either or both:
@@ -145,18 +142,18 @@ destroying an old site leaves a newer site's wiring alone.
 
 Source lives in `src/`, one module per concern:
 
-| Module | Owns |
-|---|---|
-| `engine.js` | CLI dispatch, the scaffold/resume/update/destroy flows, the cross-process lock |
-| `laragon.mjs` | preflight (who owns :80), reload + poll, vhost reverse-lookup by ROOT, verify-and-repair, hosts snapshot |
-| `wp.mjs` | the `spawn(php.exe, …, {shell:false})` primitive every `wp` call goes through |
-| `mysql.mjs` | root credential discovery, per-site DB/user provisioning (MySQL + MariaDB) |
-| `wordpress.mjs` | core download/extract (bypasses a broken `wp core download` on Windows), `wp-config.php`, permalinks |
-| `plugins.mjs` | plugin install/activate, the Agent Connector pair, premium plugin sync/install |
-| `junctions.mjs` | the sibling-checkout → wp-content workflow, junction-safe directory removal |
-| `mcp.mjs` / `admin-login.mjs` | MCP server config per agent, the one-click login mint |
-| `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine |
-| `destroy.mjs` / `quickapp.mjs` | teardown, the Laragon Quick app registration |
+| Module                               | Owns                                                                                                     |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `engine.js`                        | CLI dispatch, the scaffold/resume/update/destroy flows, the cross-process lock                           |
+| `laragon.mjs`                      | preflight (who owns :80), reload + poll, vhost reverse-lookup by ROOT, verify-and-repair, hosts snapshot |
+| `wp.mjs`                           | the`spawn(php.exe, …, {shell:false})` primitive every `wp` call goes through                        |
+| `mysql.mjs`                        | root credential discovery, per-site DB/user provisioning (MySQL + MariaDB)                               |
+| `wordpress.mjs`                    | core download/extract (bypasses a broken`wp core download` on Windows), `wp-config.php`, permalinks  |
+| `plugins.mjs`                      | plugin install/activate, the Agent Connector pair, premium plugin sync/install                           |
+| `junctions.mjs`                    | the sibling-checkout → wp-content workflow, junction-safe directory removal                             |
+| `mcp.mjs` / `admin-login.mjs`    | MCP server config per agent, the one-click login mint                                                    |
+| `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine                                             |
+| `destroy.mjs` / `quickapp.mjs`   | teardown, the Laragon Quick app registration                                                             |
 
 `template/` is the payload copied into every scaffolded project — most notably
 `template/scripts/katalyst.mjs`, which is **frozen at scaffold time** and dependency-free by
@@ -182,12 +179,12 @@ Nothing here runs in the background; removing it is deleting things. In order:
 
 - **Apache only.** Nginx mode is detected and refused with a clear message rather than
   supported. Switch Laragon to Apache to use this tool.
-- **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
-  Confirmed live, repeatedly, on two machines: it can leave Apache serving a stale in-memory
-  config (or crash it outright) with no code-side fix that doesn't make things worse — see
-  the file header comments in `laragon.mjs` for the full story. When it happens: full
-  Stop All → Start All in Laragon, then `node index.js resume <name>`. The tool detects and
-  reports this rather than guessing.
+- **Without `setup` (instant mode), `laragon.exe reload` is not fully reliable** once Apache
+  has been running a while. Confirmed live, repeatedly, on two machines: it can leave Apache
+  serving a stale in-memory config (or crash it outright) — see the file header comments in
+  `laragon.mjs` for the full story. When it happens: full Stop All → Start All in Laragon,
+  then the `resume <name>` command the failure message prints. **Instant mode removes this
+  entire failure class** — run `setup` once.
 - **One MCP connection per agent CLI, machine-wide** — see the note above.
 - **`--setup-script=`/`--dev-script=` are not implemented.** The original's customization
   hooks didn't make it into this port.

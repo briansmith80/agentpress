@@ -32,6 +32,8 @@ import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
+import { ensureHostsEntry, fetchViaLoopback, installWildcardConf, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
+import { randomBytes } from 'node:crypto';
 
 const TEMPLATE_DIR = fileURLToPath(new URL('../template', import.meta.url));
 const ENGINE_DIR = fileURLToPath(new URL('..', import.meta.url));
@@ -43,8 +45,15 @@ function bail(msg) {
   process.exitCode = 1;
 }
 
-/** The command a user should type to run this tool — clone-based reality, not the unpublished npm name. */
-const CLI = `node ${join(ENGINE_DIR, 'index.js')}`;
+/**
+ * The command a user should type to run this tool. When running out of an
+ * npm/npx installation (node_modules in our own path), the durable
+ * invocation is the package name — the npx cache path we're executing from
+ * is ephemeral and must never be printed as advice. From a git clone, the
+ * checkout path is the right thing.
+ */
+const RUNNING_FROM_PACKAGE = /[\\/]node_modules[\\/]/i.test(ENGINE_DIR);
+const CLI = RUNNING_FROM_PACKAGE ? 'npx create-katalyst-laragon' : `node ${join(ENGINE_DIR, 'index.js')}`;
 
 /**
  * The wp.bat shim path, backslash-doubled for templating into JS/JSON
@@ -202,6 +211,48 @@ async function confirmScaffold(name, hostname) {
 }
 
 /**
+ * Instant-mode reachability probe: serve a token from the site's public/
+ * through the wildcard vhost, over the loopback with an explicit Host
+ * header — no DNS, no hosts-entry dependency, no per-site vhost. Replaces
+ * verifyDocroot's dual-request dance (wrong-docroot is impossible when the
+ * wildcard derives the docroot by convention).
+ */
+async function probeInstant(hostname, projectDir, { timeoutMs = 12_000 } = {}) {
+  const token = randomBytes(12).toString('hex');
+  const probeFile = join(projectDir, 'public', '.katalyst-probe.txt');
+  await writeFile(probeFile, token, 'utf8');
+  try {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const res = await fetchViaLoopback(hostname, '/.katalyst-probe.txt');
+      if (res && res.status === 200 && res.body.trim() === token) return true;
+      await sleep(750);
+    }
+    return false;
+  } finally {
+    await rm(probeFile, { force: true }).catch(() => {});
+  }
+}
+
+/** Warn-only wrapper around the elevated hosts write — a declined UAC must never sink the scaffold, since WordPress installation itself needs no DNS. */
+async function ensureHostsEntryWithGuidance(hostname) {
+  console.log('→ Adding the hosts entry (a Windows permission prompt may appear — approve it)…');
+  const result = await ensureHostsEntry(hostname);
+  if (result.ok) {
+    console.log(result.already ? '✓ hosts entry already present' : '✓ hosts entry added');
+  } else {
+    console.log(
+      `⚠ Could not write the hosts entry (${result.reason}).\n` +
+        `  The install will still complete, but the browser/MCP need this line in\n` +
+        `  ${join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')}:\n` +
+        `    127.0.0.1\t${hostname}\n` +
+        '  Add it by hand (as admin), or click Reload in Laragon once — it syncs hosts too.',
+    );
+  }
+  return result.ok;
+}
+
+/**
  * Detect-only — this tool never spawns a competing Apache process (see
  * laragon.mjs's file header point 5: a raw relaunch DID bring the port back
  * up, but with a stale config that silently 404'd the brand-new site while
@@ -301,7 +352,22 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     return;
   }
 
-  if (!warnedAboutReloadThisSession) {
+  // Instant mode: the one-time wildcard vhost serves <name>/public by
+  // convention, so this scaffold needs no Laragon reload at all. Activity
+  // is PROVEN by a live probe (conf-on-disk ≠ conf-in-Apache until the
+  // one-time restart happened).
+  const instant = wildcardConfInstalled() && (await wildcardActive());
+  if (wildcardConfInstalled() && !instant) {
+    console.log(
+      '⚠ Instant mode is installed but not active yet (Apache has not restarted since setup).\n' +
+        '  Falling back to the classic Laragon-reload flow for this scaffold. One-time fix:\n' +
+        '  Stop All → Start All in Laragon, and every future scaffold skips reloads entirely.\n',
+    );
+  } else if (!wildcardConfInstalled()) {
+    console.log(`  Tip: run \`${CLI} setup\` once to enable instant scaffolds (no more Laragon reloads).\n`);
+  }
+
+  if (!instant && !warnedAboutReloadThisSession) {
     console.log(
       '→ Creating this site will trigger a Laragon reload, which restarts Apache/MySQL for\n' +
         '  EVERY site on this machine, not just this one — expect a brief, machine-wide blip.\n' +
@@ -330,6 +396,22 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     await mkdir(WWW_DIR, { recursive: true });
     await renameWithRetry(stagingDir, projectDir);
     console.log(`✓ Project created at ${projectDir}`);
+
+    if (instant) {
+      console.log('→ Instant mode: no Laragon reload needed.');
+      await ensureHostsEntryWithGuidance(hostname);
+      if (!(await probeInstant(hostname, projectDir))) {
+        bail(
+          `✖ The wildcard vhost did not serve ${hostname} within 12s — Apache may be down or the\n` +
+            `  wildcard conf (${WILDCARD_CONF_PATH}) may have been removed.\n` +
+            `  Run \`${CLI} doctor\`, fix what it reports, then:${resumeHint(name, extraPlugins)}`,
+        );
+        return;
+      }
+      console.log(`✓ http://${hostname} is live (served by the wildcard vhost)`);
+      await finishInstall({ name, hostname, projectDir, extraPlugins });
+      return;
+    }
 
     await snapshotHosts();
     console.log('→ Reloading Laragon (this can take a while, and may need you to approve a Windows permission prompt)…');
@@ -627,8 +709,9 @@ async function resumeCommand(name, { flags = {} } = {}) {
     return;
   }
 
+  const instant = wildcardConfInstalled() && (await wildcardActive());
   const vhost = await findVhostForProject(projectDir);
-  if (!vhost) {
+  if (!vhost && !instant) {
     // The folder exists (checked above) but Laragon hasn't generated its
     // vhost — an interrupted scaffold killed before the reload finished.
     // Pointing back at the scaffold command would just loop (it collides on
@@ -643,21 +726,32 @@ async function resumeCommand(name, { flags = {} } = {}) {
   }
   const { suffix } = await inferHostnameSuffix();
   const env = hasEnv ? parseEnvFile(await readFile(join(projectDir, '.env'), 'utf8')) : {};
-  const hostname = env.SITE_HOST || vhost.hostname || `${name}${suffix}`;
+  const hostname = env.SITE_HOST || vhost?.hostname || `${name}${suffix}`;
   if (!(await hostsHasEntry(hostname))) {
-    bail(`✖ No hosts entry for ${hostname} yet. Open Laragon and click Reload, wait for it to settle, then retry resume.`);
-    return;
+    if (instant) {
+      await ensureHostsEntryWithGuidance(hostname);
+    } else {
+      bail(`✖ No hosts entry for ${hostname} yet. Open Laragon and click Reload, wait for it to settle, then retry resume.`);
+      return;
+    }
   }
 
   console.log('→ Checking the site is reachable…');
-  const verify = await verifyDocroot(hostname, projectDir);
-  if (!verify.ok) {
-    const test = await testApacheConfig();
-    bail(
-      `✖ Not reachable yet (outcome: ${verify.outcome}).${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
-        '  In Laragon, do a full Stop All then Start All, then retry resume.',
-    );
-    return;
+  if (instant) {
+    if (!(await probeInstant(hostname, projectDir))) {
+      bail(`✖ The wildcard vhost did not serve ${hostname} — run \`${CLI} doctor\`, fix what it reports, then retry resume.`);
+      return;
+    }
+  } else {
+    const verify = await verifyDocroot(hostname, projectDir);
+    if (!verify.ok) {
+      const test = await testApacheConfig();
+      bail(
+        `✖ Not reachable yet (outcome: ${verify.outcome}).${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
+          '  In Laragon, do a full Stop All then Start All, then retry resume.',
+      );
+      return;
+    }
   }
   console.log(`✓ http://${hostname} is live and serving from public\\`);
 
@@ -819,6 +913,43 @@ async function fileExists(p) {
   }
 }
 
+/**
+ * One-time instant-mode enablement: writes the wildcard vhost conf, then
+ * either confirms it's live (Apache restarted since) or tells the user to
+ * do the single Stop All → Start All this will ever need. Safe to re-run
+ * any time — it's how you verify after the restart, too.
+ */
+async function setupCommand() {
+  const state = await preflight();
+  if (state.webServer === 'nginx') {
+    bail('✖ Laragon is in Nginx mode — instant mode is Apache-only. Switch to Apache first.');
+    return;
+  }
+  if (!wildcardConfInstalled()) {
+    const { suffix, path } = await installWildcardConf();
+    console.log(`✓ Wildcard vhost installed at ${path} (serves *${suffix} from www\\<name>\\public)`);
+  } else {
+    console.log(`✓ Wildcard vhost already installed at ${WILDCARD_CONF_PATH}`);
+  }
+  if (!state.apacheUp) {
+    console.log('→ Apache is not running — click Start All in Laragon, then run setup again to verify.');
+    return;
+  }
+  console.log('→ Verifying it is live (serving a probe through the wildcard)…');
+  if (await wildcardActive()) {
+    console.log(
+      '\n✓ Instant mode is ACTIVE. Scaffolds no longer trigger Laragon reloads —\n' +
+        '  no machine-wide blips, no reload-staleness failures, sites are live instantly.',
+    );
+    return;
+  }
+  console.log(
+    '\n→ Not active yet — the running Apache predates the conf. ONE-TIME step:\n' +
+      '  in Laragon, do a full Stop All → Start All (not just Reload), then run\n' +
+      `  \`${CLI} setup\` again to confirm. After that, no scaffold ever needs a reload.`,
+  );
+}
+
 async function registerQuickAppCommand() {
   const result = await registerQuickApp();
   if (!result.added) {
@@ -838,15 +969,14 @@ function printUsage() {
   console.log(`
 create-katalyst-laragon v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
 
-From this tool's checkout (${ENGINE_DIR}):
+  ${CLI} doctor              Check this machine's Laragon/PHP/MySQL/Node state
+  ${CLI} setup               One-time: enable instant scaffolds (no Laragon reloads)
+  ${CLI} <name>              Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
+  ${CLI} resume <name>       Finish an interrupted scaffold
+  ${CLI} list                List scaffolded sites
+  ${CLI} register-quick-app  Add a Laragon Quick app entry for this tool
 
-  node index.js doctor              Check this machine's Laragon/PHP/MySQL/Node state
-  node index.js <name>              Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
-  node index.js resume <name>       Finish an interrupted scaffold (vhost already up)
-  node index.js list                List scaffolded sites
-  node index.js register-quick-app  Add a Laragon Quick app entry for this tool
-
-From inside a scaffolded site's directory (using the full path to this checkout):
+From inside a scaffolded site's directory:
 
   ${CLI} update      Refresh Katalyst's own tooling files
   ${CLI} destroy     Permanently remove that site
@@ -857,7 +987,7 @@ Env:   KATALYST_LARAGON_ROOT  KATALYST_MYSQL_ROOT_PASSWORD  KATALYST_MYSQL_PORT 
 }
 
 const KNOWN_FLAGS = new Set(['plugins']);
-const KNOWN_COMMANDS = new Set(['doctor', 'list', 'resume', 'update', 'destroy', 'register-quick-app', 'help', 'version']);
+const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'destroy', 'register-quick-app', 'help', 'version']);
 
 function editDistance(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -905,6 +1035,11 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
 
   if (args.command === 'doctor') {
     await runDoctor();
+    return;
+  }
+
+  if (args.command === 'setup') {
+    await setupCommand();
     return;
   }
 

@@ -12,6 +12,7 @@ import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight } fro
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
 import { psCapture } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
+import { wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
 import { join } from 'node:path';
 
 async function exists(p) {
@@ -117,6 +118,14 @@ export async function runDoctor() {
     blocked('Web server', 'nothing listening on :80 — click Start All in Laragon.', 'Apache is not running');
   }
   row('TCP :80 (web server)', state.apacheUp ? 'listening' : 'closed — click Start All in Laragon');
+
+  if (!wildcardConfInstalled()) {
+    row('Instant mode', 'off — run `setup` once to enable instant scaffolds (no Laragon reloads)');
+  } else if (state.apacheUp && (await wildcardActive())) {
+    row('Instant mode', 'ACTIVE — scaffolds skip Laragon reloads entirely');
+  } else {
+    row('Instant mode', 'installed but not live yet — one-time Stop All → Start All in Laragon, then re-run setup to confirm');
+  }
   row(`TCP :${MYSQL_PORT} (MySQL)`, state.mysqlUp ? 'listening' : `closed — click Start All in Laragon${MYSQL_PORT === 3306 ? ' (moved MySQL? set KATALYST_MYSQL_PORT)' : ''}`);
   if (!state.mysqlUp) blockers.push('MySQL is not running');
 

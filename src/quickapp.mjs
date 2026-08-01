@@ -14,7 +14,12 @@ const ENTRY_NAME = 'KatalystWP';
 const INDEX_JS = fileURLToPath(new URL('../index.js', import.meta.url));
 // %s quoted: an unquoted multi-word entry ("my site") would otherwise split
 // into two argv entries and silently scaffold a site named "my".
-const ENTRY_LINE = `${ENTRY_NAME}=node "${INDEX_JS}" "%s" --yes`;
+// From an npm/npx install the executing path is an ephemeral cache — the
+// tray entry must use the package name, never that path.
+const RUNNING_FROM_PACKAGE = /[\\/]node_modules[\\/]/i.test(INDEX_JS);
+const ENTRY_LINE = RUNNING_FROM_PACKAGE
+  ? `${ENTRY_NAME}=npx -y create-katalyst-laragon@latest "%s" --yes`
+  : `${ENTRY_NAME}=node "${INDEX_JS}" "%s" --yes`;
 
 export async function registerQuickApp() {
   let content;

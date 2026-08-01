@@ -271,11 +271,7 @@ function runInherit(cmd, args = []) {
 }
 
 async function checkUpdate() {
-  // Opt-IN, not opt-out: create-katalyst-laragon is not published to npm,
-  // so until it is, polling the registry can only ever 404 — or worse,
-  // recommend whatever a name-squatter publishes under it. Enable with
-  // KATALYST_UPDATE_CHECK=1 once the real package exists.
-  if (!process.env.KATALYST_UPDATE_CHECK) return null;
+  if (process.env.KATALYST_NO_UPDATE_CHECK) return null;
   try {
     const res = await fetch('https://registry.npmjs.org/create-katalyst-laragon/latest', {
       signal: AbortSignal.timeout(2500),
@@ -318,7 +314,7 @@ for (;;) {
   } else if (choice === 'shell') {
     openTerminalHere();
   } else if (choice === 'update') {
-    console.log('  In your katalyst-laragon checkout: git pull, then run its update command from this directory.');
+    console.log(`  Run: npx create-katalyst-laragon@${latestVersion} update   (from this directory)`);
   } else if (choice.startsWith('agent:')) {
     await runInherit(choice.slice('agent:'.length));
   }

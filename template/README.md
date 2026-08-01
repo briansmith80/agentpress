@@ -29,13 +29,14 @@ everything else here is Katalyst's own tooling, not part of the site).
 
 ## Updating Katalyst's own tooling
 
-From the katalyst-laragon checkout (wherever you cloned it):
+From this directory:
 
 ```bash
-git pull                    # get the latest tool version
-cd <this site's directory>
-node <path-to-checkout>\index.js update
+npx create-katalyst-laragon@latest update
 ```
+
+(Using a git checkout of the tool instead? `git pull` there, then run
+`node <path-to-checkout>\index.js update` from here.)
 
 Refreshes `scripts/`, `wp-cli.yml`, `.gitignore`, this README, and `package.json`'s own
 scripts (any script you added under a different name is preserved, and so are any
