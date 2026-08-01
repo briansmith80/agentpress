@@ -329,6 +329,13 @@ handoff_reason: switching-machines
 >   KATALYST_PREMIUM_PLUGINS_REPO or ~/.katalyst-laragon/config.json.
 
 ## Context & Gotchas
+> - **NEW (2026-08-01): orphaned-httpd failure mode identified.** If Laragon itself
+>   restarts while Apache keeps running, the httpd processes are orphaned — Laragon's
+>   Stop All no longer reaches them, and Start All's fresh Apache silently dies because
+>   the orphans still own :80/:443. Symptoms: restarts that "don't take" (httpd StartTime
+>   never changes), and possibly some of the reload-staleness incidents. Diagnosis:
+>   `Get-Process httpd | Select Id, StartTime` before/after a restart. Remedy:
+>   `Stop-Process` the orphans, then Start All. Candidate future doctor check.
 > - **`laragon.exe reload` is not fully reliable once Apache has been running a while.**
 >   Confirmed live, repeatedly (5+ times in one session): can leave Apache serving a stale
 >   in-memory config (site 404s despite a correct on-disk vhost conf) or crash it outright.
