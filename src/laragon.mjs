@@ -50,12 +50,21 @@ export async function laragonRunning() {
   return processRunning('laragon');
 }
 
+/** A single TCP probe can flake under load (observed twice live: one false "not listening" while curl 200'd concurrently) — a genuinely closed port fails all retries in ~1.2s, so retry before declaring it down. */
+async function probeWithRetry(port, { attempts = 3, delayMs = 600 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (await tcpProbe(port)) return true;
+    if (i < attempts - 1) await sleep(delayMs);
+  }
+  return false;
+}
+
 export async function apacheUp() {
-  return tcpProbe(80);
+  return probeWithRetry(80);
 }
 
 export async function mysqlUp() {
-  return tcpProbe(MYSQL_PORT);
+  return probeWithRetry(MYSQL_PORT);
 }
 
 // Cached while Apache is confirmed healthy, purely for the read-only `-t`
