@@ -2,16 +2,17 @@
 // failure. Every fact this prints is one the rest of the tool used to assume
 // blindly (which PHP Apache serves with, whether Laragon is even running,
 // which of three Node installs is active, ...); doctor makes them explicit.
+// Every failure row says what to DO, not just what is wrong, and the run
+// ends with a ready-to-scaffold verdict (nonzero exit code when NO) so a
+// stranger doesn't have to interpret raw rows.
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { LARAGON_ROOT, HOSTS_PATH, WWW_DIR } from './paths.mjs';
+import { LARAGON_ROOT, HOSTS_PATH, WWW_DIR, PREMIUM_PLUGINS_DIR } from './paths.mjs';
 import { phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
-import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp } from './laragon.mjs';
-import { processRunning, psCapture } from './win.mjs';
-import { resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
+import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight } from './laragon.mjs';
+import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
+import { psCapture } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { join } from 'node:path';
-
-const BASH_EXE = join(LARAGON_ROOT, 'bin', 'git', 'bin', 'bash.exe');
 
 async function exists(p) {
   try {
@@ -27,11 +28,17 @@ async function nodeOnPath() {
   return stdout.trim() || null;
 }
 
+async function npmGlobalPrefix() {
+  const { code, stdout } = await psCapture('npm prefix -g');
+  if (code !== 0) return null;
+  return stdout.trim() || null;
+}
+
 async function defenderRealtime() {
   const { code, stdout } = await psCapture('(Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled');
   if (code !== 0) return 'unknown (needs elevation to query, or Defender absent)';
   const v = stdout.trim();
-  if (v === 'True') return 'on';
+  if (v === 'True') return 'on (first scaffold may be slower while new files are scanned — normal)';
   if (v === 'False') return 'off';
   return 'unknown';
 }
@@ -69,22 +76,49 @@ async function existingSiteNames() {
 
 export async function runDoctor() {
   const lines = [];
+  const blockers = [];
   const row = (label, value) => lines.push(`  ${label.padEnd(26)}  ${value}`);
+  const blocked = (label, value, why) => {
+    row(label, value);
+    blockers.push(why);
+  };
 
   lines.push('Laragon / environment check\n');
 
-  row('Laragon root', (await exists(LARAGON_ROOT)) ? LARAGON_ROOT : `${LARAGON_ROOT} — NOT FOUND`);
+  if (await exists(LARAGON_ROOT)) {
+    row('Laragon root', LARAGON_ROOT);
+  } else {
+    blocked(
+      'Laragon root',
+      `${LARAGON_ROOT} — NOT FOUND. If Laragon lives elsewhere, set KATALYST_LARAGON_ROOT to its folder.`,
+      'Laragon root not found',
+    );
+  }
 
-  const [laragonUp, httpdUp, apache80, mysql3306] = await Promise.all([
-    laragonRunning(),
-    processRunning('httpd'),
-    apacheUp(),
-    mysqlUp(),
-  ]);
-  row('laragon.exe process', laragonUp ? 'running' : 'NOT running — start Laragon first');
-  row('httpd.exe process', httpdUp ? 'running' : 'NOT running');
-  row('TCP :80 (Apache)', apache80 ? 'listening' : 'closed');
-  row('TCP :3306 (MySQL)', mysql3306 ? 'listening' : 'closed');
+  const state = await preflight();
+  row('laragon.exe process', state.laragonRunning ? 'running' : 'NOT running — start Laragon first');
+  if (!state.laragonRunning) blockers.push('Laragon is not running');
+
+  if (state.webServer === 'apache') {
+    row('Web server', 'Apache (httpd.exe) — supported');
+  } else if (state.webServer === 'nginx') {
+    blocked(
+      'Web server',
+      'NGINX — not supported. Switch to Apache in Laragon (Menu ▸ Apache, or Preferences ▸ Services & Ports).',
+      'Laragon is in Nginx mode (Apache required)',
+    );
+  } else if (state.webServer === 'foreign') {
+    blocked(
+      'Web server',
+      "something OTHER than Laragon's Apache owns port 80 (IIS?) — stop it or move it off :80.",
+      'a non-Laragon service owns port 80',
+    );
+  } else {
+    blocked('Web server', 'nothing listening on :80 — click Start All in Laragon.', 'Apache is not running');
+  }
+  row('TCP :80 (web server)', state.apacheUp ? 'listening' : 'closed — click Start All in Laragon');
+  row(`TCP :${MYSQL_PORT} (MySQL)`, state.mysqlUp ? 'listening' : `closed — click Start All in Laragon${MYSQL_PORT === 3306 ? ' (moved MySQL? set KATALYST_MYSQL_PORT)' : ''}`);
+  if (!state.mysqlUp) blockers.push('MySQL is not running');
 
   try {
     const php = await resolvePhpExe();
@@ -94,11 +128,11 @@ export async function runDoctor() {
     if (ini) {
       row('  memory_limit', ini.memory_limit);
       row('  upload/post max', `${ini.upload_max_filesize} / ${ini.post_max_size} (effective cap = the smaller)`);
-      row('  SMTP', `${ini.SMTP || '(unset)'}:${ini.smtp_port || ''} — should point at Mailpit 127.0.0.1:1025`);
-      row('  exif extension', ini.exif ? 'enabled' : 'NOT enabled (WP Site Health will note this)');
+      row('  SMTP', `${ini.SMTP || '(unset)'}:${ini.smtp_port || ''} — mail needs Mailpit at 127.0.0.1:1025, or a mail plugin`);
+      row('  exif extension', ini.exif ? 'enabled' : 'NOT enabled (WP Site Health will note this; harmless for most sites)');
     }
   } catch (err) {
-    row('PHP', `could not resolve — ${err.message}`);
+    blocked('PHP', `could not resolve — ${err.message}`, 'no PHP found under Laragon');
   }
 
   const nodePath = await nodeOnPath();
@@ -107,14 +141,13 @@ export async function runDoctor() {
     row('  Node on PATH', `${nodePath} — DIFFERS from the Node running this CLI (nvm/version-manager drift)`);
   }
 
-  row('WP-CLI', (await wpCliPresent()) ? 'installed (C:\\laragon\\usr\\bin\\wp-cli.phar)' : 'NOT installed yet — run once to install');
-  row('Git Bash', (await exists(BASH_EXE)) ? BASH_EXE : 'NOT found (expected for .sh setup-script dispatch)');
+  row('WP-CLI', (await wpCliPresent()) ? `installed (${join(LARAGON_ROOT, 'usr', 'bin', 'wp-cli.phar')})` : 'not installed yet — the first scaffold downloads it automatically');
 
   const suffix = await inferHostnameSuffix();
-  row('Hostname suffix', `${suffix.suffix}  (${suffix.votes ?? 0}/${suffix.sample ?? 0} existing vhosts agree)`);
+  row('Hostname suffix', `${suffix.suffix}  (${suffix.votes ?? 0}/${suffix.sample ?? 0} existing vhosts agree${suffix.sample === 0 ? ' — fresh install, .test assumed' : ''})`);
 
   const magicCount = await hostsMagicCount();
-  row('hosts entries (Laragon)', magicCount === null ? 'could not read hosts file' : `${magicCount} "#laragon magic!" lines`);
+  row('hosts entries (Laragon)', magicCount === null ? 'could not read hosts file (run doctor as admin to check, or ignore — scaffold will prompt)' : `${magicCount} "#laragon magic!" lines`);
 
   row('Defender real-time protection', await defenderRealtime());
 
@@ -125,20 +158,47 @@ export async function runDoctor() {
   const agentLines = Object.entries(agents).map(([key, path]) => `${AGENT_LABELS[key]}: ${path || 'not found'}`);
   row('AI agent CLIs', agentLines.join('  |  '));
   if (Object.values(agents).some(Boolean)) {
-    row('  npm global installs', 'land in C:\\nvm4w\\nodejs — switching Node versions can silently lose them');
+    const prefix = await npmGlobalPrefix();
+    const execDir = process.execPath.replace(/\\[^\\]+$/, '');
+    if (prefix && prefix.toLowerCase() !== execDir.toLowerCase()) {
+      row('  npm global installs', `land in ${prefix} — switching Node versions can silently lose them`);
+    }
   }
 
-  if (mysql3306) {
+  const gh = await spawnCapture('gh', ['--version']);
+  row(
+    'GitHub CLI (gh)',
+    gh.code === 0
+      ? `${gh.stdout.split('\n')[0].trim()} — premium plugin sync available`
+      : `not found — optional; premium plugins fall back to zips in ${PREMIUM_PLUGINS_DIR}`,
+  );
+
+  if (state.mysqlUp) {
     try {
       const mysqlExe = await resolveMysqlClientExe();
       row('MySQL client', mysqlExe);
       const cred = await resolveRootCredential();
-      row('MySQL root credential', cred ? `resolved (${cred.source})` : 'could not resolve — set KATALYST_MYSQL_ROOT_PASSWORD');
+      if (cred) {
+        row('MySQL root credential', `resolved (${cred.source})`);
+      } else {
+        blocked(
+          'MySQL root credential',
+          'could not resolve — set KATALYST_MYSQL_ROOT_PASSWORD to your MySQL root password and retry',
+          'MySQL root credential unknown',
+        );
+      }
     } catch (err) {
-      row('MySQL client', `could not resolve — ${err.message}`);
+      blocked('MySQL client', `could not resolve — ${err.message}`, 'no MySQL client found under Laragon');
     }
   }
 
+  lines.push('');
+  if (blockers.length === 0) {
+    lines.push('  Ready to scaffold: YES');
+  } else {
+    lines.push(`  Ready to scaffold: NO — fix first: ${blockers.join('; ')}`);
+    process.exitCode = 1;
+  }
   lines.push('');
 
   console.log(lines.join('\n'));
