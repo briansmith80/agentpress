@@ -1,6 +1,6 @@
 {
   "name": "create-katalyst-laragon",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "Scaffold a local WordPress + AI-agent dev environment on Laragon (Windows, no Docker).",
   "bin": {

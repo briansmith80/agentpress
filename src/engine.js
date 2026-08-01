@@ -1073,21 +1073,29 @@ async function setupCommand() {
     console.log(`✓ Wildcard vhost already installed at ${WILDCARD_CONF_PATH}`);
   }
   if (!state.apacheUp) {
-    console.log('→ Apache is not running — click Start All in Laragon, then run setup again to verify.');
+    console.log(
+      '→ Apache is not running — click Start All in Laragon, then run setup again to verify.\n' +
+        `\n  All commands: ${CLI} help`,
+    );
     return;
   }
   console.log('→ Verifying it is live (serving a probe through the wildcard)…');
   if (await wildcardActive()) {
     console.log(
       '\n✓ Instant mode is ACTIVE. Scaffolds no longer trigger Laragon reloads —\n' +
-        '  no machine-wide blips, no reload-staleness failures, sites are live instantly.',
+        '  no machine-wide blips, no reload-staleness failures, sites are live instantly.\n' +
+        '\n  Setup is done — you never need to run it again on this machine (unless you\n' +
+        '  want to add plugin zips or change the license key).\n' +
+        `\n  Next: create your first site with  ${CLI} my-site\n` +
+        `  All commands: ${CLI} help`,
     );
     return;
   }
   console.log(
     '\n→ Not active yet — the running Apache predates the conf. ONE-TIME step:\n' +
       '  in Laragon, do a full Stop All → Start All (not just Reload), then run\n' +
-      `  \`${CLI} setup\` again to confirm. After that, no scaffold ever needs a reload.`,
+      `  \`${CLI} setup\` again to confirm. After that, no scaffold ever needs a reload.\n` +
+      `\n  All commands: ${CLI} help`,
   );
 }
 
@@ -1175,7 +1183,7 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command === 'doctor') {
-    await runDoctor();
+    await runDoctor({ cli: CLI });
     return;
   }
 

@@ -75,7 +75,7 @@ async function existingSiteNames() {
   }
 }
 
-export async function runDoctor() {
+export async function runDoctor({ cli = 'node index.js' } = {}) {
   const lines = [];
   const blockers = [];
   const row = (label, value) => lines.push(`  ${label.padEnd(26)}  ${value}`);
@@ -204,8 +204,17 @@ export async function runDoctor() {
   lines.push('');
   if (blockers.length === 0) {
     lines.push('  Ready to scaffold: YES');
+    lines.push('');
+    if (!wildcardConfInstalled()) {
+      lines.push(`  Next: run \`${cli} setup\` once (plugin zips, license key, instant mode), then \`${cli} <name>\` to scaffold.`);
+    } else {
+      lines.push(`  Next: \`${cli} <name>\` to scaffold a site.`);
+    }
+    lines.push(`  All commands: ${cli} help`);
   } else {
     lines.push(`  Ready to scaffold: NO — fix first: ${blockers.join('; ')}`);
+    lines.push('');
+    lines.push(`  Fix the items above, then re-run \`${cli} doctor\`. All commands: ${cli} help`);
     process.exitCode = 1;
   }
   lines.push('');
