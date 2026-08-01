@@ -285,13 +285,23 @@ handoff_reason: switching-machines
 >      npx-form advice when running from a package (verified via clean `npx -y ...@0.3.0`
 >      run); site menu's update check re-enabled; Quick-app registers the npx form when
 >      package-installed.
-> 8. [ ] **Remaining, deliberately deferred:** GitHub repo visibility (code is now public
->    on npm anyway — making the repo public would let the friend file issues; owner's
->    call); collaborator invite only needed if the friend should pull pre-release git
->    states; single-global-MCP limitation (documented in README); low-severity review
->    leftovers (Quick-app command-word names shadow scaffolding); test-site cleanup on this
->    machine (ktest1, katalysttest2, katalysttest3, instanttest1 all still live — destroy
->    when done testing).
+> 8. [x] **v0.4.0 published 2026-08-01: license auto-activation + setup wizard.** Oxygen 6
+>    ships `wp oxygen license <key>` (one key covers both Breakdance-for-Oxygen extensions
+>    — they have no licensing code of their own); scaffolds apply the key from
+>    `~/.katalyst-laragon/config.json` `licenses.oxygen` right after the premium install,
+>    best-effort. Verified live: "Oxygen license active (Valid, Active)", `wp oxygen
+>    status` → Pro Mode. The owner's key was extracted from doncour-oxygen-mcp's DB into
+>    local config (never displayed/committed). `setup` now runs a TTY-only preferences
+>    wizard: which premium plugins to auto-install (saved as `premiumPlugins`, absent=all,
+>    []=none — sync+install respect it) + the license key (Enter keeps saved answers).
+>    Config access centralized in `src/config.mjs`. All five session test sites destroyed
+>    (the destroy MCP-guard proved itself: deleting older sites left the newest site's
+>    wiring intact).
+> 9. [ ] **Remaining, deliberately deferred:** GitHub repo visibility (code is public on
+>    npm anyway — a public repo would let the friend file issues; owner's call);
+>    single-global-MCP limitation (documented in README); low-severity review leftovers
+>    (Quick-app command-word names shadow scaffolding). Friend rollout is otherwise DONE:
+>    `npx create-katalyst-laragon@latest doctor` → `setup` → `<name>`.
 
 ## Git State
 > - Branch: `main`, pushed to `origin/main` 2026-08-01 (work machine: `git pull` to catch
