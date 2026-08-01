@@ -53,7 +53,10 @@ export async function copyTemplates(srcDir, destDir, vars, { skip = new Set(), a
  * package.json needs a smarter merge than a blanket overwrite-or-skip: the
  * template's own scripts should win (that's what `update` is for), but a
  * script the *user* added under a name the template doesn't know about must
- * survive, and the project's own `name` field must survive too.
+ * survive, and the project's own `name` field must survive too. The merge
+ * base is the EXISTING file, with template keys layered on top — building
+ * from the template instead used to silently delete every user-added field
+ * (dependencies, type, engines, ...) on every `update`.
  */
 export async function mergePackageJson(templatePath, targetPath, vars) {
   const rendered = (await readFile(templatePath, 'utf8')).replaceAll('__PROJECT_NAME__', vars.PROJECT_NAME);
@@ -69,7 +72,7 @@ export async function mergePackageJson(templatePath, targetPath, vars) {
   for (const [key, value] of Object.entries(existing.scripts || {})) {
     if (!known.has(key)) scripts[key] = value;
   }
-  const merged = { ...tpl, scripts };
+  const merged = { ...existing, ...tpl, scripts };
   if (existing.name) merged.name = existing.name;
   await writeFile(targetPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
 }

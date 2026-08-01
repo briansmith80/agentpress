@@ -2,6 +2,7 @@
 // password that authenticates the stdio proxy against the site. Playwright
 // runs over stdio here (no container, no --allowed-hosts flag needed — that
 // existed only to let an HTTP server accept non-localhost clients).
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,8 +12,12 @@ import { LARAGON_ROOT } from './paths.mjs';
 
 const APP_PASSWORD_NAME = 'katalyst-laragon';
 const LARAGON_CRT = join(LARAGON_ROOT, 'etc', 'ssl', 'laragon.crt');
-const WP_MCP_PROXY = ['npx', '-y', '@automattic/mcp-wordpress-remote'];
-const PLAYWRIGHT_MCP = ['npx', '-y', '@playwright/mcp@latest'];
+// Pinned versions, not @latest — these resolve at every agent session
+// start, so an upstream breaking release would instantly break MCP for
+// every EXISTING site on every machine with zero local change. Bump
+// deliberately, test, then re-scaffold or re-wire.
+const WP_MCP_PROXY = ['npx', '-y', '@automattic/mcp-wordpress-remote@0.4.0'];
+const PLAYWRIGHT_MCP = ['npx', '-y', '@playwright/mcp@0.0.78'];
 
 /**
  * Rotates a NAMED application password — never `--all`, which on a
@@ -28,16 +33,20 @@ export async function mintAppPassword({ path, adminUser }) {
 }
 
 function wordpressEnv({ wpApiUrl, username, password }) {
-  return {
+  const env = {
     WP_API_URL: wpApiUrl,
     WP_API_USERNAME: username,
     WP_API_PASSWORD: password,
     OAUTH_ENABLED: 'false',
-    // Harmless on http; makes an eventual https switch (the site already
-    // gets a valid cert for free via Laragon's *.test SAN) work with no
-    // code change, since this is Laragon's own self-signed CA.
-    NODE_EXTRA_CA_CERTS: LARAGON_CRT,
   };
+  // Only when the cert actually exists — Laragon generates it lazily on
+  // first SSL enable, and pointing Node at a missing file adds a warning
+  // line to every MCP proxy launch inside the user's agent. When present:
+  // harmless on http; makes an eventual https switch (the site already gets
+  // a valid cert for free via Laragon's *.test SAN) work with no code
+  // change, since this is Laragon's own self-signed CA.
+  if (existsSync(LARAGON_CRT)) env.NODE_EXTRA_CA_CERTS = LARAGON_CRT;
+  return env;
 }
 
 async function readJson(path, fallback) {

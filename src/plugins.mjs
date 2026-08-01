@@ -2,31 +2,48 @@
 // policy from the Docker original — this layer never touched Docker
 // directly (it always went through `wp` in the workspace container), so it
 // carries over unchanged except for dropping the exec prefix.
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runWp, spawnCapture } from './wp.mjs';
-import { PREMIUM_PLUGINS_DIR } from './paths.mjs';
+import { CONFIG_PATH, PREMIUM_PLUGINS_DIR } from './paths.mjs';
 
 // One release tag per plugin (mirrors the `universal-abilities-plugin`
-// tag-per-asset pattern already used for AGENT_CONNECTOR_URL below) in a
-// private repo of licensed zips — `gh` (already authenticated on this
-// machine) refreshes the local cache from here so a zip dropped in on one
-// machine doesn't need manually re-copying to every other one.
-const PREMIUM_PLUGINS_REPO = process.env.KATALYST_PREMIUM_PLUGINS_REPO || 'briansmith80/oxygen-premium-plugins';
+// tag-per-asset pattern used for the connector below) in a private repo of
+// licensed zips — `gh` (if installed and authenticated with access)
+// refreshes the local cache from here so a zip dropped in on one machine
+// doesn't need manually re-copying to every other one. Override for your
+// own repo via KATALYST_PREMIUM_PLUGINS_REPO or, persistently, via
+// ~/.katalyst-laragon/config.json: {"premiumPluginsRepo": "you/your-repo"}.
+const DEFAULT_PREMIUM_PLUGINS_REPO = 'briansmith80/oxygen-premium-plugins';
 
-const AGENT_CONNECTOR_URL = 'https://github.com/soflyy/agent-connector-for-wp/releases/latest/download/agent-connector-for-wp.zip';
+async function premiumPluginsRepo() {
+  if (process.env.KATALYST_PREMIUM_PLUGINS_REPO) return process.env.KATALYST_PREMIUM_PLUGINS_REPO;
+  try {
+    const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
+    if (typeof config.premiumPluginsRepo === 'string' && config.premiumPluginsRepo.trim()) {
+      return config.premiumPluginsRepo.trim();
+    }
+  } catch {
+    // no config file — use the default
+  }
+  return DEFAULT_PREMIUM_PLUGINS_REPO;
+}
+
+// Pinned to a tested release, not /latest/ — these download at scaffold time
+// on every machine, so an upstream release would otherwise change behavior
+// on both machines simultaneously with zero local change. Bump deliberately.
+const AGENT_CONNECTOR_URL = 'https://github.com/soflyy/agent-connector-for-wp/releases/download/v1.26.0/agent-connector-for-wp.zip';
 const UNIVERSAL_ABILITIES_URL =
   'https://github.com/soflyy/agent-connector-for-wp/releases/download/universal-abilities-plugin/universal-abilities-plugin.zip';
 
 /**
  * Oxygen/Breakdance are commercial — not on wordpress.org, no stable public
- * download URL. Rather than hardcode any one user's Downloads path, this
- * looks in `~/.katalyst-laragon/premium-plugins/` for a zip matching each
- * slug (by filename prefix — vendor zips are named e.g.
- * `oxygen-6.2-beta.1.zip`, version-bumped over time) and picks the newest by
- * mtime if more than one is present. Drop a licensed zip in that folder once
- * and every scaffold picks it up; if it's missing, the plugin is skipped
- * with a clear message rather than failing the scaffold.
+ * download URL. This looks in `~/.katalyst-laragon/premium-plugins/` for a
+ * zip matching each slug (exact `<slug>.zip`, or `<slug>-*.zip` for the
+ * version-suffixed names vendors ship) and picks the newest by mtime if more
+ * than one is present. Drop a licensed zip in that folder once and every
+ * scaffold picks it up; if it's missing, the plugin is skipped with a clear
+ * message rather than failing the scaffold.
  */
 const PREMIUM_PLUGINS = [
   { slug: 'oxygen', filePrefix: 'oxygen-' },
@@ -65,14 +82,20 @@ async function isPluginActive(path, slug) {
   return result.code === 0;
 }
 
-async function findLatestZip(filePrefix) {
+function zipMatchesSlug(fileName, { slug, filePrefix }) {
+  const f = fileName.toLowerCase();
+  if (!f.endsWith('.zip')) return false;
+  return f === `${slug}.zip` || f.startsWith(filePrefix.toLowerCase());
+}
+
+async function findLatestZip(plugin) {
   let entries;
   try {
     entries = await readdir(PREMIUM_PLUGINS_DIR);
   } catch {
     return null;
   }
-  const matches = entries.filter((f) => f.toLowerCase().startsWith(filePrefix.toLowerCase()) && f.toLowerCase().endsWith('.zip'));
+  const matches = entries.filter((f) => zipMatchesSlug(f, plugin));
   if (!matches.length) return null;
   const withMtime = await Promise.all(
     matches.map(async (f) => ({ f, mtimeMs: (await stat(join(PREMIUM_PLUGINS_DIR, f))).mtimeMs })),
@@ -82,58 +105,96 @@ async function findLatestZip(filePrefix) {
 }
 
 /**
- * Best-effort refresh of the local premium-plugins cache from
- * `PREMIUM_PLUGINS_REPO` — one release tag per plugin slug, each holding
- * that plugin's licensed zip as an asset. Never fatal: offline, `gh`
- * missing/unauthenticated, or no matching release just means
- * `installPremiumPlugins` falls back to whatever's already cached locally
- * (or skips, if nothing is).
+ * Best-effort refresh of the local premium-plugins cache from the configured
+ * repo — one release tag per plugin slug, each holding that plugin's
+ * licensed zip as an asset. Never fatal: no `gh` at all, offline,
+ * unauthenticated, or no matching release just means `installPremiumPlugins`
+ * falls back to whatever's already cached locally (or skips, if nothing is).
+ * Downloads land in a temp subdir and only move into the cache on success,
+ * so a connection killed mid-transfer can't leave a truncated zip shadowing
+ * a good older one.
  */
 export async function syncPremiumPluginsFromGitHub({ onStep } = {}) {
-  await mkdir(PREMIUM_PLUGINS_DIR, { recursive: true });
+  try {
+    await mkdir(PREMIUM_PLUGINS_DIR, { recursive: true });
+  } catch (err) {
+    onStep?.(`  (couldn't prepare ${PREMIUM_PLUGINS_DIR}: ${err.message} — premium plugin sync skipped)`);
+    return;
+  }
+
+  const ghProbe = await spawnCapture('gh', ['--version']);
+  if (ghProbe.code === null) {
+    onStep?.(
+      'GitHub CLI (gh) not installed — skipping premium plugin sync (optional). To auto-install ' +
+        `your own licensed plugins, drop zips named oxygen-*.zip etc. into ${PREMIUM_PLUGINS_DIR}`,
+    );
+    return;
+  }
+
+  const repo = await premiumPluginsRepo();
+  const tmpDir = join(PREMIUM_PLUGINS_DIR, '.sync-tmp');
   for (const { slug } of PREMIUM_PLUGINS) {
-    const result = await spawnCapture('gh', [
-      'release',
-      'download',
-      slug,
-      '--repo',
-      PREMIUM_PLUGINS_REPO,
-      '--dir',
-      PREMIUM_PLUGINS_DIR,
-      '--clobber',
-      '--pattern',
-      '*.zip',
-    ]);
-    if (result.code === 0) {
-      onStep?.(`synced ${slug} from ${PREMIUM_PLUGINS_REPO}`);
-    } else {
-      onStep?.(`  (couldn't sync ${slug} from GitHub, using local cache if present: ${(result.stderr || result.stdout).trim().split('\n')[0]})`);
+    try {
+      await rm(tmpDir, { recursive: true, force: true });
+      await mkdir(tmpDir, { recursive: true });
+      const result = await spawnCapture('gh', [
+        'release',
+        'download',
+        slug,
+        '--repo',
+        repo,
+        '--dir',
+        tmpDir,
+        '--clobber',
+        '--pattern',
+        '*.zip',
+      ]);
+      if (result.code === 0) {
+        for (const f of await readdir(tmpDir)) {
+          await rm(join(PREMIUM_PLUGINS_DIR, f), { force: true });
+          await rename(join(tmpDir, f), join(PREMIUM_PLUGINS_DIR, f));
+        }
+        onStep?.(`synced ${slug} from ${repo}`);
+      } else {
+        onStep?.(`  (couldn't sync ${slug} from ${repo}, using local cache if present: ${(result.stderr || result.stdout).trim().split('\n')[0]})`);
+      }
+    } catch (err) {
+      onStep?.(`  (couldn't sync ${slug}: ${err.message})`);
     }
   }
+  await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 }
 
 /**
  * Best-effort, never fatal — a missing zip or an activation failure (e.g. a
  * license key that still needs entering by hand in wp-admin) skips that
- * plugin and moves on rather than aborting the whole scaffold. Returns the
- * slugs actually installed, for `sandbox.config.json` bookkeeping.
+ * plugin and moves on rather than aborting the whole scaffold. A zip that
+ * installs cleanly but does NOT contain the expected plugin (a colliding
+ * `oxygen-*.zip` add-on, say) is reported instead of silently recorded as
+ * the real thing. Returns the slugs actually installed and verified active,
+ * for `sandbox.config.json` bookkeeping.
  */
 export async function installPremiumPlugins({ path, onStep }) {
   const installed = [];
-  for (const { slug, filePrefix } of PREMIUM_PLUGINS) {
+  for (const plugin of PREMIUM_PLUGINS) {
+    const { slug, filePrefix } = plugin;
     if (await isPluginActive(path, slug)) {
       installed.push(slug);
       continue;
     }
-    const zipPath = await findLatestZip(filePrefix);
+    const zipPath = await findLatestZip(plugin);
     if (!zipPath) {
-      onStep?.(`skipping ${slug} — no zip in ${PREMIUM_PLUGINS_DIR} (drop your licensed zip there to enable)`);
+      onStep?.(`skipping ${slug} — no ${filePrefix}*.zip (or ${slug}.zip) in ${PREMIUM_PLUGINS_DIR}; drop your licensed zip there to enable`);
       continue;
     }
     onStep?.(`installing ${slug} from ${zipPath}…`);
     const result = await runWp(['plugin', 'install', zipPath, '--force', '--activate'], { path });
     if (result.code !== 0) {
       onStep?.(`  (skipped ${slug}: ${(result.stderr || result.stdout).trim()})`);
+      continue;
+    }
+    if (!(await isPluginActive(path, slug))) {
+      onStep?.(`  (installed ${zipPath} but it is not the "${slug}" plugin — wrong zip? Not recording it as ${slug}.)`);
       continue;
     }
     installed.push(slug);

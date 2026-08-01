@@ -22,45 +22,90 @@ function parseEnvFile(text) {
   return out;
 }
 
+/** True when `url`'s hostname is this site's — the guard that keeps destroy from clobbering another site's live wiring. */
+function urlBelongsToSite(url, siteHostname) {
+  if (!url || !siteHostname) return false;
+  try {
+    return new URL(url).hostname.toLowerCase() === siteHostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/** stderr patterns that mean the agent CLI itself never ran — the remove can't have happened, so don't report it as removed. */
+function commandNeverRan(result) {
+  return result.code === null || /is not recognized|CommandNotFoundException|ENOENT/i.test(result.stderr || '');
+}
+
 /**
- * `code === null` means the spawn itself never ran (e.g. `claude`/`codex`
- * are npm-global `.cmd`/`.ps1` shims — the exact bug `psRun` fixes; a raw
- * `spawn(shell:false)` here previously failed with ENOENT and was never
- * checked, so `destroy` silently left MCP entries orphaned while reporting
- * them removed). Any other exit code means the command actually ran —
- * `claude mcp remove` exiting non-zero for "nothing to remove" still leaves
- * the entry gone, which is what matters here.
+ * MCP entries are MACHINE-GLOBAL (one 'wordpress' entry, --scope user), and
+ * scaffolding site B overwrites site A's entry — so destroying old site A
+ * must NOT blindly remove what is now site B's live wiring. Each removal is
+ * gated on the current entry actually pointing at the site being destroyed;
+ * when it points elsewhere the entry (and the site-agnostic playwright one
+ * serving it) is left alone, with a message saying so.
+ *
+ * `code === null` from psRun means the spawn itself never ran (the .cmd/.ps1
+ * shim problem psRun exists for); 'is not recognized' means the agent CLI
+ * was uninstalled since scaffold — both are reported instead of being
+ * counted as a successful removal.
  */
-async function removeMcpEntries(agents, onStep) {
+async function removeMcpEntries(agents, siteHostname, onStep) {
   const removed = [];
   if (agents.includes('claude')) {
-    const r1 = await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
-    const r2 = await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
-    if (r1.code === null || r2.code === null) {
-      onStep?.(`  (couldn't run claude mcp remove: ${(r1.stderr || r2.stderr || '').trim()})`);
+    let currentUrl = null;
+    try {
+      const cfg = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf8'));
+      currentUrl = cfg.mcpServers?.wordpress?.env?.WP_API_URL || null;
+    } catch {
+      // unreadable config — fall through to the conservative path below
+    }
+    if (!urlBelongsToSite(currentUrl, siteHostname)) {
+      onStep?.(
+        currentUrl
+          ? `  (claude's wordpress MCP entry points at ${currentUrl} — another site's wiring, leaving it)`
+          : "  (no claude wordpress MCP entry found for this site — nothing to remove)",
+      );
     } else {
-      removed.push('claude');
+      const r1 = await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
+      const r2 = await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
+      if (commandNeverRan(r1) || commandNeverRan(r2)) {
+        onStep?.(`  (claude CLI not runnable — MCP entries left in place: ${(r1.stderr || r2.stderr || '').trim().split('\n')[0]})`);
+      } else {
+        removed.push('claude');
+      }
     }
   }
   if (agents.includes('codex')) {
-    const r1 = await psRun('codex', ['mcp', 'remove', 'wordpress']);
-    const r2 = await psRun('codex', ['mcp', 'remove', 'playwright']);
-    if (r1.code === null || r2.code === null) {
-      onStep?.(`  (couldn't run codex mcp remove: ${(r1.stderr || r2.stderr || '').trim()})`);
+    const probe = await psRun('codex', ['mcp', 'get', 'wordpress']);
+    const belongsHere = probe.code === 0 && siteHostname && probe.stdout.toLowerCase().includes(siteHostname.toLowerCase());
+    if (commandNeverRan(probe)) {
+      onStep?.('  (codex CLI not runnable — MCP entries left in place)');
+    } else if (!belongsHere) {
+      onStep?.("  (codex's wordpress MCP entry doesn't point at this site — leaving it)");
     } else {
-      removed.push('codex');
+      const r1 = await psRun('codex', ['mcp', 'remove', 'wordpress']);
+      const r2 = await psRun('codex', ['mcp', 'remove', 'playwright']);
+      if (commandNeverRan(r1) || commandNeverRan(r2)) {
+        onStep?.(`  (couldn't run codex mcp remove: ${(r1.stderr || r2.stderr || '').trim().split('\n')[0]})`);
+      } else {
+        removed.push('codex');
+      }
     }
   }
   if (agents.includes('cursor')) {
     const p = join(homedir(), '.cursor', 'mcp.json');
     try {
       const cfg = JSON.parse(await readFile(p, 'utf8'));
-      if (cfg.mcpServers) {
+      const currentUrl = cfg.mcpServers?.wordpress?.env?.WP_API_URL || null;
+      if (!urlBelongsToSite(currentUrl, siteHostname)) {
+        onStep?.("  (cursor's wordpress MCP entry doesn't point at this site — leaving it)");
+      } else {
         delete cfg.mcpServers.wordpress;
         delete cfg.mcpServers.playwright;
         await writeFile(p, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+        removed.push('cursor');
       }
-      removed.push('cursor');
     } catch {
       // no config to clean up
     }
@@ -69,12 +114,15 @@ async function removeMcpEntries(agents, onStep) {
     const p = join(homedir(), '.config', 'opencode', 'opencode.json');
     try {
       const cfg = JSON.parse(await readFile(p, 'utf8'));
-      if (cfg.mcp) {
+      const currentUrl = cfg.mcp?.wordpress?.environment?.WP_API_URL || null;
+      if (!urlBelongsToSite(currentUrl, siteHostname)) {
+        onStep?.("  (opencode's wordpress MCP entry doesn't point at this site — leaving it)");
+      } else {
         delete cfg.mcp.wordpress;
         delete cfg.mcp.playwright;
         await writeFile(p, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+        removed.push('opencode');
       }
-      removed.push('opencode');
     } catch {
       // no config to clean up
     }
@@ -101,7 +149,7 @@ export async function destroySite({ projectDir, onStep }) {
   const publicDir = join(projectDir, 'public');
 
   onStep?.('removing MCP registrations…');
-  const removedAgents = await removeMcpEntries(cfg.agents || [], onStep);
+  const removedAgents = await removeMcpEntries(cfg.agents || [], env.SITE_HOST || null, onStep);
 
   if (env.WP_ADMIN_USER) {
     onStep?.('deleting the WordPress application password…');

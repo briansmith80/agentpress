@@ -3,8 +3,19 @@
 // `port` field for shape-compatibility with that registry even though sites
 // here are hostname-addressed, not port-addressed.
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { KATALYST_HOME, REGISTRY_PATH } from './paths.mjs';
+
+/**
+ * Windows paths are case-insensitive but string compares aren't — scaffold
+ * records `C:\laragon\www\x` while destroy/update use process.cwd(), which
+ * preserves whatever casing the user typed (`c:\laragon\WWW\x`). Key
+ * comparisons canonicalize; stored values keep their original casing for
+ * display.
+ */
+function dirKey(p) {
+  return resolve(String(p || '')).replace(/[\\/]+$/, '').toLowerCase();
+}
 
 export async function loadState() {
   try {
@@ -27,10 +38,10 @@ export async function saveState(state) {
   }
 }
 
-/** Keyed on `dir` — an existing record is shallow-merged, not replaced, so callers can update just the fields they know about (e.g. `update` only touches `updatedAt`/`agents`). */
+/** Keyed on `dir` (case-insensitively) — an existing record is shallow-merged, not replaced, so callers can update just the fields they know about (e.g. `update` only touches `updatedAt`/`agents`). */
 export async function recordEnvironment(env) {
   const state = await loadState();
-  const i = state.environments.findIndex((e) => e.dir === env.dir);
+  const i = state.environments.findIndex((e) => dirKey(e.dir) === dirKey(env.dir));
   if (i === -1) state.environments.push(env);
   else state.environments[i] = { ...state.environments[i], ...env };
   await saveState(state);
@@ -59,7 +70,7 @@ export async function listEnvironments() {
 
 export async function forgetEnvironment(dir) {
   const state = await loadState();
-  const kept = state.environments.filter((e) => e.dir !== dir);
+  const kept = state.environments.filter((e) => dirKey(e.dir) !== dirKey(dir));
   if (kept.length !== state.environments.length) {
     await saveState({ environments: kept });
   }
@@ -67,13 +78,15 @@ export async function forgetEnvironment(dir) {
 
 export function formatEnvironmentsTable(environments) {
   if (environments.length === 0) {
-    return 'No environments yet. Create one with: npx create-katalyst-laragon <name>';
+    return 'No environments yet. Create one with: node index.js <name> (from the katalyst-laragon checkout)';
   }
+  // Defensive fallbacks — a nameless entry (older format, hand-edited file)
+  // used to crash the exact command whose prune self-heals the registry.
   const rows = environments.map((e) => ({
-    name: e.name,
+    name: e.name || basename(e.dir || '') || '(unknown)',
     host: e.hostname || '(unknown)',
     agents: (e.agents && e.agents.length ? e.agents.join(',') : 'none'),
-    dir: e.dir,
+    dir: e.dir || '(unknown)',
   }));
   const widths = {
     name: Math.max(4, ...rows.map((r) => r.name.length)),
