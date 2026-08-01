@@ -33,7 +33,7 @@ import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
-import { ensureHostsEntry, fetchViaLoopback, installWildcardConf, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
+import { ensureHostsEntry, fetchViaLoopback, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
 import { randomBytes } from 'node:crypto';
 
 const TEMPLATE_DIR = fileURLToPath(new URL('../template', import.meta.url));
@@ -472,8 +472,10 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         );
         return;
       }
-      console.log(`✓ http://${hostname} is live (served by the wildcard vhost)`);
-      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection });
+      const httpsRes = sslCertPresent() ? await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 }) : null;
+      const scheme = httpsRes ? 'https' : 'http';
+      console.log(`✓ ${scheme}://${hostname} is live (served by the wildcard vhost)`);
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme });
       return;
     }
 
@@ -578,7 +580,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
  * a Laragon reload staleness failure leaves behind, see laragon.mjs's file
  * header) doesn't need its own copy of this sequence.
  */
-async function finishInstall({ name, hostname, projectDir, extraPlugins = [], premiumSelection }) {
+async function finishInstall({ name, hostname, projectDir, extraPlugins = [], premiumSelection, scheme = 'http' }) {
   if (!(await mysqlUp())) {
     throw new Error(`MySQL is not listening on :${MYSQL_PORT} — start it in Laragon, then retry.`);
   }
@@ -625,7 +627,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
     'utf8',
   );
 
-  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: wp.url });
+  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}` });
 }
 
 /**
@@ -1066,11 +1068,14 @@ async function setupCommand() {
 
   await setupPreferences();
 
-  if (!wildcardConfInstalled()) {
-    const { suffix, path } = await installWildcardConf();
-    console.log(`✓ Wildcard vhost installed at ${path} (serves *${suffix} from www\\<name>\\public)`);
+  const { suffix, updated } = await installWildcardConf();
+  if (updated) {
+    console.log(`✓ Wildcard vhost written to ${WILDCARD_CONF_PATH} (serves *${suffix} from www\\<name>\\public${sslCertPresent() ? ', http + https' : ''})`);
   } else {
-    console.log(`✓ Wildcard vhost already installed at ${WILDCARD_CONF_PATH}`);
+    console.log(`✓ Wildcard vhost already current at ${WILDCARD_CONF_PATH}`);
+  }
+  if (!sslCertPresent()) {
+    console.log("  (no Laragon SSL cert found — https will light up if you enable SSL in Laragon's menu and re-run setup)");
   }
   if (!state.apacheUp) {
     console.log(
@@ -1080,14 +1085,28 @@ async function setupCommand() {
     return;
   }
   console.log('→ Verifying it is live (serving a probe through the wildcard)…');
-  if (await wildcardActive()) {
+  const httpLive = await wildcardActive();
+  const httpsLive = sslCertPresent() && (await wildcardActive({ tls: true }));
+  if (httpLive && (httpsLive || !sslCertPresent())) {
     console.log(
-      '\n✓ Instant mode is ACTIVE. Scaffolds no longer trigger Laragon reloads —\n' +
+      `\n✓ Instant mode is ACTIVE${httpsLive ? ' (http + https)' : ''}. Scaffolds no longer trigger Laragon reloads —\n` +
         '  no machine-wide blips, no reload-staleness failures, sites are live instantly.\n' +
+        (httpsLive
+          ? "  (https uses Laragon's own certificate — if the browser warns about trust, enable\n   SSL once in Laragon's menu, which registers the cert with Windows.)\n"
+          : '') +
         '\n  Setup is done — you never need to run it again on this machine (unless you\n' +
         '  want to add plugin zips or change the license key).\n' +
         `\n  Next: create your first site with  ${CLI} my-site\n` +
         `  All commands: ${CLI} help`,
+    );
+    return;
+  }
+  if (httpLive && !httpsLive) {
+    console.log(
+      '\n→ http is live, but the https half of the wildcard needs the running Apache to\n' +
+        '  reload the updated conf. ONE-TIME step: in Laragon, do a full Stop All →\n' +
+        `  Start All, then run \`${CLI} setup\` again to confirm.\n` +
+        `\n  All commands: ${CLI} help`,
     );
     return;
   }

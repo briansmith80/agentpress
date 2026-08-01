@@ -19,6 +19,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -27,15 +28,44 @@ import { psCapture } from './win.mjs';
 import { inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
 
 export const WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-katalyst-wildcard.conf');
+const LARAGON_CRT = join(SITES_ENABLED_APACHE, '..', '..', 'ssl', 'laragon.crt');
+const LARAGON_KEY = join(SITES_ENABLED_APACHE, '..', '..', 'ssl', 'laragon.key');
 
 export function wildcardConfInstalled() {
   return existsSync(WILDCARD_CONF_PATH);
 }
 
-export async function installWildcardConf() {
+export function sslCertPresent() {
+  return existsSync(LARAGON_CRT) && existsSync(LARAGON_KEY);
+}
+
+async function generateWildcardConf() {
   const { suffix } = await inferHostnameSuffix();
   const www = WWW_DIR.replace(/\\/g, '/');
-  const conf = `# katalyst-laragon "instant mode" wildcard vhost — managed by create-katalyst-laragon.
+  const crt = LARAGON_CRT.replace(/\\/g, '/');
+  const key = LARAGON_KEY.replace(/\\/g, '/');
+  // The 443 vhost is only EMITTED when the cert pair exists — a
+  // SSLCertificateFile pointing at a missing file is a hard Apache startup
+  // failure, which would take down every site on the machine. Laragon's
+  // cert carries a *.test wildcard SAN (verified live), so one cert covers
+  // every future site with no regeneration.
+  const sslBlock = sslCertPresent()
+    ? `
+<IfModule ssl_module>
+<VirtualHost *:443>
+    ServerName katalyst-wildcard${suffix}
+    ServerAlias *${suffix}
+    UseCanonicalName Off
+    VirtualDocumentRoot "${www}/%1/public"
+    SSLEngine on
+    SSLCertificateFile      "${crt}"
+    SSLCertificateKeyFile   "${key}"
+</VirtualHost>
+</IfModule>
+`
+    : '';
+  const conf = `# katalyst-laragon "instant mode" wildcard vhost (conf v2: http + https) —
+# managed by create-katalyst-laragon; \`setup\` regenerates it.
 # Maps every <name>${suffix} to ${www}/<name>/public with no per-site vhost and no
 # Laragon reload. The zzz- filename keeps this LAST in Apache's first-match vhost
 # order, so exact-name confs for existing sites always win. Delete this file (and
@@ -49,7 +79,7 @@ export async function installWildcardConf() {
     UseCanonicalName Off
     VirtualDocumentRoot "${www}/%1/public"
 </VirtualHost>
-# .htaccess support for wildcard-served sites — scoped to */public trees only
+${sslBlock}# .htaccess support for wildcard-served sites — scoped to */public trees only
 # (Laragon's global www grant is AllowOverride None; its per-site confs add All
 # per root, which the wildcard can't do per site).
 <Directory "${www}/*/public">
@@ -57,8 +87,16 @@ export async function installWildcardConf() {
     Require all granted
 </Directory>
 `;
+  return { suffix, conf };
+}
+
+/** Writes the conf only when it differs from what's on disk; `updated: true` means the running Apache is now behind and needs the one-time restart to pick the changes up. */
+export async function installWildcardConf() {
+  const { suffix, conf } = await generateWildcardConf();
+  const existing = await readFile(WILDCARD_CONF_PATH, 'utf8').catch(() => null);
+  if (existing === conf) return { suffix, path: WILDCARD_CONF_PATH, updated: false };
   await writeFile(WILDCARD_CONF_PATH, conf, 'utf8');
-  return { suffix, path: WILDCARD_CONF_PATH };
+  return { suffix, path: WILDCARD_CONF_PATH, updated: true };
 }
 
 /**
@@ -67,18 +105,30 @@ export async function installWildcardConf() {
  * the Windows DNS-cache staleness that can make a fresh hostname
  * unresolvable right after a restart.
  */
-export function fetchViaLoopback(hostname, path, { timeoutMs = 3000 } = {}) {
+export function fetchViaLoopback(hostname, path, { timeoutMs = 3000, tls = false } = {}) {
   return new Promise((resolve) => {
-    const req = http.request(
-      { host: '127.0.0.1', port: 80, path, headers: { Host: hostname }, timeout: timeoutMs },
-      (res) => {
-        let body = '';
-        res.on('data', (d) => {
-          body += d;
-        });
-        res.on('end', () => resolve({ status: res.statusCode, body }));
-      },
-    );
+    const mod = tls ? https : http;
+    const options = {
+      host: '127.0.0.1',
+      port: tls ? 443 : 80,
+      path,
+      headers: { Host: hostname },
+      timeout: timeoutMs,
+    };
+    if (tls) {
+      // SNI must carry the site name even though we connect by IP, and the
+      // probe asserts REACHABILITY, not trust — Laragon's cert is
+      // self-signed, its browser trust is Laragon's own concern.
+      options.servername = hostname;
+      options.rejectUnauthorized = false;
+    }
+    const req = mod.request(options, (res) => {
+      let body = '';
+      res.on('data', (d) => {
+        body += d;
+      });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
     req.on('timeout', () => {
       req.destroy();
       resolve(null);
@@ -95,7 +145,7 @@ export function fetchViaLoopback(hostname, path, { timeoutMs = 3000 } = {}) {
  * serving a real token from a throwaway folder through the wildcard, never
  * inferred from files.
  */
-export async function wildcardActive() {
+export async function wildcardActive({ tls = false } = {}) {
   if (!wildcardConfInstalled()) return false;
   const { suffix } = await inferHostnameSuffix();
   const name = `kat-probe-${randomBytes(4).toString('hex')}`;
@@ -104,7 +154,7 @@ export async function wildcardActive() {
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'katalyst-probe.txt'), token, 'utf8');
-    const res = await fetchViaLoopback(`${name}${suffix}`, '/katalyst-probe.txt');
+    const res = await fetchViaLoopback(`${name}${suffix}`, '/katalyst-probe.txt', { tls });
     return Boolean(res && res.status === 200 && res.body.trim() === token);
   } catch {
     return false;
