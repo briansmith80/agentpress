@@ -23,7 +23,7 @@ echo $r['login_url'];
  * anything's wrong (connector not active, no admin user, ...) rather than
  * failing outright — matches the Docker original's graceful degradation.
  */
-export async function mintAdminLoginUrl({ path, hostname }) {
+export async function mintAdminLoginUrl({ path, hostname, scheme = 'http' }) {
   const result = await runWpEvalFile(ADMIN_LOGIN_PHP, { path });
   const out = result.stdout.trim();
   if (result.code === 0 && /acfw_login=/.test(out)) {

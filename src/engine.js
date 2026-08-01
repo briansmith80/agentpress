@@ -603,6 +603,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
   const wp = await installWordPress({
     projectDir,
     hostname,
+    scheme,
     ...db,
     adminUser,
     adminPassword,
@@ -619,6 +620,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
       `DB_PASSWORD=${db.dbPassword}`,
       `DB_HOST=${db.dbHost}`,
       `SITE_HOST=${hostname}`,
+      `SITE_SCHEME=${scheme}`,
       `WP_ADMIN_USER=${adminUser}`,
       `WP_ADMIN_PASSWORD=${adminPassword}`,
       `WP_ADMIN_EMAIL=${adminEmail}`,
@@ -627,7 +629,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
     'utf8',
   );
 
-  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}` });
+  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}`, scheme });
 }
 
 /**
@@ -640,7 +642,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
  * and re-scaffolding collided. sandbox.config.json is the real completion
  * marker; every step before it is idempotent on re-run.
  */
-async function finishExtras({ name, hostname, projectDir, extraPlugins = [], premiumSelection, adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl }) {
+async function finishExtras({ name, hostname, projectDir, extraPlugins = [], premiumSelection, adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl, scheme = 'http' }) {
   const publicDir = join(projectDir, 'public');
   const onStep = (msg) => console.log(`  … ${msg}`);
 
@@ -668,6 +670,8 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   if (detectedKeys.length) {
     onStep('minting a WordPress application password for MCP…');
     const appPassword = await mintAppPassword({ path: publicDir, adminUser });
+    // MCP deliberately stays on http: the proxy is a Node process whose trust
+    // of Laragon's self-signed cert isn't guaranteed, and http always works.
     const creds = { wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`, username: adminUser, password: appPassword };
     for (const key of detectedKeys) {
       onStep(`wiring MCP for ${key}…`);
@@ -683,6 +687,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   await copyTemplates(TEMPLATE_DIR, projectDir, {
     PROJECT_NAME: name,
     SITE_HOST: hostname,
+    SITE_SCHEME: scheme,
     KATALYST_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: adminUser,
     WP_ADMIN_EMAIL: adminEmail,
@@ -705,7 +710,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
     createdAt: new Date().toISOString(),
   });
 
-  const adminUrl = await mintAdminLoginUrl({ path: publicDir, hostname });
+  const adminUrl = await mintAdminLoginUrl({ path: publicDir, hostname, scheme });
 
   console.log(
     `\n✓ WordPress is ready.${configuredAgents.length ? ` MCP wired for: ${configuredAgents.join(', ')}.` : ''}\n` +
@@ -823,6 +828,8 @@ async function resumeCommand(name, { flags = {} } = {}) {
   }
   console.log(`✓ http://${hostname} is live and serving from public\\`);
 
+  const scheme = env.SITE_SCHEME || (sslCertPresent() && (await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 })) ? 'https' : 'http');
+
   // Resume finishes the job without a picker — default is every available
   // plugin, same as a --yes scaffold; pass --premium= to override.
   const premiumSelection = await choosePremiumPlugins({
@@ -843,10 +850,11 @@ async function resumeCommand(name, { flags = {} } = {}) {
         adminUser: env.WP_ADMIN_USER || 'admin',
         adminPassword: env.WP_ADMIN_PASSWORD || '(see .env)',
         adminEmail: env.WP_ADMIN_EMAIL || 'admin@example.com',
-        siteUrl: `http://${hostname}`,
+        siteUrl: `${scheme}://${hostname}`,
+        scheme,
       });
     } else {
-      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection });
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme });
     }
   } catch (err) {
     bail(`✖ Resume failed: ${err.message}\n  Safe to retry: ${CLI} resume ${name}`);
@@ -899,6 +907,7 @@ async function updateProject({ yes }) {
   const vars = {
     PROJECT_NAME: basename(cwd),
     SITE_HOST: env.SITE_HOST || 'localhost',
+    SITE_SCHEME: env.SITE_SCHEME || 'http',
     KATALYST_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: env.WP_ADMIN_USER || 'admin',
     WP_ADMIN_EMAIL: env.WP_ADMIN_EMAIL || 'admin@example.com',

@@ -4,8 +4,8 @@ A local WordPress dev site on [Laragon](https://laragon.org), scaffolded by
 [create-katalyst-laragon](https://github.com/briansmith80/katalyst-laragon) — a Laragon-native
 port of [katalystwp](https://github.com/soflyy/katalystwp).
 
-- **Site** — http://__SITE_HOST__
-- **Admin** — http://__SITE_HOST__/wp-admin (credentials in `.env`, gitignored — don't commit it)
+- **Site** — __SITE_SCHEME__://__SITE_HOST__
+- **Admin** — __SITE_SCHEME__://__SITE_HOST__/wp-admin (credentials in `.env`, gitignored — don't commit it)
 
 ## Everyday use
 

@@ -47,7 +47,7 @@ try {
 }
 
 const HOST = env.SITE_HOST || 'localhost';
-const SITE = `http://${HOST}`;
+const SITE = `${env.SITE_SCHEME || 'http'}://${HOST}`;
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && !process.env.CI;
 const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;255;45;120m' : '\x1b[38;5;198m';

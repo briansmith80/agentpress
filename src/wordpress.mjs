@@ -107,6 +107,7 @@ function fail(step, result) {
 export async function installWordPress({
   projectDir,
   hostname,
+  scheme = 'http',
   dbName,
   dbUser,
   dbPassword,
@@ -148,7 +149,7 @@ export async function installWordPress({
     [
       'core',
       'install',
-      `--url=http://${hostname}`,
+      `--url=${scheme}://${hostname}`,
       `--title=${siteTitle}`,
       `--admin_user=${adminUser}`,
       `--admin_password=${adminPassword}`,
@@ -199,5 +200,5 @@ RewriteRule . /index.php [L]
 
   await writeFile(join(publicDir, '.user.ini'), USER_INI, 'utf8');
 
-  return { url: `http://${hostname}`, adminUrl: `http://${hostname}/wp-admin` };
+  return { url: `${scheme}://${hostname}`, adminUrl: `${scheme}://${hostname}/wp-admin` };
 }
