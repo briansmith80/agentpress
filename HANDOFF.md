@@ -297,10 +297,24 @@ handoff_reason: switching-machines
 >    Config access centralized in `src/config.mjs`. All five session test sites destroyed
 >    (the destroy MCP-guard proved itself: deleting older sites left the newest site's
 >    wiring intact).
-> 9. [ ] **Remaining, deliberately deferred:** GitHub repo visibility (code is public on
+> 9. [x] **v0.5.0–v0.6.1 (published 2026-08-01):** Breakdance WooCommerce for Oxygen added
+>    to the premium set (release in the private zips repo; auto-installs WooCommerce from
+>    wordpress.org via `requires`); `wp plugin update --all` runs after license activation
+>    on every scaffold (vendor channel pulls current Oxygen-family builds — the Woo shim
+>    zip ships old on purpose and relies on this); the oxygen zip was REBUILT with two
+>    fixes to `plugin/mcp/design/html-to-page.php` (empty container tags → Containers not
+>    empty Text, verified by running the converter live; plus the libxml-Windows retry the
+>    zip was missing vs the dev sites — both dev sites and the user's test site patched in
+>    place). UX redesign: `setup` is now an availability ASSISTANT (zip status table, opens
+>    the drop folder, re-scans, license key) — plugin SELECTION is per-project at scaffold
+>    time (interactive picker, `--premium=all|none|slugs`, `--yes` = all available,
+>    extensions auto-include Oxygen); the machine-wide `premiumPlugins` config key is
+>    retired. doctor/setup end with next-step guidance. npm `latest` = 0.6.1, verified via
+>    clean npx run.
+> 10. [ ] **Remaining, deliberately deferred:** GitHub repo visibility (code is public on
 >    npm anyway — a public repo would let the friend file issues; owner's call);
 >    single-global-MCP limitation (documented in README); low-severity review leftovers
->    (Quick-app command-word names shadow scaffolding). Friend rollout is otherwise DONE:
+>    (Quick-app command-word names shadow scaffolding). Friend rollout is DONE:
 >    `npx create-katalyst-laragon@latest doctor` → `setup` → `<name>`.
 
 ## Git State
