@@ -19,10 +19,19 @@ import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { LARAGON_ROOT } from './paths.mjs';
 import { psCapture } from './win.mjs';
-import { spawnCapture } from './wp.mjs';
+import { compareVersionsDesc, spawnCapture } from './wp.mjs';
 import { generatePassword } from './secrets.mjs';
 
 const MYSQL_BASE = join(LARAGON_ROOT, 'bin', 'mysql');
+
+/** Laragon defaults to 3306, but users with a system MySQL commonly move it (3307/3308) — overridable rather than dead-ending them. */
+export const MYSQL_PORT = Number(process.env.KATALYST_MYSQL_PORT) || 3306;
+
+// Laragon offers MariaDB as a drop-in under bin\mysql\; MariaDB 11+ runs as
+// mariadbd.exe with mariadb.exe as the client (the mysql.exe shim is
+// deprecated upstream). The SQL this module emits is already MariaDB-safe —
+// only the process/exe names need to know both spellings.
+const CLIENT_EXE_NAMES = ['mysql.exe', 'mariadb.exe'];
 
 async function exists(p) {
   try {
@@ -35,7 +44,7 @@ async function exists(p) {
 
 async function resolveMysqldExe() {
   const { code, stdout } = await psCapture(
-    "(Get-CimInstance Win32_Process -Filter \"Name='mysqld.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath)",
+    "(Get-CimInstance Win32_Process -Filter \"Name='mysqld.exe' OR Name='mariadbd.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath)",
   );
   if (code !== 0) return null;
   return stdout.trim() || null;
@@ -47,28 +56,32 @@ export async function resolveMysqlClientExe() {
   if (cachedMysqlClientExe) return cachedMysqlClientExe;
   const mysqldExe = await resolveMysqldExe();
   if (mysqldExe) {
-    const clientExe = join(dirname(mysqldExe), 'mysql.exe');
-    if (await exists(clientExe)) {
-      cachedMysqlClientExe = clientExe;
-      return clientExe;
+    for (const name of CLIENT_EXE_NAMES) {
+      const clientExe = join(dirname(mysqldExe), name);
+      if (await exists(clientExe)) {
+        cachedMysqlClientExe = clientExe;
+        return clientExe;
+      }
     }
   }
-  // mysqld isn't running (or its dir has no client) — fall back to the
-  // highest-version bin/mysql/*/bin/mysql.exe on disk.
+  // The daemon isn't running (or its dir has no client) — fall back to the
+  // highest-version client under bin/mysql/*/bin on disk.
   let dirs;
   try {
-    dirs = (await readdir(MYSQL_BASE)).sort().reverse();
+    dirs = (await readdir(MYSQL_BASE)).sort(compareVersionsDesc);
   } catch {
     throw new Error(`No MySQL installation found under ${MYSQL_BASE}`);
   }
   for (const d of dirs) {
-    const exe = join(MYSQL_BASE, d, 'bin', 'mysql.exe');
-    if (await exists(exe)) {
-      cachedMysqlClientExe = exe;
-      return exe;
+    for (const name of CLIENT_EXE_NAMES) {
+      const exe = join(MYSQL_BASE, d, 'bin', name);
+      if (await exists(exe)) {
+        cachedMysqlClientExe = exe;
+        return exe;
+      }
     }
   }
-  throw new Error(`No mysql.exe found under ${MYSQL_BASE}`);
+  throw new Error(`No mysql.exe/mariadb.exe found under ${MYSQL_BASE}`);
 }
 
 function escapeSqlString(s) {
@@ -76,7 +89,7 @@ function escapeSqlString(s) {
 }
 
 /** Never puts the password on argv — spawn() with shell:false, password via MYSQL_PWD env. */
-export async function runMysql(sql, { user, password, database, host = '127.0.0.1', port = 3306 } = {}) {
+export async function runMysql(sql, { user, password, database, host = '127.0.0.1', port = MYSQL_PORT } = {}) {
   const exe = await resolveMysqlClientExe();
   const args = ['--protocol=TCP', '-h', host, '-P', String(port), '-u', user, '-N', '-B'];
   if (database) args.push('-D', database);
@@ -151,7 +164,9 @@ export async function provisionDatabase(siteName, cred) {
   if (result.code !== 0) {
     throw new Error(`Failed to provision database: ${result.stderr || result.stdout}`);
   }
-  return { dbName, dbUser, dbPassword, dbHost: '127.0.0.1' };
+  // host:port form — `wp config create --dbhost` accepts it, and it keeps
+  // the non-default-port case working end to end without a separate DB_PORT.
+  return { dbName, dbUser, dbPassword, dbHost: MYSQL_PORT === 3306 ? '127.0.0.1' : `127.0.0.1:${MYSQL_PORT}` };
 }
 
 export async function dropDatabase(dbName, dbUser, cred) {

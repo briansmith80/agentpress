@@ -33,11 +33,13 @@
 //      when time runs out, tell the user to check Laragon — nothing here
 //      starts a service on its own initiative.
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { HOSTS_PATH, LARAGON_EXE, SITES_ENABLED_APACHE, BACKUPS_DIR } from './paths.mjs';
 import { processRunning, psCapture, sleep, tcpProbe } from './win.mjs';
+import { MYSQL_PORT } from './mysql.mjs';
 import { spawnCapture } from './wp.mjs';
 
 function normalizePath(p) {
@@ -53,7 +55,7 @@ export async function apacheUp() {
 }
 
 export async function mysqlUp() {
-  return tcpProbe(3306);
+  return tcpProbe(MYSQL_PORT);
 }
 
 // Cached while Apache is confirmed healthy, purely for the read-only `-t`
@@ -74,17 +76,35 @@ async function findApacheExe() {
  * on `laragon.exe start` (unverified, and starting is not the same risk as
  * reload); just check and tell the caller what to do. Also opportunistically
  * caches httpd.exe's path while it's healthy, for testApacheConfig().
+ *
+ * `webServer` discriminates WHO owns port 80 — a bare port probe cannot:
+ * Laragon in Nginx mode and a foreign listener (IIS, another Apache) both
+ * answer on :80 and previously sailed through preflight, then failed 3+
+ * minutes later with advice that couldn't work. This tool is Apache-only;
+ * callers must gate on 'apache' before scaffolding.
  */
 export async function preflight() {
-  const [running, apache, mysql] = await Promise.all([laragonRunning(), apacheUp(), mysqlUp()]);
-  if (apache && !cachedApacheExe) {
+  const [running, apache, mysql, httpdRunning] = await Promise.all([
+    laragonRunning(),
+    apacheUp(),
+    mysqlUp(),
+    processRunning('httpd'),
+  ]);
+  let webServer = 'none';
+  if (apache) {
+    if (httpdRunning) webServer = 'apache';
+    else webServer = (await processRunning('nginx')) ? 'nginx' : 'foreign';
+  }
+  if (apache && webServer === 'apache' && !cachedApacheExe) {
     cachedApacheExe = await findApacheExe();
   }
   return {
-    ready: running && apache,
+    ready: running && apache && webServer === 'apache',
     laragonRunning: running,
+    laragonInstalled: existsSync(LARAGON_EXE),
     apacheUp: apache,
     mysqlUp: mysql,
+    webServer,
   };
 }
 
@@ -203,6 +223,8 @@ export async function hostsHasEntry(hostname) {
  * Laragon rewrites the ENTIRE hosts file from a temp copy on every sync, and
  * a Docker Desktop block lives at the end of it — snapshot before any reload
  * we trigger so there's a way back if a rewrite ever loses something.
+ * Backups are capped at the 10 newest — one per scaffold adds up forever
+ * otherwise.
  */
 export async function snapshotHosts() {
   await mkdir(BACKUPS_DIR, { recursive: true });
@@ -210,15 +232,39 @@ export async function snapshotHosts() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = join(BACKUPS_DIR, `hosts.${stamp}`);
   await writeFile(dest, content, 'utf8');
+  try {
+    const old = (await readdir(BACKUPS_DIR))
+      .filter((f) => f.startsWith('hosts.'))
+      .sort()
+      .reverse()
+      .slice(10);
+    for (const f of old) await rm(join(BACKUPS_DIR, f), { force: true });
+  } catch {
+    // pruning is best-effort
+  }
   return dest;
 }
 
 /**
  * Fire-and-forget by design (see file header, point 1) — spawn detached and
  * return immediately. Do NOT await exit; the caller must poll for effects.
+ * The 'error' listener matters: without it, a missing/invalid laragon.exe
+ * (wrong LARAGON_ROOT) emits an unhandled 'error' event that kills the whole
+ * Node process OUTSIDE any try/catch, leaking the scaffold lock. Preflight
+ * gates on laragonInstalled, so this firing means something raced us — log
+ * and let the poll time out with its own advice.
  */
 export function triggerReload() {
-  const child = spawn(LARAGON_EXE, ['reload'], { detached: true, stdio: 'ignore', shell: false });
+  let child;
+  try {
+    child = spawn(LARAGON_EXE, ['reload'], { detached: true, stdio: 'ignore', shell: false });
+  } catch (err) {
+    console.log(`  (could not launch ${LARAGON_EXE}: ${err.message})`);
+    return;
+  }
+  child.on('error', (err) => {
+    console.log(`  (could not launch ${LARAGON_EXE}: ${err.message})`);
+  });
   child.unref();
 }
 
@@ -235,18 +281,30 @@ export function triggerReload() {
  * reported reason — see the file header for why the tool never tries to
  * relaunch Apache itself.
  */
+/**
+ * The `hostname` argument is only the pre-reload GUESS (majority-voted
+ * suffix, defaulting to .test on a fresh install). Once the vhost conf
+ * appears, its own `define SITE` is authoritative — a friend whose Laragon
+ * uses a different pretty-URL suffix would otherwise wait the full timeout
+ * on a hosts entry that will never match. Returns the effective hostname so
+ * the caller can adopt it for everything downstream (.env, MCP, URLs).
+ */
 export async function pollForVhost(projectDir, hostname, { timeoutMs = 180_000, onTick } = {}) {
   const start = Date.now();
   let warnedUac = false;
   let warnedApacheDown = false;
+  let warnedRename = false;
+  const effectiveHostname = (vhost) => vhost?.hostname || hostname;
   while (Date.now() - start < timeoutMs) {
-    const [vhost, hostsEntry, apache] = await Promise.all([
-      findVhostForProject(projectDir),
-      hostsHasEntry(hostname),
-      apacheUp(),
-    ]);
+    const vhost = await findVhostForProject(projectDir);
+    const target = effectiveHostname(vhost);
+    if (vhost?.hostname && vhost.hostname !== hostname && !warnedRename) {
+      warnedRename = true;
+      onTick?.(`Laragon named this site ${vhost.hostname} (expected ${hostname}) — following Laragon's name.`);
+    }
+    const [hostsEntry, apache] = await Promise.all([hostsHasEntry(target), apacheUp()]);
     if (apache && vhost && hostsEntry) {
-      return { ok: true, vhost, hostsEntry, elapsedMs: Date.now() - start };
+      return { ok: true, vhost, hostsEntry, hostname: target, elapsedMs: Date.now() - start };
     }
     const elapsed = Date.now() - start;
     if (!apache) {
@@ -262,8 +320,10 @@ export async function pollForVhost(projectDir, hostname, { timeoutMs = 180_000, 
     }
     await sleep(1500);
   }
-  const [vhost, hostsEntry, apache] = await Promise.all([findVhostForProject(projectDir), hostsHasEntry(hostname), apacheUp()]);
-  return { ok: false, reason: apache ? 'timeout' : 'apache-down', vhost, hostsEntry, elapsedMs: timeoutMs };
+  const vhost = await findVhostForProject(projectDir);
+  const target = effectiveHostname(vhost);
+  const [hostsEntry, apache] = await Promise.all([hostsHasEntry(target), apacheUp()]);
+  return { ok: false, reason: apache ? 'timeout' : 'apache-down', vhost, hostsEntry, hostname: target, elapsedMs: timeoutMs };
 }
 
 /**

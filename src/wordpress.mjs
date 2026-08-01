@@ -123,6 +123,11 @@ export async function installWordPress({
   await downloadAndExtractCore(publicDir);
 
   onStep?.('writing wp-config.php…');
+  // --force matters for `resume`: a scaffold that died between config create
+  // and the .env write leaves a wp-config.php that, without --force, makes
+  // every resume attempt hard-fail forever ("already exists"). Overwriting
+  // with the freshly provisioned credentials is correct for both first run
+  // and resume.
   let result = await runWp(
     [
       'config',
@@ -131,6 +136,7 @@ export async function installWordPress({
       `--dbuser=${dbUser}`,
       `--dbpass=${dbPassword}`,
       `--dbhost=${dbHost}`,
+      '--force',
       '--extra-php',
     ],
     { path: publicDir, input: EXTRA_PHP },

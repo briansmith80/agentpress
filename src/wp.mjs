@@ -51,7 +51,7 @@ export async function resolvePhpExe() {
   } catch {
     // fall through to directory scan
   }
-  const dirs = (await readdir(PHP_BASE)).sort().reverse();
+  const dirs = (await readdir(PHP_BASE)).sort(compareVersionsDesc);
   for (const d of dirs) {
     const exe = join(PHP_BASE, d, 'php.exe');
     if (await exists(exe)) {
@@ -60,6 +60,17 @@ export async function resolvePhpExe() {
     }
   }
   throw new Error(`No php.exe found under ${PHP_BASE}`);
+}
+
+/** Numeric-aware descending sort for versioned dir names — a plain string sort puts "php-8.9" above "php-8.10". */
+export function compareVersionsDesc(a, b) {
+  const numsA = (a.match(/\d+/g) || []).map(Number);
+  const numsB = (b.match(/\d+/g) || []).map(Number);
+  for (let i = 0; i < Math.max(numsA.length, numsB.length); i += 1) {
+    const diff = (numsB[i] ?? -1) - (numsA[i] ?? -1);
+    if (diff !== 0) return diff;
+  }
+  return b.localeCompare(a);
 }
 
 export async function phpVersion() {
@@ -106,14 +117,26 @@ export async function wpCliPresent() {
   return exists(WP_CLI_PHAR);
 }
 
-/** Download wp-cli.phar + write a wp.bat shim into C:\laragon\usr\bin (empty, on PATH, no elevation needed) — for humans; our own calls never depend on the shim. */
+/**
+ * Download wp-cli.phar + write a wp.bat shim into <laragon>\usr\bin (empty,
+ * on PATH when Laragon's "Add to Path" was applied, no elevation needed) —
+ * for humans; our own calls never depend on the shim. The bat is rewritten
+ * on EVERY call, not just first install: it bakes in an absolute php.exe
+ * path, and Laragon's one-click PHP version switch can delete that directory
+ * — a stale bat then breaks `npm run wp` in every scaffolded site while the
+ * scaffolder itself (which re-resolves PHP per process) keeps working.
+ */
 export async function ensureWpCli() {
-  if (await exists(WP_CLI_PHAR)) return WP_CLI_PHAR;
   await mkdir(USR_BIN, { recursive: true });
-  await downloadFile(WP_CLI_URL, WP_CLI_PHAR);
+  if (!(await exists(WP_CLI_PHAR))) {
+    await downloadFile(WP_CLI_URL, WP_CLI_PHAR);
+  }
   const php = await resolvePhpExe();
   const batContent = `@echo off\r\n"${php}" -d memory_limit=512M "%~dp0wp-cli.phar" %*\r\n`;
-  await writeFile(WP_CLI_BAT, batContent, 'utf8');
+  const current = await readFile(WP_CLI_BAT, 'utf8').catch(() => '');
+  if (current !== batContent) {
+    await writeFile(WP_CLI_BAT, batContent, 'utf8');
+  }
   return WP_CLI_PHAR;
 }
 
