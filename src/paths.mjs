@@ -1,17 +1,57 @@
-// Shared path constants. %laragon_root% is NOT set as a persistent env var on
-// this machine (only inside Laragon's own Terminal) — hardcode the root.
+// Shared path constants.
+//
+// LARAGON_ROOT resolution order (first hit wins):
+//   1. KATALYST_LARAGON_ROOT env var — explicit override, no probing
+//   2. C:\laragon when laragon.exe exists there — the default install; fast
+//      path, costs one existsSync
+//   3. the running laragon.exe process's own directory — covers D:\laragon
+//      installs at the cost of one synchronous PowerShell query, paid only
+//      when the default location is empty
+//   4. C:\laragon regardless — so doctor/preflight can REPORT it missing
+//      instead of this module throwing at import time
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
-export const LARAGON_ROOT = 'C:\\laragon';
+// Absolute path, not bare 'powershell.exe' — a PATH mangled by an installer
+// or npm script would otherwise break/subvert every OS probe at once.
+export const PS_EXE = (() => {
+  const sys = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return existsSync(sys) ? sys : 'powershell.exe';
+})();
+
+function resolveLaragonRoot() {
+  const override = process.env.KATALYST_LARAGON_ROOT;
+  if (override) return override.replace(/[\\/]+$/, '');
+  if (existsSync('C:\\laragon\\laragon.exe')) return 'C:\\laragon';
+  const probe = spawnSync(
+    PS_EXE,
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      "(Get-CimInstance Win32_Process -Filter \"Name='laragon.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath)",
+    ],
+    { encoding: 'utf8', timeout: 15000 },
+  );
+  const exe = (probe.stdout || '').trim();
+  if (exe) return dirname(exe);
+  return 'C:\\laragon';
+}
+
+export const LARAGON_ROOT = resolveLaragonRoot();
 export const LARAGON_EXE = join(LARAGON_ROOT, 'laragon.exe');
 export const LARAGON_INI = join(LARAGON_ROOT, 'usr', 'laragon.ini');
 export const WWW_DIR = join(LARAGON_ROOT, 'www');
 export const SITES_ENABLED_APACHE = join(LARAGON_ROOT, 'etc', 'apache2', 'sites-enabled');
 export const SITES_ENABLED_NGINX = join(LARAGON_ROOT, 'etc', 'nginx', 'sites-enabled');
-export const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+export const HOSTS_PATH = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
 
 export const KATALYST_HOME = join(homedir(), '.katalyst-laragon');
+export const CONFIG_PATH = join(KATALYST_HOME, 'config.json');
 export const WP_CLI_CACHE_DIR = join(KATALYST_HOME, 'cache');
 export const BACKUPS_DIR = join(KATALYST_HOME, 'backups');
 export const SCAFFOLD_LOCK_PATH = join(KATALYST_HOME, 'scaffold.lock');
