@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
 import { removeDirSafely } from './junctions.mjs';
 import { dropDatabase, resolveRootCredential } from './mysql.mjs';
-import { runWp, spawnCapture } from './wp.mjs';
+import { runWp } from './wp.mjs';
+import { psRun } from './win.mjs';
 import { WWW_DIR } from './paths.mjs';
 
 function parseEnvFile(text) {
@@ -21,17 +22,34 @@ function parseEnvFile(text) {
   return out;
 }
 
-async function removeMcpEntries(agents) {
+/**
+ * `code === null` means the spawn itself never ran (e.g. `claude`/`codex`
+ * are npm-global `.cmd`/`.ps1` shims — the exact bug `psRun` fixes; a raw
+ * `spawn(shell:false)` here previously failed with ENOENT and was never
+ * checked, so `destroy` silently left MCP entries orphaned while reporting
+ * them removed). Any other exit code means the command actually ran —
+ * `claude mcp remove` exiting non-zero for "nothing to remove" still leaves
+ * the entry gone, which is what matters here.
+ */
+async function removeMcpEntries(agents, onStep) {
   const removed = [];
   if (agents.includes('claude')) {
-    await spawnCapture('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
-    await spawnCapture('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
-    removed.push('claude');
+    const r1 = await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
+    const r2 = await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
+    if (r1.code === null || r2.code === null) {
+      onStep?.(`  (couldn't run claude mcp remove: ${(r1.stderr || r2.stderr || '').trim()})`);
+    } else {
+      removed.push('claude');
+    }
   }
   if (agents.includes('codex')) {
-    await spawnCapture('codex', ['mcp', 'remove', 'wordpress']);
-    await spawnCapture('codex', ['mcp', 'remove', 'playwright']);
-    removed.push('codex');
+    const r1 = await psRun('codex', ['mcp', 'remove', 'wordpress']);
+    const r2 = await psRun('codex', ['mcp', 'remove', 'playwright']);
+    if (r1.code === null || r2.code === null) {
+      onStep?.(`  (couldn't run codex mcp remove: ${(r1.stderr || r2.stderr || '').trim()})`);
+    } else {
+      removed.push('codex');
+    }
   }
   if (agents.includes('cursor')) {
     const p = join(homedir(), '.cursor', 'mcp.json');
@@ -83,7 +101,7 @@ export async function destroySite({ projectDir, onStep }) {
   const publicDir = join(projectDir, 'public');
 
   onStep?.('removing MCP registrations…');
-  const removedAgents = await removeMcpEntries(cfg.agents || []);
+  const removedAgents = await removeMcpEntries(cfg.agents || [], onStep);
 
   if (env.WP_ADMIN_USER) {
     onStep?.('deleting the WordPress application password…');
@@ -95,8 +113,12 @@ export async function destroySite({ projectDir, onStep }) {
     onStep?.('dropping the database…');
     const cred = await resolveRootCredential();
     if (cred) {
-      await dropDatabase(env.DB_NAME, env.DB_USER, cred);
-      dbDropped = true;
+      const result = await dropDatabase(env.DB_NAME, env.DB_USER, cred);
+      if (result.code !== 0) {
+        onStep?.(`  (drop database failed: ${(result.stderr || result.stdout).trim()})`);
+      } else {
+        dbDropped = true;
+      }
     }
   }
 

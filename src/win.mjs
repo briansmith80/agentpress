@@ -35,6 +35,23 @@ export function psCapture(command) {
   });
 }
 
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+/**
+ * Runs an external command via real `powershell.exe` (shell:false, no
+ * cmd.exe quoting hazard) rather than spawning it directly — `claude`/`codex`
+ * resolve to npm-global `.cmd`/`.ps1` shims on Windows, which
+ * `spawn(shell:false)` cannot launch (confirmed live: `spawn ENOENT`, silent
+ * unless the caller checks `.code`). Each token is single-quoted for
+ * PowerShell; the call operator `&` is required because a leading quoted
+ * string parses as an expression, not a command, otherwise.
+ */
+export function psRun(cmd, args) {
+  return psCapture(`& ${[cmd, ...args].map(psQuote).join(' ')}`);
+}
+
 export async function processRunning(name) {
   const { stdout } = await psCapture(`if (Get-Process -Name '${name}' -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }`);
   return stdout.trim() === 'yes';

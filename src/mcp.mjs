@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runWp } from './wp.mjs';
-import { psCapture } from './win.mjs';
+import { psRun } from './win.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 
 const APP_PASSWORD_NAME = 'katalyst-laragon';
@@ -54,41 +54,30 @@ async function writeJson(path, data) {
 }
 
 /**
- * `claude` and `codex` resolve via PATH to npm-global `.cmd` shims on
+ * `claude` and `codex` resolve via PATH to npm-global `.cmd`/`.ps1` shims on
  * Windows, not `.exe` — `spawn(shell:false)` can't launch those directly
  * (confirmed live: bare `spawn('claude', …)` fails with `spawn claude
  * ENOENT`), the same class of issue `wp.mjs` already routes around for
- * `wp.bat`. Fixed here by going through `psCapture` (real `powershell.exe`,
- * already used by `agents.mjs` for this exact reason) instead of spawning
- * the shim directly. Each token is single-quoted for PowerShell — embedded
- * single quotes (none expected in these values) are doubled per PowerShell's
- * own escaping rule.
+ * `wp.bat`. `psRun` (shared with `destroy.mjs`'s MCP cleanup, same problem)
+ * goes through real `powershell.exe` instead of spawning the shim directly.
  */
-function psQuote(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-function psCommand(cmd, args) {
-  return `& ${[cmd, ...args].map(psQuote).join(' ')}`;
-}
-
 export async function configureClaude(creds) {
   const envArgs = Object.entries(wordpressEnv(creds)).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
-  await psCapture(psCommand('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']));
-  const wp = await psCapture(psCommand('claude', ['mcp', 'add', 'wordpress', '--scope', 'user', ...envArgs, '--', ...WP_MCP_PROXY]));
+  await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
+  const wp = await psRun('claude', ['mcp', 'add', 'wordpress', '--scope', 'user', ...envArgs, '--', ...WP_MCP_PROXY]);
   if (wp.code !== 0) throw new Error(`claude mcp add wordpress failed (exit ${wp.code}): ${(wp.stderr || wp.stdout).trim()}`);
-  await psCapture(psCommand('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']));
-  const pw = await psCapture(psCommand('claude', ['mcp', 'add', 'playwright', '--scope', 'user', '--', ...PLAYWRIGHT_MCP]));
+  await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
+  const pw = await psRun('claude', ['mcp', 'add', 'playwright', '--scope', 'user', '--', ...PLAYWRIGHT_MCP]);
   if (pw.code !== 0) throw new Error(`claude mcp add playwright failed (exit ${pw.code}): ${(pw.stderr || pw.stdout).trim()}`);
 }
 
 export async function configureCodex(creds) {
   const envArgs = Object.entries(wordpressEnv(creds)).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
-  await psCapture(psCommand('codex', ['mcp', 'remove', 'wordpress']));
-  const wp = await psCapture(psCommand('codex', ['mcp', 'add', 'wordpress', ...envArgs, '--', ...WP_MCP_PROXY]));
+  await psRun('codex', ['mcp', 'remove', 'wordpress']);
+  const wp = await psRun('codex', ['mcp', 'add', 'wordpress', ...envArgs, '--', ...WP_MCP_PROXY]);
   if (wp.code !== 0) throw new Error(`codex mcp add wordpress failed (exit ${wp.code}): ${(wp.stderr || wp.stdout).trim()}`);
-  await psCapture(psCommand('codex', ['mcp', 'remove', 'playwright']));
-  const pw = await psCapture(psCommand('codex', ['mcp', 'add', 'playwright', '--', ...PLAYWRIGHT_MCP]));
+  await psRun('codex', ['mcp', 'remove', 'playwright']);
+  const pw = await psRun('codex', ['mcp', 'add', 'playwright', '--', ...PLAYWRIGHT_MCP]);
   if (pw.code !== 0) throw new Error(`codex mcp add playwright failed (exit ${pw.code}): ${(pw.stderr || pw.stdout).trim()}`);
 }
 
