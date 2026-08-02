@@ -25,7 +25,7 @@ import { generatePassword } from './secrets.mjs';
 const MYSQL_BASE = join(LARAGON_ROOT, 'bin', 'mysql');
 
 /** Laragon defaults to 3306, but users with a system MySQL commonly move it (3307/3308) — overridable rather than dead-ending them. */
-export const MYSQL_PORT = Number(process.env.KATALYST_MYSQL_PORT) || 3306;
+export const MYSQL_PORT = Number(process.env.AGENTPRESS_MYSQL_PORT ?? process.env.KATALYST_MYSQL_PORT) || 3306;
 
 // Laragon offers MariaDB as a drop-in under bin\mysql\; MariaDB 11+ runs as
 // mariadbd.exe with mariadb.exe as the client (the mysql.exe shim is
@@ -107,8 +107,8 @@ export async function runMysql(sql, { user, password, database, host = '127.0.0.
  */
 export async function resolveRootCredential({ host = '127.0.0.1', port = MYSQL_PORT } = {}) {
   const candidates = [
-    process.env.KATALYST_MYSQL_ROOT_PASSWORD !== undefined
-      ? { password: process.env.KATALYST_MYSQL_ROOT_PASSWORD, source: 'KATALYST_MYSQL_ROOT_PASSWORD env var' }
+    (process.env.AGENTPRESS_MYSQL_ROOT_PASSWORD ?? process.env.KATALYST_MYSQL_ROOT_PASSWORD) !== undefined
+      ? { password: process.env.AGENTPRESS_MYSQL_ROOT_PASSWORD ?? process.env.KATALYST_MYSQL_ROOT_PASSWORD, source: 'AGENTPRESS_MYSQL_ROOT_PASSWORD env var' }
       : null,
     { password: '', source: 'empty password' },
     { password: 'root', source: 'password "root"' },

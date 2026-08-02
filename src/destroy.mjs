@@ -156,7 +156,8 @@ export async function destroySite({ projectDir, onStep }) {
 
   if (env.WP_ADMIN_USER) {
     onStep?.('deleting the WordPress application password…');
-    await runWp(['user', 'application-password', 'delete', env.WP_ADMIN_USER, 'katalyst-laragon'], { path: publicDir }).catch(() => {});
+    await runWp(['user', 'application-password', 'delete', env.WP_ADMIN_USER, 'agentpress'], { path: publicDir }).catch(() => {});
+    await runWp(['user', 'application-password', 'delete', env.WP_ADMIN_USER, 'katalyst-laragon'], { path: publicDir }).catch(() => {}); // pre-rename sites
   }
 
   let dbDropped = false;
@@ -169,7 +170,7 @@ export async function destroySite({ projectDir, onStep }) {
     const target = parseDbHost(env.DB_HOST);
     const cred = await resolveRootCredential(target);
     if (!cred) {
-      dbSkipReason = `could not resolve MySQL root credentials for ${target.host}:${target.port} — the database ${env.DB_NAME} was NOT dropped (is MySQL running? set KATALYST_MYSQL_ROOT_PASSWORD if root has a custom password)`;
+      dbSkipReason = `could not resolve MySQL root credentials for ${target.host}:${target.port} — the database ${env.DB_NAME} was NOT dropped (is MySQL running? set AGENTPRESS_MYSQL_ROOT_PASSWORD if root has a custom password)`;
       onStep?.(`  (${dbSkipReason})`);
     } else {
       const result = await dropDatabase(env.DB_NAME, env.DB_USER, cred, target);

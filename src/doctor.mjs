@@ -91,7 +91,7 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
   } else {
     blocked(
       'Laragon root',
-      `${LARAGON_ROOT} — NOT FOUND. If Laragon lives elsewhere, set KATALYST_LARAGON_ROOT to its folder.`,
+      `${LARAGON_ROOT} — NOT FOUND. If Laragon lives elsewhere, set AGENTPRESS_LARAGON_ROOT to its folder.`,
       'Laragon root not found',
     );
   }
@@ -126,7 +126,7 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
   } else {
     row('Instant mode', 'installed but not live yet — one-time Stop All → Start All in Laragon, then re-run setup to confirm');
   }
-  row(`TCP :${MYSQL_PORT} (MySQL)`, state.mysqlUp ? 'listening' : `closed — click Start All in Laragon${MYSQL_PORT === 3306 ? ' (moved MySQL? set KATALYST_MYSQL_PORT)' : ''}`);
+  row(`TCP :${MYSQL_PORT} (MySQL)`, state.mysqlUp ? 'listening' : `closed — click Start All in Laragon${MYSQL_PORT === 3306 ? ' (moved MySQL? set AGENTPRESS_MYSQL_PORT)' : ''}`);
   if (!state.mysqlUp) blockers.push('MySQL is not running');
 
   try {
@@ -192,7 +192,7 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
       } else {
         blocked(
           'MySQL root credential',
-          'could not resolve — set KATALYST_MYSQL_ROOT_PASSWORD to your MySQL root password and retry',
+          'could not resolve — set AGENTPRESS_MYSQL_ROOT_PASSWORD to your MySQL root password and retry',
           'MySQL root credential unknown',
         );
       }

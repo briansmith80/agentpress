@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The per-site interactive menu. Dependency-free by design (no npm installs
-// required to run this) and frozen at scaffold time — the katalyst-laragon
+// required to run this) and frozen at scaffold time — the agentpress
 // checkout's `update` command is the only thing that refreshes it.
 // Apache/MySQL are shared by every Laragon site, always-on, so unlike
 // the Docker original this menu never starts or stops anything itself.
@@ -11,10 +11,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-const VERSION = '__KATALYST_VERSION__';
+const VERSION = '__AGENTPRESS_VERSION__';
 const CWD = process.cwd();
 const ENV_PATH = join(CWD, '.env');
-const LOCK_PATH = join(CWD, '.katalyst.lock');
+const LOCK_PATH = join(CWD, '.agentpress.lock');
 // Absolute path baked in at scaffold time — usr\bin is only on PATH when
 // Laragon's "Add to Path" was applied on this machine, so a bare `wp` is
 // not a safe assumption. Falls back to PATH if the file has moved.
@@ -25,7 +25,7 @@ const WP_BAT = "__WP_BAT_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
 
 if (!existsSync(ENV_PATH)) {
-  console.error('✖ No .env here — run this from your katalyst-laragon site directory.');
+  console.error('✖ No .env here — run this from your agentpress site directory.');
   process.exit(1);
 }
 
@@ -56,7 +56,7 @@ const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
 const link = (url) => (process.stdout.isTTY ? pink(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`) : url);
 
 function openBrowser(url) {
-  if (process.env.KATALYST_NO_OPEN) {
+  if ((process.env.AGENTPRESS_NO_OPEN ?? process.env.KATALYST_NO_OPEN)) {
     console.log(`  ${dim('Open:')} ${url}`);
     return;
   }
@@ -79,7 +79,7 @@ function openTerminalHere() {
 // AdminLoginLink ability. Duplicated here (rather than imported) on
 // purpose — this file has to stay dependency-free and runnable with zero
 // npm installs, so it carries its own small copy of this PHP payload, same
-// as create-katalyst-laragon's own src/admin-login.mjs and the Docker
+// as create-agentpress's own src/admin-login.mjs and the Docker
 // original's three-copy pattern (documented there as intentional).
 const ADMIN_LOGIN_PHP = `
 $admins = get_users(array('role' => 'administrator', 'number' => 1, 'orderby' => 'ID'));
@@ -103,7 +103,7 @@ echo $r['login_url'];
  */
 function runWpEvalFile(phpCode) {
   return new Promise((resolve) => {
-    const tmpFile = join(tmpdir(), `katalyst-eval-${randomBytes(6).toString('hex')}.php`);
+    const tmpFile = join(tmpdir(), `agentpress-eval-${randomBytes(6).toString('hex')}.php`);
     // eval-file needs an actual <?php tag (unlike `wp eval`) — content
     // outside one is literal output, not executed.
     const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
@@ -168,7 +168,7 @@ try {
   const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
   const age = Date.now() - (existing.startedAt ? Date.parse(existing.startedAt) : 0);
   if (existing.pid !== process.pid && isPidAlive(existing.pid) && age < LOCK_MAX_AGE_MS) {
-    console.error(`✖ Another katalyst menu (pid ${existing.pid}) already appears to be running here.`);
+    console.error(`✖ Another agentpress menu (pid ${existing.pid}) already appears to be running here.`);
     process.exit(1);
   }
 } catch {
@@ -271,9 +271,9 @@ function runInherit(cmd, args = []) {
 }
 
 async function checkUpdate() {
-  if (process.env.KATALYST_NO_UPDATE_CHECK) return null;
+  if ((process.env.AGENTPRESS_NO_UPDATE_CHECK ?? process.env.KATALYST_NO_UPDATE_CHECK)) return null;
   try {
-    const res = await fetch('https://registry.npmjs.org/create-katalyst-laragon/latest', {
+    const res = await fetch('https://registry.npmjs.org/create-agentpress/latest', {
       signal: AbortSignal.timeout(2500),
     });
     if (!res.ok) return null;
@@ -290,7 +290,7 @@ console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
 console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
 
 const latestVersion = await checkUpdate();
-console.log(`Welcome to katalyst-laragon v${VERSION}.\n`);
+console.log(`Welcome to agentpress v${VERSION}.\n`);
 
 for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
@@ -299,13 +299,13 @@ for (;;) {
     { value: 'site', label: 'Open the site', hint: 'front end' },
     ...agents.map((a) => ({ value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}` })),
     { value: 'shell', label: 'Open a terminal here' },
-    ...(latestVersion ? [{ value: 'update', label: 'Update katalyst-laragon', hint: `v${VERSION} → v${latestVersion}` }] : []),
+    ...(latestVersion ? [{ value: 'update', label: 'Update agentpress', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
   ];
   const choice = await choose('What would you like to do?', options);
 
   if (choice === null || choice === 'exit') {
-    console.log(`\n${dim('cd')} ${CWD} ${dim('&& npm run katalyst')} to come back.\n`);
+    console.log(`\n${dim('cd')} ${CWD} ${dim('&& npm run agentpress')} to come back.\n`);
     process.exit(0);
   } else if (choice === 'admin') {
     openBrowser(await adminUrl());
@@ -314,7 +314,7 @@ for (;;) {
   } else if (choice === 'shell') {
     openTerminalHere();
   } else if (choice === 'update') {
-    console.log(`  Run: npx create-katalyst-laragon@${latestVersion} update   (from this directory)`);
+    console.log(`  Run: npx create-agentpress@${latestVersion} update   (from this directory)`);
   } else if (choice.startsWith('agent:')) {
     await runInherit(choice.slice('agent:'.length));
   }

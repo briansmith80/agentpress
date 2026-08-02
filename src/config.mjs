@@ -1,4 +1,4 @@
-// ~/.katalyst-laragon/config.json — the per-user, per-machine preferences
+// ~/.agentpress/config.json — the per-user, per-machine preferences
 // store. Schema (all keys optional):
 //   premiumPluginsRepo: "owner/repo"     private GitHub repo of licensed zips
 //   premiumPlugins:     ["oxygen", ...]  which premium plugins scaffolds
@@ -6,7 +6,7 @@
 //   licenses:           { oxygen: key }  license keys applied after install
 // Treat the file as private — it holds license keys.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { CONFIG_PATH, KATALYST_HOME } from './paths.mjs';
+import { CONFIG_PATH, AGENTPRESS_HOME } from './paths.mjs';
 
 export async function loadConfig() {
   try {
@@ -18,6 +18,6 @@ export async function loadConfig() {
 }
 
 export async function saveConfig(config) {
-  await mkdir(KATALYST_HOME, { recursive: true });
+  await mkdir(AGENTPRESS_HOME, { recursive: true });
   await writeFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }

@@ -52,7 +52,7 @@ async function resolveTarExe() {
  * a directly-resolved tar.exe sidesteps both bugs at once.
  */
 async function downloadAndExtractCore(publicDir) {
-  const tmpFile = join(tmpdir(), `katalyst-wp-core-${randomBytes(6).toString('hex')}.tar.gz`);
+  const tmpFile = join(tmpdir(), `agentpress-wp-core-${randomBytes(6).toString('hex')}.tar.gz`);
   const res = await fetch(WP_DOWNLOAD_URL);
   if (!res.ok) throw new Error(`Failed to download WordPress core: HTTP ${res.status}`);
   await writeFile(tmpFile, Buffer.from(await res.arrayBuffer()));

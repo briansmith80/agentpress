@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './doctor.mjs';
-import { KATALYST_HOME, LARAGON_ROOT, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
+import { AGENTPRESS_HOME, LARAGON_ROOT, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
 import {
   findVhostForProject,
@@ -54,7 +54,7 @@ function bail(msg) {
  * checkout path is the right thing.
  */
 const RUNNING_FROM_PACKAGE = /[\\/]node_modules[\\/]/i.test(ENGINE_DIR);
-const CLI = RUNNING_FROM_PACKAGE ? 'npx create-katalyst-laragon' : `node ${join(ENGINE_DIR, 'index.js')}`;
+const CLI = RUNNING_FROM_PACKAGE ? 'npx create-agentpress' : `node ${join(ENGINE_DIR, 'index.js')}`;
 
 /**
  * The wp.bat shim path, backslash-doubled for templating into JS/JSON
@@ -120,7 +120,7 @@ export function parseArgs(argv) {
  * installs.
  */
 async function acquireScaffoldLock() {
-  await mkdir(KATALYST_HOME, { recursive: true });
+  await mkdir(AGENTPRESS_HOME, { recursive: true });
   const contention = () =>
     new Error(
       `Another scaffold appears to be running (lock at ${SCAFFOLD_LOCK_PATH}).\n` +
@@ -137,7 +137,7 @@ async function acquireScaffoldLock() {
     // run's lock recreates exactly the concurrent-reload hazard the lock
     // exists to prevent. EPERM from kill(pid, 0) means the process EXISTS
     // (elevated/another session) — that's alive, not dead (same logic as
-    // template/scripts/katalyst.mjs's isPidAlive). An unreadable/empty lock
+    // template/scripts/agentpress.mjs's isPidAlive). An unreadable/empty lock
     // that is only seconds old is a concurrent acquirer mid-write, not
     // debris — the open('wx')+writeFile pair isn't atomic.
     let stale = false;
@@ -281,12 +281,12 @@ async function confirmScaffold(name, hostname) {
  */
 async function probeInstant(hostname, projectDir, { timeoutMs = 12_000 } = {}) {
   const token = randomBytes(12).toString('hex');
-  const probeFile = join(projectDir, 'public', '.katalyst-probe.txt');
+  const probeFile = join(projectDir, 'public', '.agentpress-probe.txt');
   await writeFile(probeFile, token, 'utf8');
   try {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const res = await fetchViaLoopback(hostname, '/.katalyst-probe.txt');
+      const res = await fetchViaLoopback(hostname, '/.agentpress-probe.txt');
       if (res && res.status === 200 && res.body.trim() === token) return true;
       await sleep(750);
     }
@@ -386,7 +386,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   if (!state.laragonInstalled) {
     bail(
       `✖ No laragon.exe found under the resolved Laragon root. If Laragon is installed somewhere\n` +
-        '  unusual, set KATALYST_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.\n' +
+        '  unusual, set AGENTPRESS_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.\n' +
         `  (\`${CLI} doctor\` shows what was resolved.)`,
     );
     return;
@@ -452,7 +452,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     // public/index.php first, even in staging — `wp core download` (Phase 4)
     // only refuses when it finds wp-load.php, so this placeholder is
     // harmless and gets overwritten by the real WordPress tarball later.
-    await writeFile(join(stagingDir, 'public', 'index.php'), '<?php\n// katalyst-laragon placeholder — replaced by `wp core download`\n');
+    await writeFile(join(stagingDir, 'public', 'index.php'), '<?php\n// agentpress placeholder — replaced by `wp core download`\n');
     // Inert when the docroot is public/ (the normal case); saves us if it
     // isn't — see verifyDocroot below.
     await writeFile(join(stagingDir, '.htaccess'), 'Require all denied\n');
@@ -586,7 +586,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
   }
   const cred = await resolveRootCredential();
   if (!cred) {
-    throw new Error('Could not resolve MySQL root credentials (tried empty and "root"). Set KATALYST_MYSQL_ROOT_PASSWORD and retry.');
+    throw new Error('Could not resolve MySQL root credentials (tried empty and "root"). Set AGENTPRESS_MYSQL_ROOT_PASSWORD and retry.');
   }
 
   console.log('→ Creating database…');
@@ -688,7 +688,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
     PROJECT_NAME: name,
     SITE_HOST: hostname,
     SITE_SCHEME: scheme,
-    KATALYST_VERSION: ENGINE_VERSION,
+    AGENTPRESS_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: adminUser,
     WP_ADMIN_EMAIL: adminEmail,
     WP_BAT_ESCAPED,
@@ -719,7 +719,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       `  User   ${adminUser}\n` +
       `  Pass   ${adminPassword}\n\n` +
       `  cd ${projectDir}\n` +
-      '  npm run katalyst   # open the menu\n',
+      '  npm run agentpress   # open the menu\n',
   );
 }
 
@@ -761,7 +761,7 @@ async function resumeCommand(name, { flags = {} } = {}) {
   if (!state.laragonInstalled) {
     bail(
       '✖ No laragon.exe found under the resolved Laragon root. If Laragon is installed somewhere\n' +
-        '  unusual, set KATALYST_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.',
+        '  unusual, set AGENTPRESS_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.',
     );
     return;
   }
@@ -877,7 +877,7 @@ function parseEnvFile(text) {
 }
 
 /**
- * Refreshes only Katalyst-owned files (scripts/, wp-cli.yml, README,
+ * Refreshes only AgentPress-owned files (scripts/, wp-cli.yml, README,
  * .gitignore, package.json's known scripts) — never .env, sandbox.config.json,
  * or anything under public/. Ported policy from the Docker original; the
  * skip-set + package.json merge model is backend-agnostic.
@@ -888,18 +888,20 @@ async function updateProject({ yes }) {
   try {
     envContent = await readFile(join(cwd, '.env'), 'utf8');
   } catch {
-    bail('✖ No .env here — run update from a katalyst-laragon site directory.');
+    bail('✖ No .env here — run update from a agentpress site directory.');
     return;
   }
   // A bare .env is far too common to be the only gate — `update --yes` in
   // any random Node project with a .env used to gut its package.json and
   // overwrite README/.gitignore. Require an actual katalyst marker.
-  const isKatalystSite =
-    (await fileExists(join(cwd, 'sandbox.config.json'))) || (await fileExists(join(cwd, 'scripts', 'katalyst.mjs')));
-  if (!isKatalystSite) {
+  const isAgentPressSite =
+    (await fileExists(join(cwd, 'sandbox.config.json'))) ||
+    (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
+    (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))); // pre-rename sites
+  if (!isAgentPressSite) {
     bail(
       '✖ This folder has a .env but no sandbox.config.json or scripts\\katalyst.mjs — it does not\n' +
-        '  look like a katalyst-laragon site, so update will not touch it.',
+        '  look like a agentpress site, so update will not touch it.',
     );
     return;
   }
@@ -908,7 +910,7 @@ async function updateProject({ yes }) {
     PROJECT_NAME: basename(cwd),
     SITE_HOST: env.SITE_HOST || 'localhost',
     SITE_SCHEME: env.SITE_SCHEME || 'http',
-    KATALYST_VERSION: ENGINE_VERSION,
+    AGENTPRESS_VERSION: ENGINE_VERSION,
     WP_ADMIN_USER: env.WP_ADMIN_USER || 'admin',
     WP_ADMIN_EMAIL: env.WP_ADMIN_EMAIL || 'admin@example.com',
     WP_BAT_ESCAPED,
@@ -948,7 +950,7 @@ async function updateProject({ yes }) {
 async function destroyCommand({ yes }) {
   const cwd = process.cwd();
   if (!(await fileExists(join(cwd, '.env')))) {
-    bail('✖ No .env here — run destroy from a katalyst-laragon site directory.');
+    bail('✖ No .env here — run destroy from a agentpress site directory.');
     return;
   }
   console.log(
@@ -1022,7 +1024,7 @@ async function setupPreferences() {
     printAvailabilityTable(availability);
     const missing = availability.filter((p) => !p.available);
     if (missing.length) {
-      const dir = join(KATALYST_HOME, 'premium-plugins');
+      const dir = join(AGENTPRESS_HOME, 'premium-plugins');
       console.log(`\n  To make a plugin available, drop your licensed zip into:\n    ${dir}`);
       console.log(`  Expected filenames: ${missing.map((p) => `${p.slug}[-*].zip`).join(', ')}`);
       console.log('  (Or keep them in your own private GitHub releases repo — premiumPluginsRepo in config.json, see the README.)');
@@ -1134,7 +1136,7 @@ async function registerQuickAppCommand() {
     return;
   }
   console.log(
-    `✓ Added a "KatalystWP" entry to sites.conf (backed up to ${result.backup}).\n` +
+    `✓ Added a "AgentPress" entry to sites.conf (backed up to ${result.backup}).\n` +
       'Reopen Laragon\'s tray menu (Quick app) to see it. Note: Quick app\'s own AutoCreateDatabase\n' +
       "will also create a plain DB named after the project — this tool's own DB (a differently-\n" +
       'named, dedicated user) is what the site actually uses; the Quick-app-created one is unused\n' +
@@ -1144,7 +1146,7 @@ async function registerQuickAppCommand() {
 
 function printUsage() {
   console.log(`
-create-katalyst-laragon v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
+create-agentpress v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
 
   ${CLI} doctor              Check this machine's Laragon/PHP/MySQL/Node state
   ${CLI} setup               One-time: enable instant scaffolds (no Laragon reloads)
@@ -1155,11 +1157,11 @@ create-katalyst-laragon v${ENGINE_VERSION} — local WordPress + AI-agent dev en
 
 From inside a scaffolded site's directory:
 
-  ${CLI} update      Refresh Katalyst's own tooling files
+  ${CLI} update      Refresh AgentPress's own tooling files
   ${CLI} destroy     Permanently remove that site
 
 Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
-Env:   KATALYST_LARAGON_ROOT  KATALYST_MYSQL_ROOT_PASSWORD  KATALYST_MYSQL_PORT  KATALYST_PREMIUM_PLUGINS_REPO
+Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL_PORT  AGENTPRESS_PREMIUM_PLUGINS_REPO
 `);
 }
 
@@ -1196,7 +1198,7 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.version) {
-    console.log(`create-katalyst-laragon v${ENGINE_VERSION}`);
+    console.log(`create-agentpress v${ENGINE_VERSION}`);
     return;
   }
 
@@ -1206,7 +1208,7 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command === 'version') {
-    console.log(`create-katalyst-laragon v${ENGINE_VERSION}`);
+    console.log(`create-agentpress v${ENGINE_VERSION}`);
     return;
   }
 

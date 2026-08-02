@@ -343,13 +343,13 @@ export async function pollForVhost(projectDir, hostname, { timeoutMs = 180_000, 
  */
 export async function verifyDocroot(hostname, projectDir) {
   const token = randomBytes(12).toString('hex');
-  const probeRelPublic = join(projectDir, 'public', '.katalyst-probe.txt');
-  const probeRelRoot = join(projectDir, '.katalyst-probe.txt');
+  const probeRelPublic = join(projectDir, 'public', '.agentpress-probe.txt');
+  const probeRelRoot = join(projectDir, '.agentpress-probe.txt');
   await writeFile(probeRelPublic, token, 'utf8');
   try {
     const [rootBody, publicBody] = await Promise.all([
-      fetchText(`http://${hostname}/.katalyst-probe.txt`),
-      fetchText(`http://${hostname}/public/.katalyst-probe.txt`),
+      fetchText(`http://${hostname}/.agentpress-probe.txt`),
+      fetchText(`http://${hostname}/public/.agentpress-probe.txt`),
     ]);
     if (rootBody === token) return { ok: true, outcome: 'correct-docroot' };
     if (publicBody === token) return { ok: false, outcome: 'wrong-docroot-is-project-root' };

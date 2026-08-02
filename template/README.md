@@ -1,7 +1,7 @@
 # __PROJECT_NAME__
 
 A local WordPress dev site on [Laragon](https://laragon.org), scaffolded by
-[create-katalyst-laragon](https://github.com/briansmith80/katalyst-laragon) — a Laragon-native
+[create-agentpress](https://github.com/briansmith80/agentpress) — a Laragon-native
 port of [katalystwp](https://github.com/soflyy/katalystwp).
 
 - **Site** — __SITE_SCHEME__://__SITE_HOST__
@@ -10,12 +10,12 @@ port of [katalystwp](https://github.com/soflyy/katalystwp).
 ## Everyday use
 
 ```bash
-npm run katalyst   # the interactive menu — open the site, open wp-admin, ...
+npm run agentpress   # the interactive menu — open the site, open wp-admin, ...
 npm run wp -- <command...>   # WP-CLI, e.g. npm run wp -- plugin list
 ```
 
 WordPress core lives in `public/` (that's Laragon's document root for this project —
-everything else here is Katalyst's own tooling, not part of the site).
+everything else here is AgentPress's own tooling, not part of the site).
 
 ## Files
 
@@ -23,16 +23,16 @@ everything else here is Katalyst's own tooling, not part of the site).
 - `public/wp-config.php` — also holds the DB credentials; also gitignored. If you change the
   ignore rules, keep both of these out of any repo you push.
 - `sandbox.config.json` — plugins/agents this site was scaffolded with.
-- `scripts/katalyst.mjs` — the menu above. Frozen at scaffold time; refreshed only by the
+- `scripts/agentpress.mjs` — the menu above. Frozen at scaffold time; refreshed only by the
   `update` command below, which never touches your site, database, or `.env`.
 - `public/` — WordPress core + your content.
 
-## Updating Katalyst's own tooling
+## Updating AgentPress's own tooling
 
 From this directory:
 
 ```bash
-npx create-katalyst-laragon@latest update
+npx create-agentpress@latest update
 ```
 
 (Using a git checkout of the tool instead? `git pull` there, then run

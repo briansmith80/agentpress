@@ -1,10 +1,10 @@
-// The environments registry — deliberately at ~/.katalyst-laragon/ so it can
+// The environments registry — deliberately at ~/.agentpress/ so it can
 // never collide with the Docker original's ~/.katalystwp/. Kept a nullable
 // `port` field for shape-compatibility with that registry even though sites
 // here are hostname-addressed, not port-addressed.
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
-import { KATALYST_HOME, REGISTRY_PATH } from './paths.mjs';
+import { AGENTPRESS_HOME, REGISTRY_PATH } from './paths.mjs';
 
 /**
  * Windows paths are case-insensitive but string compares aren't — scaffold
@@ -29,7 +29,7 @@ export async function loadState() {
 /** Best-effort — a failed write never breaks scaffolding. Atomic (temp + rename) so a crash mid-write can't corrupt the file. */
 export async function saveState(state) {
   try {
-    await mkdir(KATALYST_HOME, { recursive: true });
+    await mkdir(AGENTPRESS_HOME, { recursive: true });
     const tmp = `${REGISTRY_PATH}.tmp`;
     await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
     await rename(tmp, REGISTRY_PATH);
@@ -78,7 +78,7 @@ export async function forgetEnvironment(dir) {
 
 export function formatEnvironmentsTable(environments) {
   if (environments.length === 0) {
-    return 'No environments yet. Create one with: node index.js <name> (from the katalyst-laragon checkout)';
+    return 'No environments yet. Create one with: node index.js <name> (from the agentpress checkout)';
   }
   // Defensive fallbacks — a nameless entry (older format, hand-edited file)
   // used to crash the exact command whose prune self-heals the registry.

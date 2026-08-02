@@ -10,7 +10,7 @@ import { runWp } from './wp.mjs';
 import { psRun } from './win.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 
-const APP_PASSWORD_NAME = 'katalyst-laragon';
+const APP_PASSWORD_NAME = 'agentpress';
 const LARAGON_CRT = join(LARAGON_ROOT, 'etc', 'ssl', 'laragon.crt');
 // Pinned versions, not @latest — these resolve at every agent session
 // start, so an upstream breaking release would instantly break MCP for

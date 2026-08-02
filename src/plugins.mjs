@@ -13,12 +13,13 @@ import { loadConfig } from './config.mjs';
 // licensed zips — `gh` (if installed and authenticated with access)
 // refreshes the local cache from here so a zip dropped in on one machine
 // doesn't need manually re-copying to every other one. Override for your
-// own repo via KATALYST_PREMIUM_PLUGINS_REPO or, persistently, via
-// ~/.katalyst-laragon/config.json: {"premiumPluginsRepo": "you/your-repo"}.
+// own repo via AGENTPRESS_PREMIUM_PLUGINS_REPO or, persistently, via
+// ~/.agentpress/config.json: {"premiumPluginsRepo": "you/your-repo"}.
 const DEFAULT_PREMIUM_PLUGINS_REPO = 'briansmith80/oxygen-premium-plugins';
 
 async function premiumPluginsRepo() {
-  if (process.env.KATALYST_PREMIUM_PLUGINS_REPO) return process.env.KATALYST_PREMIUM_PLUGINS_REPO;
+  const envRepo = process.env.AGENTPRESS_PREMIUM_PLUGINS_REPO ?? process.env.KATALYST_PREMIUM_PLUGINS_REPO;
+  if (envRepo) return envRepo;
   const config = await loadConfig();
   if (typeof config.premiumPluginsRepo === 'string' && config.premiumPluginsRepo.trim()) {
     return config.premiumPluginsRepo.trim();
@@ -56,7 +57,7 @@ const UNIVERSAL_ABILITIES_URL =
 
 /**
  * Oxygen/Breakdance are commercial — not on wordpress.org, no stable public
- * download URL. This looks in `~/.katalyst-laragon/premium-plugins/` for a
+ * download URL. This looks in `~/.agentpress/premium-plugins/` for a
  * zip matching each slug (exact `<slug>.zip`, or `<slug>-*.zip` for the
  * version-suffixed names vendors ship) and picks the newest by mtime if more
  * than one is present. Drop a licensed zip in that folder once and every
@@ -242,16 +243,16 @@ export async function installPremiumPlugins({ path, selection, onStep }) {
  * registered under BREAKDANCE_MODE) that stores the key AND validates it
  * against the vendor; the Elements/Forms extensions carry no licensing of
  * their own — one key covers all three (verified by reading the plugin
- * source). Keys come from ~/.katalyst-laragon/config.json:
+ * source). Keys come from ~/.agentpress/config.json:
  *   { "licenses": { "oxygen": "<32-char key>" } }
- * (env override: KATALYST_OXYGEN_LICENSE). Best-effort, never fatal —
+ * (env override: AGENTPRESS_OXYGEN_LICENSE). Best-effort, never fatal —
  * validation needs the network, and an invalid/expired key is reported,
  * not thrown. The key transits argv of a local shell:false spawn, same
  * momentary-exposure acceptance as `wp config create --dbpass`.
  */
 export async function applyLicenses({ path, slugs = [], onStep }) {
   if (!slugs.includes('oxygen')) return;
-  let key = process.env.KATALYST_OXYGEN_LICENSE || null;
+  let key = process.env.AGENTPRESS_OXYGEN_LICENSE ?? process.env.KATALYST_OXYGEN_LICENSE ?? null;
   if (!key) {
     const config = await loadConfig();
     key = config.licenses?.oxygen || null;

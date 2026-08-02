@@ -1,5 +1,5 @@
 .env
-.katalyst.lock
+.agentpress.lock
 # wp-config.php holds the same DB credentials .env does — pushing a scaffolded
 # site to your own repo must not leak either.
 /public/wp-config.php

@@ -80,7 +80,7 @@ export async function findCollisions(name) {
   }
   const registered = await registeredNames();
   if (registered.includes(name)) {
-    collisions.push(`"${name}" is already in the katalyst-laragon registry`);
+    collisions.push(`"${name}" is already in the agentpress registry`);
   }
   if (await exists(stagingDir)) {
     collisions.push(`A leftover staging directory exists at ${stagingDir} (from an interrupted run)`);

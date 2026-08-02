@@ -1,8 +1,9 @@
-# create-katalyst-laragon
+# AgentPress
 
-A Laragon-native port of [katalystwp](https://github.com/soflyy/katalystwp) — scaffolds a
-local WordPress + AI-agent dev site the same way, but on [Laragon](https://laragon.org)
-(native Windows: Apache + MySQL + PHP + Node, no Docker) instead of Docker Compose.
+Scaffold **AI-agent-ready WordPress sites** on [Laragon](https://laragon.org) (native
+Windows: Apache + MySQL + PHP + Node, no Docker) — instant zero-reload vhosts, https,
+premium plugin auto-install with licensing, and MCP wiring for AI agent CLIs. Started as a
+Laragon-native port of [katalystwp](https://github.com/soflyy/katalystwp).
 
 One command gives you: a site at `http://<name>.test` with its own database and dedicated
 MySQL user, permalinks working, the [Agent Connector](https://github.com/soflyy/agent-connector-for-wp)
@@ -15,7 +16,7 @@ Codex, OpenCode), and a one-click already-logged-in wp-admin link.
 
 - Windows with [Laragon](https://laragon.org) installed and running **Apache** (not Nginx)
   and **MySQL**. The default `C:\laragon` install location is auto-detected; anywhere else
-  works too (set `KATALYST_LARAGON_ROOT` if detection can't find it).
+  works too (set `AGENTPRESS_LARAGON_ROOT` if detection can't find it).
 - Node.js 18 or newer.
 - Optional: the [GitHub CLI](https://cli.github.com) (`gh`) — only used to auto-sync premium
   plugin zips, everything else works without it.
@@ -23,9 +24,9 @@ Codex, OpenCode), and a one-click already-logged-in wp-admin link.
 **Install — nothing to install**
 
 ```bash
-npx create-katalyst-laragon@latest doctor   # env check — ends with "Ready to scaffold: YES/NO"
-npx create-katalyst-laragon@latest setup    # one-time: enables instant scaffolds (see below)
-npx create-katalyst-laragon@latest my-site  # scaffold
+npx create-agentpress@latest doctor   # env check — ends with "Ready to scaffold: YES/NO"
+npx create-agentpress@latest setup    # one-time: enables instant scaffolds (see below)
+npx create-agentpress@latest my-site  # scaffold
 ```
 
 (Developing the tool itself? `git clone` this repo — anywhere EXCEPT Laragon's `www` folder —
@@ -38,7 +39,7 @@ and use `node index.js …` instead of the npx form. Zero dependencies, no `npm 
 1. **Gets your premium plugins in place** — shows which ones (Oxygen / the Breakdance
    extensions) already have a licensed zip available on this machine, opens the drop
    folder for you and re-scans after you add zips, and captures your Oxygen license key
-   (one key covers the extensions too; saved to `~/.katalyst-laragon/config.json`).
+   (one key covers the extensions too; saved to `~/.agentpress/config.json`).
    Setup makes plugins **available** — you choose which ones each individual project
    actually gets when you scaffold it.
 2. **Installs a single wildcard vhost** into Laragon's Apache. This needs one
@@ -65,7 +66,7 @@ with `git pull`.
 
 ## Usage
 
-`npx create-katalyst-laragon@latest <command>` from anywhere (or `node index.js <command>`
+`npx create-agentpress@latest <command>` from anywhere (or `node index.js <command>`
 from a git checkout):
 
 ```bash
@@ -77,7 +78,7 @@ from a git checkout):
 … register-quick-app   # add a Laragon Quick app entry for this tool
 
 # from inside a scaffolded site's directory:
-… update               # refresh the site's Katalyst-owned files
+… update               # refresh the site's AgentPress-owned files
 … destroy              # permanently remove the site
 
 # flags
@@ -85,9 +86,10 @@ from a git checkout):
 … my-site --yes        # non-interactive (skips the confirmation prompt)
 ```
 
-Environment variables (all optional): `KATALYST_LARAGON_ROOT` (Laragon install folder if not
-auto-detected), `KATALYST_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
-`KATALYST_MYSQL_PORT` (when MySQL isn't on 3306), `KATALYST_PREMIUM_PLUGINS_REPO` (see below).
+Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install folder if not
+auto-detected), `AGENTPRESS_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
+`AGENTPRESS_MYSQL_PORT` (when MySQL isn't on 3306), `AGENTPRESS_PREMIUM_PLUGINS_REPO` (see
+below). Legacy `KATALYST_*` names from before the rename are still honored.
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
@@ -112,13 +114,13 @@ These are commercial plugins with no public download URL, so you supply your own
 zips. Two ways, use either or both:
 
 1. **Drop zips in the local cache** (simplest, no GitHub needed):
-   `~/.katalyst-laragon/premium-plugins/` — filenames must match the table above. Newest by
+   `~/.agentpress/premium-plugins/` — filenames must match the table above. Newest by
    file-modified-time wins when several match.
 2. **Your own private GitHub repo of releases** (syncs across your machines): create a
    private repo with one release per plugin — the release **tag** must be exactly the plugin
    slug, with the zip attached as an asset. Then point the tool at it, either with the
-   `KATALYST_PREMIUM_PLUGINS_REPO=you/your-repo` env var or persistently in
-   `~/.katalyst-laragon/config.json`:
+   `AGENTPRESS_PREMIUM_PLUGINS_REPO=you/your-repo` env var or persistently in
+   `~/.agentpress/config.json`:
 
    ```json
    { "premiumPluginsRepo": "you/your-repo" }
@@ -128,7 +130,7 @@ zips. Two ways, use either or both:
    falls back to whatever's already in the local cache.
 
 **License auto-activation:** put your Oxygen license key in
-`~/.katalyst-laragon/config.json` once and every scaffold activates it automatically (via
+`~/.agentpress/config.json` once and every scaffold activates it automatically (via
 Oxygen's own `wp oxygen license` command; the Elements/Forms extensions are covered by the
 same key):
 
@@ -148,7 +150,7 @@ private too — it holds your license key.
     .htaccess           permalinks + the Authorization-header fix Application Passwords need
     .user.ini           per-site PHP limits (mod_fcgid ignores .htaccess php_value)
   scripts\
-    katalyst.mjs         the per-site menu (npm run katalyst) — frozen, dependency-free
+    agentpress.mjs       the per-site menu (npm run agentpress) — frozen, dependency-free
   .env                   DB + admin credentials + site hostname (gitignored)
   sandbox.config.json    plugins/agents this site was scaffolded with
   package.json  README.md  wp-cli.yml  .gitignore
@@ -182,7 +184,7 @@ Source lives in `src/`, one module per concern:
 | `destroy.mjs` / `quickapp.mjs`   | teardown, the Laragon Quick app registration                                                             |
 
 `template/` is the payload copied into every scaffolded project — most notably
-`template/scripts/katalyst.mjs`, which is **frozen at scaffold time** and dependency-free by
+`template/scripts/agentpress.mjs`, which is **frozen at scaffold time** and dependency-free by
 design (no npm installs needed to run it). It necessarily duplicates a few small pieces from
 `src/` (the admin-login PHP + its `eval-file` invocation, the same reasoning the original
 project documented for its own three-copy pattern) — that duplication is intentional, not
@@ -195,9 +197,9 @@ Nothing here runs in the background; removing it is deleting things. In order:
 1. `node index.js destroy` from inside each scaffolded site you want gone (this cleans the
    DB, vhost, MCP entries, and folder for that site).
 2. Delete this checkout.
-3. Optional leftovers, harmless if kept: `~/.katalyst-laragon\` (registry, hosts backups,
+3. Optional leftovers, harmless if kept: `~/.agentpress\` (registry, hosts backups,
    premium plugin zips — note those zips are your licensed property),
-   `<laragon>\usr\bin\wp-cli.phar` + `wp.bat` (shared WP-CLI install), the `KatalystWP` line
+   `<laragon>\usr\bin\wp-cli.phar` + `wp.bat` (shared WP-CLI install), the `AgentPress` line
    in `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#laragon magic!`
    hosts entries for destroyed sites (Laragon prunes these on reload).
 

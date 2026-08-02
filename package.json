@@ -1,10 +1,10 @@
 {
-  "name": "create-katalyst-laragon",
-  "version": "0.7.0",
+  "name": "create-agentpress",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Scaffold a local WordPress + AI-agent dev environment on Laragon (Windows, no Docker).",
+  "description": "AgentPress: scaffold AI-agent-ready WordPress sites on Laragon (Windows) — instant vhosts, https, premium plugin licensing, MCP wiring.",
   "bin": {
-    "create-katalyst-laragon": "index.js"
+    "create-agentpress": "index.js"
   },
   "exports": {
     ".": "./src/engine.js"
@@ -22,13 +22,16 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/briansmith80/katalyst-laragon.git"
+    "url": "git+https://github.com/briansmith80/agentpress.git"
   },
   "keywords": [
-    "laragon",
+    "agentpress",
     "wordpress",
+    "laragon",
     "scaffold",
     "mcp",
+    "ai-agent",
+    "oxygen",
     "windows"
   ],
   "license": "GPL-2.0-or-later"

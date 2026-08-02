@@ -164,7 +164,7 @@ export async function runWp(args, { path, cwd, env, input } = {}) {
  * (e.g. namespaced FQCNs) even though shell:false already avoids cmd.exe.
  */
 export async function runWpEvalFile(phpSource, opts = {}) {
-  const tmp = join(tmpdir(), `katalyst-eval-${randomBytes(6).toString('hex')}.php`);
+  const tmp = join(tmpdir(), `agentpress-eval-${randomBytes(6).toString('hex')}.php`);
   // eval-file loads the file as a normal PHP script (unlike `wp eval`,
   // which the original used — a bare code string with no tag needed).
   // Content outside `<?php ?>` is literal output, so a source string

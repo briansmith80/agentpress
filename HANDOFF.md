@@ -8,6 +8,11 @@ status: in-progress
 handoff_reason: switching-machines
 ---
 
+> **RENAMED 2026-08-02: this project is now AgentPress** (npm: create-agentpress,
+> repo: briansmith80/agentpress, config: ~/.agentpress with auto-migration, env vars
+> AGENTPRESS_* with legacy KATALYST_* honored). Historical references below to
+> katalyst-laragon are left as written.
+>
 > **Maintainer session notes — not user documentation.** If you just cloned this repo,
 > start at [README.md](README.md); nothing below is needed to use the tool.
 

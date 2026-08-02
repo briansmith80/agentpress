@@ -1,7 +1,7 @@
 // Shared path constants.
 //
 // LARAGON_ROOT resolution order (first hit wins):
-//   1. KATALYST_LARAGON_ROOT env var — explicit override, no probing
+//   1. AGENTPRESS_LARAGON_ROOT env var (legacy KATALYST_LARAGON_ROOT honored)
 //   2. C:\laragon when laragon.exe exists there — the default install; fast
 //      path, costs one existsSync
 //   3. the running laragon.exe process's own directory — covers D:\laragon
@@ -11,7 +11,7 @@
 //      instead of this module throwing at import time
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 // Absolute path, not bare 'powershell.exe' — a PATH mangled by an installer
@@ -22,7 +22,7 @@ export const PS_EXE = (() => {
 })();
 
 function resolveLaragonRoot() {
-  const override = process.env.KATALYST_LARAGON_ROOT;
+  const override = process.env.AGENTPRESS_LARAGON_ROOT ?? process.env.KATALYST_LARAGON_ROOT;
   if (override) return override.replace(/[\\/]+$/, '');
   if (existsSync('C:\\laragon\\laragon.exe')) return 'C:\\laragon';
   const probe = spawnSync(
@@ -50,15 +50,35 @@ export const SITES_ENABLED_APACHE = join(LARAGON_ROOT, 'etc', 'apache2', 'sites-
 export const SITES_ENABLED_NGINX = join(LARAGON_ROOT, 'etc', 'nginx', 'sites-enabled');
 export const HOSTS_PATH = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
 
-export const KATALYST_HOME = join(homedir(), '.katalyst-laragon');
-export const CONFIG_PATH = join(KATALYST_HOME, 'config.json');
-export const WP_CLI_CACHE_DIR = join(KATALYST_HOME, 'cache');
-export const BACKUPS_DIR = join(KATALYST_HOME, 'backups');
-export const SCAFFOLD_LOCK_PATH = join(KATALYST_HOME, 'scaffold.lock');
-export const REGISTRY_PATH = join(KATALYST_HOME, 'environments.json');
-export const PREMIUM_PLUGINS_DIR = join(KATALYST_HOME, 'premium-plugins');
+/**
+ * The tool was renamed from create-katalyst-laragon to create-agentpress —
+ * a machine that ran the old version has its license key, premium plugin
+ * zips, registry, and caches under ~/.katalyst-laragon. Move the whole tree
+ * once; if the rename fails (open handle), fall back to using the legacy
+ * dir in place so nothing is lost.
+ */
+function resolveHome() {
+  const home = join(homedir(), '.agentpress');
+  const legacy = join(homedir(), '.katalyst-laragon');
+  if (!existsSync(home) && existsSync(legacy)) {
+    try {
+      renameSync(legacy, home);
+    } catch {
+      return legacy;
+    }
+  }
+  return home;
+}
+
+export const AGENTPRESS_HOME = resolveHome();
+export const CONFIG_PATH = join(AGENTPRESS_HOME, 'config.json');
+export const WP_CLI_CACHE_DIR = join(AGENTPRESS_HOME, 'cache');
+export const BACKUPS_DIR = join(AGENTPRESS_HOME, 'backups');
+export const SCAFFOLD_LOCK_PATH = join(AGENTPRESS_HOME, 'scaffold.lock');
+export const REGISTRY_PATH = join(AGENTPRESS_HOME, 'environments.json');
+export const PREMIUM_PLUGINS_DIR = join(AGENTPRESS_HOME, 'premium-plugins');
 export const STAGING_DIR = join(
   process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'),
-  'katalyst-laragon',
+  'agentpress',
   'staging',
 );

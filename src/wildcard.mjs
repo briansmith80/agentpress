@@ -27,12 +27,13 @@ import { HOSTS_PATH, SITES_ENABLED_APACHE, WWW_DIR } from './paths.mjs';
 import { psCapture } from './win.mjs';
 import { inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
 
-export const WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-katalyst-wildcard.conf');
+export const WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-agentpress-wildcard.conf');
+const LEGACY_WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-katalyst-wildcard.conf'); // pre-rename installs
 const LARAGON_CRT = join(SITES_ENABLED_APACHE, '..', '..', 'ssl', 'laragon.crt');
 const LARAGON_KEY = join(SITES_ENABLED_APACHE, '..', '..', 'ssl', 'laragon.key');
 
 export function wildcardConfInstalled() {
-  return existsSync(WILDCARD_CONF_PATH);
+  return existsSync(WILDCARD_CONF_PATH) || existsSync(LEGACY_WILDCARD_CONF_PATH);
 }
 
 export function sslCertPresent() {
@@ -53,7 +54,7 @@ async function generateWildcardConf() {
     ? `
 <IfModule ssl_module>
 <VirtualHost *:443>
-    ServerName katalyst-wildcard${suffix}
+    ServerName agentpress-wildcard${suffix}
     ServerAlias *${suffix}
     UseCanonicalName Off
     VirtualDocumentRoot "${www}/%1/public"
@@ -64,8 +65,8 @@ async function generateWildcardConf() {
 </IfModule>
 `
     : '';
-  const conf = `# katalyst-laragon "instant mode" wildcard vhost (conf v2: http + https) —
-# managed by create-katalyst-laragon; \`setup\` regenerates it.
+  const conf = `# agentpress "instant mode" wildcard vhost (conf v2: http + https) —
+# managed by create-agentpress; \`setup\` regenerates it.
 # Maps every <name>${suffix} to ${www}/<name>/public with no per-site vhost and no
 # Laragon reload. The zzz- filename keeps this LAST in Apache's first-match vhost
 # order, so exact-name confs for existing sites always win. Delete this file (and
@@ -74,7 +75,7 @@ async function generateWildcardConf() {
     LoadModule vhost_alias_module modules/mod_vhost_alias.so
 </IfModule>
 <VirtualHost *:80>
-    ServerName katalyst-wildcard${suffix}
+    ServerName agentpress-wildcard${suffix}
     ServerAlias *${suffix}
     UseCanonicalName Off
     VirtualDocumentRoot "${www}/%1/public"
@@ -94,7 +95,9 @@ ${sslBlock}# .htaccess support for wildcard-served sites — scoped to */public 
 export async function installWildcardConf() {
   const { suffix, conf } = await generateWildcardConf();
   const existing = await readFile(WILDCARD_CONF_PATH, 'utf8').catch(() => null);
-  if (existing === conf) return { suffix, path: WILDCARD_CONF_PATH, updated: false };
+  const legacyPresent = existsSync(LEGACY_WILDCARD_CONF_PATH);
+  if (legacyPresent) await rm(LEGACY_WILDCARD_CONF_PATH, { force: true }); // duplicate wildcard vhosts otherwise
+  if (existing === conf && !legacyPresent) return { suffix, path: WILDCARD_CONF_PATH, updated: false };
   await writeFile(WILDCARD_CONF_PATH, conf, 'utf8');
   return { suffix, path: WILDCARD_CONF_PATH, updated: true };
 }
@@ -148,13 +151,13 @@ export function fetchViaLoopback(hostname, path, { timeoutMs = 3000, tls = false
 export async function wildcardActive({ tls = false } = {}) {
   if (!wildcardConfInstalled()) return false;
   const { suffix } = await inferHostnameSuffix();
-  const name = `kat-probe-${randomBytes(4).toString('hex')}`;
+  const name = `ap-probe-${randomBytes(4).toString('hex')}`;
   const token = randomBytes(12).toString('hex');
   const dir = join(WWW_DIR, name, 'public');
   try {
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'katalyst-probe.txt'), token, 'utf8');
-    const res = await fetchViaLoopback(`${name}${suffix}`, '/katalyst-probe.txt', { tls });
+    await writeFile(join(dir, 'agentpress-probe.txt'), token, 'utf8');
+    const res = await fetchViaLoopback(`${name}${suffix}`, '/agentpress-probe.txt', { tls });
     return Boolean(res && res.status === 200 && res.body.trim() === token);
   } catch {
     return false;
@@ -188,11 +191,11 @@ export async function ensureHostsEntry(hostname) {
     `$name = '${hostname}'`,
     '$content = Get-Content -Path $hosts -Raw -ErrorAction SilentlyContinue',
     'if ($content -notmatch [regex]::Escape($name)) {',
-    "  Add-Content -Path $hosts -Value (\"`r`n127.0.0.1`t\" + $name + \"`t#katalyst-laragon\") -NoNewline:$false",
+    "  Add-Content -Path $hosts -Value (\"`r`n127.0.0.1`t\" + $name + \"`t#agentpress\") -NoNewline:$false",
     '}',
     'exit 0',
   ].join('\r\n');
-  const tmp = join(tmpdir(), `katalyst-hosts-${randomBytes(6).toString('hex')}.ps1`);
+  const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
   await writeFile(tmp, script, 'utf8');
   try {
     const result = await psCapture(
