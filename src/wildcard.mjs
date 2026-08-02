@@ -205,9 +205,38 @@ export async function ensureHostsEntry(hostname) {
     // itself is the ground truth — UAC decline throws inside psCapture's
     // process and shows up as nonzero/stderr.
     const after = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
-    if (hostsHas(after, hostname)) return { ok: true, already: false };
+    if (hostsHas(after, hostname)) {
+      await flushDnsCache();
+      return { ok: true, already: false };
+    }
     return { ok: false, reason: (result.stderr || 'the elevation prompt was declined or the write failed').trim().split('\n')[0] };
   } finally {
     await rm(tmp, { force: true }).catch(() => {});
   }
+}
+
+/**
+ * Windows caches NEGATIVE lookups: anything that resolved the new hostname
+ * before its hosts line landed poisons every later process with ENOTFOUND
+ * (bit this project four times: browsers after restarts, and an MCP proxy
+ * that reported a healthy site as unreachable). Flush right after any hosts
+ * change; works unelevated and is instant. Best-effort — a failure just
+ * means the user may need one manual `ipconfig /flushdns`.
+ */
+export async function flushDnsCache() {
+  const { spawn } = await import('node:child_process');
+  await new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'ipconfig.exe'), ['/flushdns'], {
+        stdio: 'ignore',
+        shell: false,
+      });
+    } catch {
+      resolve();
+      return;
+    }
+    child.on('close', () => resolve());
+    child.on('error', () => resolve());
+  });
 }

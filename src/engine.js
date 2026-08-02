@@ -33,7 +33,7 @@ import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
-import { ensureHostsEntry, fetchViaLoopback, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
+import { ensureHostsEntry, fetchViaLoopback, flushDnsCache, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
 import { randomBytes } from 'node:crypto';
 
 const TEMPLATE_DIR = fileURLToPath(new URL('../template', import.meta.url));
@@ -508,6 +508,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     }
 
     console.log(`✓ Vhost + hosts entry ready after ${Math.round(pollResult.elapsedMs / 1000)}s`);
+    await flushDnsCache(); // Laragon just wrote the hosts line — clear any cached negative lookups
     // A short settle delay — Apache has been observed to keep flapping for a
     // while right after a reload rather than crashing once and staying
     // down, so checking the instant the poll succeeds is still a race.
