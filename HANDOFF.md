@@ -8,6 +8,9 @@ status: in-progress
 handoff_reason: switching-machines
 ---
 
+> **PUBLIC: the GitHub repo went public 2026-08-02 (history pre-scanned: no keys or
+> tokens ever committed; work email in two old HANDOFF revisions accepted as harmless).**
+>
 > **PUBLISHED: create-agentpress@1.0.0 is live on npm (2026-08-02); the old
 > create-katalyst-laragon package is deprecated with a pointer.**
 >
