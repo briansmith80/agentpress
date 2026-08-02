@@ -8,6 +8,9 @@ status: in-progress
 handoff_reason: switching-machines
 ---
 
+> **PUBLISHED: create-agentpress@1.0.0 is live on npm (2026-08-02); the old
+> create-katalyst-laragon package is deprecated with a pointer.**
+>
 > **RENAMED 2026-08-02: this project is now AgentPress** (npm: create-agentpress,
 > repo: briansmith80/agentpress, config: ~/.agentpress with auto-migration, env vars
 > AGENTPRESS_* with legacy KATALYST_* honored). Historical references below to
