@@ -1,3 +1,5 @@
+  
+
 # AgentPress
 
 Scaffold **AI-agent-ready WordPress sites** on [Laragon](https://laragon.org) (native
@@ -99,11 +101,11 @@ doesn't). Scripted runs control it with `--premium=all`, `--premium=none`, or
 `--premium=oxygen,breakdance-forms-for-oxygen` (`--yes` alone installs all available;
 picking an extension automatically includes Oxygen). The supported set:
 
-| Plugin slug                          | Accepted zip filenames                       |
-| ------------------------------------ | -------------------------------------------- |
-| `oxygen`                           | `oxygen.zip` or `oxygen-*.zip`           |
-| `breakdance-elements-for-oxygen`   | `breakdance-elements-for-oxygen[-*].zip`   |
-| `breakdance-forms-for-oxygen`      | `breakdance-forms-for-oxygen[-*].zip`      |
+| Plugin slug                           | Accepted zip filenames                                                              |
+| ------------------------------------- | ----------------------------------------------------------------------------------- |
+| `oxygen`                            | `oxygen.zip` or `oxygen-*.zip`                                                  |
+| `breakdance-elements-for-oxygen`    | `breakdance-elements-for-oxygen[-*].zip`                                          |
+| `breakdance-forms-for-oxygen`       | `breakdance-forms-for-oxygen[-*].zip`                                             |
 | `breakdance-woocommerce-for-oxygen` | `breakdance-woocommerce-for-oxygen[-*].zip` (auto-installs WooCommerce alongside) |
 
 After the license activates, the scaffold runs `wp plugin update --all`, so every plugin —
@@ -202,6 +204,15 @@ Nothing here runs in the background; removing it is deleting things. In order:
    `<laragon>\usr\bin\wp-cli.phar` + `wp.bat` (shared WP-CLI install), the `AgentPress` line
    in `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#laragon magic!`
    hosts entries for destroyed sites (Laragon prunes these on reload).
+
+## Security
+
+This is a local dev tool that does a few things that look alarming in isolation (executes PHP
+via WP-CLI, runs PowerShell, one UAC prompt for the hosts file, installs downloaded plugins).
+**[SECURITY.md](SECURITY.md)** explains each one with source references, states what it
+deliberately does *not* do (no telemetry, no outbound data, no remote targets), and lists the
+limitations we would rather disclose than hide. Worth two minutes before you run any tool that
+asks for a UAC prompt.
 
 ## Known limitations
 

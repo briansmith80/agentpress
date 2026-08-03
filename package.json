@@ -1,6 +1,6 @@
 {
   "name": "create-agentpress",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "description": "AgentPress: scaffold AI-agent-ready WordPress sites on Laragon (Windows) — instant vhosts, https, premium plugin licensing, MCP wiring.",
   "bin": {
@@ -34,5 +34,10 @@
     "oxygen",
     "windows"
   ],
-  "license": "GPL-2.0-or-later"
+  "license": "GPL-2.0-or-later",
+  "homepage": "https://github.com/briansmith80/agentpress#readme",
+  "bugs": {
+    "url": "https://github.com/briansmith80/agentpress/issues"
+  },
+  "author": "briansmith80"
 }

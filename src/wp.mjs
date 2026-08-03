@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { LARAGON_ROOT, WP_CLI_CACHE_DIR } from './paths.mjs';
 
 const FCGID_CONF = join(LARAGON_ROOT, 'etc', 'apache2', 'fcgid.conf');
@@ -15,7 +15,14 @@ const PHP_BASE = join(LARAGON_ROOT, 'bin', 'php');
 const USR_BIN = join(LARAGON_ROOT, 'usr', 'bin');
 const WP_CLI_PHAR = join(USR_BIN, 'wp-cli.phar');
 const WP_CLI_BAT = join(USR_BIN, 'wp.bat');
-const WP_CLI_URL = 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar';
+// PINNED to a specific WP-CLI release, with the digest WP-CLI publishes
+// alongside it (verified to match the real artifact before being embedded
+// here). The old URL was the wp-cli/builds gh-pages branch — a MUTABLE
+// artifact fetched once and then executed on every wp call forever, i.e.
+// trust-on-first-use. Bump both lines together, never one alone.
+const WP_CLI_VERSION = '2.12.0';
+const WP_CLI_URL = `https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar`;
+const WP_CLI_SHA512 = 'be928f6b8ca1e8dfb9d2f4b75a13aa4aee0896f8a9a0a1c45cd5d2c98605e6172e6d014dda2e27f88c98befc16c040cbb2bd1bfa121510ea5cdf5f6a30fe8832';
 
 export { LARAGON_ROOT, WP_CLI_CACHE_DIR };
 
@@ -107,10 +114,28 @@ function spawnCapture(cmd, args, opts = {}) {
   });
 }
 
-async function downloadFile(url, dest) {
+/**
+ * `expectedSha512`, when given, is verified BEFORE the bytes are written to
+ * disk — so a tampered or truncated artifact never lands somewhere we would
+ * later execute. Used for wp-cli.phar, which this tool installs once and
+ * then runs on every `wp` call: fetch-and-execute without verification is
+ * trust-on-first-use, and the digest closes it.
+ */
+async function downloadFile(url, dest, { expectedSha512 } = {}) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Download failed: ${url} -> HTTP ${res.status}`);
-  await writeFile(dest, Buffer.from(await res.arrayBuffer()));
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (expectedSha512) {
+    const actual = createHash('sha512').update(bytes).digest('hex');
+    if (actual !== expectedSha512) {
+      throw new Error(
+        `Refusing to install ${url}: SHA-512 mismatch.\n` +
+          `  expected ${expectedSha512}\n  actual   ${actual}\n` +
+          '  The download was corrupted or tampered with — nothing was written.',
+      );
+    }
+  }
+  await writeFile(dest, bytes);
 }
 
 export async function wpCliPresent() {
@@ -129,7 +154,7 @@ export async function wpCliPresent() {
 export async function ensureWpCli() {
   await mkdir(USR_BIN, { recursive: true });
   if (!(await exists(WP_CLI_PHAR))) {
-    await downloadFile(WP_CLI_URL, WP_CLI_PHAR);
+    await downloadFile(WP_CLI_URL, WP_CLI_PHAR, { expectedSha512: WP_CLI_SHA512 });
   }
   const php = await resolvePhpExe();
   const batContent = `@echo off\r\n"${php}" -d memory_limit=512M "%~dp0wp-cli.phar" %*\r\n`;

@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './doctor.mjs';
 import { AGENTPRESS_HOME, LARAGON_ROOT, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
@@ -294,6 +294,45 @@ async function probeInstant(hostname, projectDir, { timeoutMs = 12_000 } = {}) {
   } finally {
     await rm(probeFile, { force: true }).catch(() => {});
   }
+}
+
+/**
+ * The project root holds `.env` (DB + admin passwords). It sits OUTSIDE the
+ * site's own docroot (`public/`), so the site's own vhost can never serve
+ * it — but Laragon's default catch-all vhost serves the whole `www\` tree by
+ * path, which makes `http://127.0.0.1/<name>/.env` reachable, and Apache
+ * binds every interface. `Require all denied` in the project root closes
+ * that path (Apache reads it for the default vhost, and never for the site
+ * itself since it is above that docroot).
+ *
+ * Written from HERE — the same function that writes `.env` — not from the
+ * staging block, so `resume` and any future path that creates `.env` are
+ * covered too. Then VERIFIED rather than assumed: the guard's effectiveness
+ * depends on a Laragon conf we do not own granting AllowOverride, so a
+ * silent regression would leak credentials to anything on the network.
+ */
+async function protectProjectSecrets({ name, projectDir }) {
+  await writeFile(
+    join(projectDir, '.htaccess'),
+    '# Denies the project ROOT over HTTP. .env (DB + admin passwords) lives here,\n' +
+      "# and Laragon's default vhost serves the whole www\\ tree by path. Apache never\n" +
+      '# reads this file when serving the site itself (public/ is the docroot).\n' +
+      'Require all denied\n',
+    'utf8',
+  );
+  const res = await fetchViaLoopback('127.0.0.1', `/${encodeURIComponent(name)}/.env`, { timeoutMs: 4000 });
+  if (res && res.status === 200 && /DB_PASSWORD|WP_ADMIN_PASSWORD/.test(res.body)) {
+    console.log(
+      `\n⚠ SECURITY: ${join(projectDir, '.env')} is being served over HTTP\n` +
+        `  (http://127.0.0.1/${name}/.env returned its contents — it holds this site's DB and\n` +
+        "  admin passwords, and Apache listens on every interface). The protective .htaccess was\n" +
+        "  written but Laragon's Apache is ignoring it (AllowOverride None for www\\).\n" +
+        '  Fix: add `AllowOverride All` for the www directory in Laragon\'s Apache config, or move\n' +
+        '  this site out of a world-served tree, before using this site on an untrusted network.\n',
+    );
+    return false;
+  }
+  return true;
 }
 
 /** Warn-only wrapper around the elevated hosts write — a declined UAC must never sink the scaffold, since WordPress installation itself needs no DNS. */
@@ -629,6 +668,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
     ].join('\n'),
     'utf8',
   );
+  await protectProjectSecrets({ name, projectDir });
 
   await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}`, scheme });
 }
@@ -952,6 +992,35 @@ async function destroyCommand({ yes }) {
   const cwd = process.cwd();
   if (!(await fileExists(join(cwd, '.env')))) {
     bail('✖ No .env here — run destroy from a agentpress site directory.');
+    return;
+  }
+  // A bare .env is nowhere near enough to authorize an rm -rf: a typical
+  // www\ holds dozens of unrelated projects that have one (36 on the
+  // author's machine). `update` already learned this and requires a real
+  // marker; destroy — which deletes the whole directory and drops a
+  // database — must be at least as strict. Both checks are enforced even
+  // under --yes, because this tool is routinely driven by agent CLIs that
+  // pass --yes by default.
+  const isAgentPressSite =
+    (await fileExists(join(cwd, 'sandbox.config.json'))) ||
+    (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
+    (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))); // pre-rename sites
+  if (!isAgentPressSite) {
+    bail(
+      '✖ This folder has a .env but no sandbox.config.json or scripts\\agentpress.mjs — it does\n' +
+        '  not look like a site this tool created, so destroy will not touch it.\n' +
+        `  (Currently in: ${cwd})`,
+    );
+    return;
+  }
+  // Containment: only ever delete a direct child of Laragon's www — never a
+  // drive root, a home directory, or something reached via an odd cwd.
+  const parent = resolve(cwd, '..');
+  if (resolve(cwd) === resolve(WWW_DIR) || parent.toLowerCase() !== resolve(WWW_DIR).toLowerCase()) {
+    bail(
+      `✖ Refusing to destroy ${cwd} — destroy only removes a site directly inside ${WWW_DIR}.\n` +
+        '  cd into the site folder itself and try again.',
+    );
     return;
   }
   console.log(
