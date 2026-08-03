@@ -1102,7 +1102,9 @@ async function setupPreferences() {
       if (/^y(es)?$/i.test(open)) {
         const { spawn } = await import('node:child_process');
         await mkdir(dir, { recursive: true });
-        spawn('explorer', [dir], { detached: true, stdio: 'ignore' }).unref();
+        // Absolute path: bare 'explorer' would let an explorer.exe in the CWD win
+        // (Windows CreateProcess searches the current directory).
+        spawn(join(process.env.SystemRoot || 'C:\Windows', 'explorer.exe'), [dir], { detached: true, stdio: 'ignore' }).unref();
         await rl.question('  Press Enter when you have added your zips (or Enter to continue without)… ');
         availability = await premiumPluginAvailability();
         printAvailabilityTable(availability);

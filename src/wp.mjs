@@ -13,7 +13,6 @@ import { LARAGON_ROOT, WP_CLI_CACHE_DIR } from './paths.mjs';
 const FCGID_CONF = join(LARAGON_ROOT, 'etc', 'apache2', 'fcgid.conf');
 const PHP_BASE = join(LARAGON_ROOT, 'bin', 'php');
 const USR_BIN = join(LARAGON_ROOT, 'usr', 'bin');
-const WP_CLI_PHAR = join(USR_BIN, 'wp-cli.phar');
 const WP_CLI_BAT = join(USR_BIN, 'wp.bat');
 // PINNED to a specific WP-CLI release, with the digest WP-CLI publishes
 // alongside it (verified to match the real artifact before being embedded
@@ -22,6 +21,8 @@ const WP_CLI_BAT = join(USR_BIN, 'wp.bat');
 // trust-on-first-use. Bump both lines together, never one alone.
 const WP_CLI_VERSION = '2.12.0';
 const WP_CLI_URL = `https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar`;
+// Version-scoped + tool-owned: never clobber a wp-cli the user installed as wp-cli.phar.
+const WP_CLI_PHAR = join(USR_BIN, `wp-cli-${WP_CLI_VERSION}.phar`);
 const WP_CLI_SHA512 = 'be928f6b8ca1e8dfb9d2f4b75a13aa4aee0896f8a9a0a1c45cd5d2c98605e6172e6d014dda2e27f88c98befc16c040cbb2bd1bfa121510ea5cdf5f6a30fe8832';
 
 export { LARAGON_ROOT, WP_CLI_CACHE_DIR };
@@ -151,13 +152,30 @@ export async function wpCliPresent() {
  * — a stale bat then breaks `npm run wp` in every scaffolded site while the
  * scaffolder itself (which re-resolves PHP per process) keeps working.
  */
+let verifiedPharThisProcess = false;
+
 export async function ensureWpCli() {
   await mkdir(USR_BIN, { recursive: true });
-  if (!(await exists(WP_CLI_PHAR))) {
-    await downloadFile(WP_CLI_URL, WP_CLI_PHAR, { expectedSha512: WP_CLI_SHA512 });
+  // Verify what we EXECUTE, not merely what we download. Pinning the download
+  // alone left every machine that ran an earlier version still executing the
+  // unverified phar it had already cached — the file is only fetched when
+  // absent, so the digest check never ran again. The path is version-scoped
+  // and tool-owned so this also cannot clobber (or silently downgrade) a
+  // wp-cli the user installed deliberately as `wp-cli.phar`.
+  if (!verifiedPharThisProcess) {
+    const actual = await readFile(WP_CLI_PHAR, null)
+      .then((buf) => createHash('sha512').update(buf).digest('hex'))
+      .catch(() => null);
+    if (actual !== WP_CLI_SHA512) {
+      if (actual !== null) {
+        console.log(`  (replacing an unverified ${WP_CLI_PHAR} with the pinned WP-CLI ${WP_CLI_VERSION})`);
+      }
+      await downloadFile(WP_CLI_URL, WP_CLI_PHAR, { expectedSha512: WP_CLI_SHA512 });
+    }
+    verifiedPharThisProcess = true;
   }
   const php = await resolvePhpExe();
-  const batContent = `@echo off\r\n"${php}" -d memory_limit=512M "%~dp0wp-cli.phar" %*\r\n`;
+  const batContent = `@echo off\r\n"${php}" -d memory_limit=512M "${WP_CLI_PHAR}" %*\r\n`;
   const current = await readFile(WP_CLI_BAT, 'utf8').catch(() => '');
   if (current !== batContent) {
     await writeFile(WP_CLI_BAT, batContent, 'utf8');

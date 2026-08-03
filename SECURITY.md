@@ -13,15 +13,20 @@ references are given so you don't have to take our word for it.
 
 - **No telemetry, analytics, or crash reporting.** There is no such code. Every network call
   in the package is a `GET`/download; there is no `POST`, `PUT`, or `PATCH` anywhere.
-- **No remote targets.** WP-CLI is always invoked as local `php.exe` + `wp-cli.phar
-  --path=<local folder>` (`src/wp.mjs`). No function in this tool accepts a remote host to act
-  on, so it cannot touch a site that isn't a folder on your disk.
+- **No remote targets.** WP-CLI is always invoked as local `php.exe` + the pinned
+  `wp-cli-<version>.phar` with `--path=<local folder>` (`src/wp.mjs`). No function in this tool
+  accepts a remote host to act on, so it cannot touch a site that isn't a folder on your disk.
+- **`wp-cli.phar` is pinned and verified.** Downloaded from a specific WP-CLI release and
+  checked against an embedded SHA-512 *before* it is written, then re-verified on every run — a
+  mismatching file is replaced, never executed. The filename is version-scoped, so a `wp` you
+  installed yourself is never clobbered.
 - **No credential collection.** Passwords it generates stay on your machine (the site's own
   `.env`); your Oxygen license key stays in `~/.agentpress/config.json`. Neither is ever
   transmitted anywhere.
-- **Outbound destinations, exhaustively:** `wordpress.org` (WordPress core),
-  `raw.githubusercontent.com` (WP-CLI), `github.com` (the Agent Connector plugin releases, and
-  your own private plugin repo if you configure one), `registry.npmjs.org` (version check).
+- **Outbound destinations, exhaustively:** `wordpress.org` (WordPress core + its checksum),
+  `github.com` (WP-CLI releases, the Agent Connector plugin releases, and your own private
+  plugin repo *only if you configure one*), `registry.npmjs.org` (version check). There is no
+  default premium-plugin repo — nothing is fetched from the author's account.
 
 ## Things that look alarming, and why they're necessary
 
@@ -47,18 +52,30 @@ references are given so you don't have to take our word for it.
 
 ## Known limitations we'd rather state than hide
 
-- **`wp-cli.phar` is fetched from WP-CLI's official build URL and not hash-pinned.** This is
-  the same URL Laragon and most CI pipelines use, but it is trust-on-first-use: a compromise of
-  that upstream artifact at the moment of your first scaffold would execute as your user. Being
-  addressed; tracked in the repo.
-- **The WordPress application password is passed on a PowerShell command line** for
-  `claude`/`codex` (their CLIs accept it no other way), so it can appear in process
-  command-line audit logs on managed machines. It grants REST admin on a local-only site.
-  Cursor and OpenCode are configured by direct JSON write and are not affected.
+- **Scaffolded sites carry the Agent Connector abilities pack** — shell-exec, PHP-eval and
+  filesystem write, available to an authenticated administrator. That capability *is* the
+  product for an AI-agent dev site. It is contained rather than removed: each site's
+  `public/.htaccess` restricts the `/wp-json/mcp/` route to loopback, so those abilities are
+  reachable only from the machine the agents run on. Deleting those three lines re-exposes them
+  to every network the machine joins.
+- **Codex's MCP wiring still puts the application password on a command line.** Claude, Cursor
+  and OpenCode configs are written directly as JSON, so the credential never reaches an argv.
+  Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the
+  exposure, so `codex mcp add` is still used; the credential appears briefly on that process's
+  command line, where command-line auditing or EDR can persist it. It grants REST admin on a
+  loopback-restricted local site.
+- **WordPress core is verified against the SHA-1 that wordpress.org publishes** beside the
+  tarball. That detects corruption and in-transit or CDN tampering, but a digest fetched from
+  the same origin cannot prove wordpress.org itself is honest. The Agent Connector plugin zips
+  are pinned by release tag, which pins a tag rather than bytes.
 - **Laragon's Apache binds all interfaces.** That is Laragon's default, not something this tool
   changes, but it means a local dev site is reachable from any network you join. Consider
-  Windows Firewall rules for the `Apache HTTP Server` entries if you work on untrusted
-  networks.
+  restricting the `Apache HTTP Server` Windows Firewall rules to private networks. Note this
+  applies to *every* project in your `www` folder, not just AgentPress sites — non-AgentPress
+  projects with a root `.env` may be serving it over HTTP.
+- **The `.env` exposure check is a warning, not a hard stop.** If your Apache ignores the
+  protective `.htaccess`, the scaffold prints a prominent warning and continues rather than
+  failing.
 
 ## Automated scanner reports
 

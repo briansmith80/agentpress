@@ -179,7 +179,16 @@ export async function provisionDatabase(siteName, cred) {
   return { dbName, dbUser, dbPassword, dbHost: MYSQL_PORT === 3306 ? '127.0.0.1' : `127.0.0.1:${MYSQL_PORT}` };
 }
 
+/** DB_NAME/DB_USER arrive from a site's .env, which can be hand-edited or arrive with someone else's project — validate before interpolating into root-privileged SQL. Our own names are always [a-z0-9_]. */
+function assertSafeIdentifier(value, label) {
+  if (!/^[A-Za-z0-9_]{1,64}$/.test(String(value || ''))) {
+    throw new Error(`Refusing to use "${value}" as a MySQL ${label}: expected letters, digits and underscores only.`);
+  }
+}
+
 export async function dropDatabase(dbName, dbUser, cred, { host = '127.0.0.1', port = MYSQL_PORT } = {}) {
+  assertSafeIdentifier(dbName, 'database name');
+  assertSafeIdentifier(dbUser, 'user name');
   const sql = [`DROP DATABASE IF EXISTS \`${dbName}\`;`, `DROP USER IF EXISTS '${dbUser}'@'127.0.0.1';`].join('\n');
   return runMysql(sql, { user: 'root', password: cred.password, host, port });
 }

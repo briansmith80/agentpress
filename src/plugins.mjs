@@ -3,8 +3,9 @@
 // directly (it always went through `wp` in the workspace container), so it
 // carries over unchanged except for dropping the exec prefix.
 import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { runWp, spawnCapture } from './wp.mjs';
+import { resolveOnPath } from './win.mjs';
 import { CONFIG_PATH, PREMIUM_PLUGINS_DIR } from './paths.mjs';
 import { loadConfig } from './config.mjs';
 
@@ -15,7 +16,11 @@ import { loadConfig } from './config.mjs';
 // doesn't need manually re-copying to every other one. Override for your
 // own repo via AGENTPRESS_PREMIUM_PLUGINS_REPO or, persistently, via
 // ~/.agentpress/config.json: {"premiumPluginsRepo": "you/your-repo"}.
-const DEFAULT_PREMIUM_PLUGINS_REPO = 'briansmith80/oxygen-premium-plugins';
+// NO default repo: a published package must never sync third-party zips from
+// its author's account onto other people's machines. Sync only ever targets a
+// repo the operator named themselves (env var or config.json); otherwise the
+// local drop folder is the only source.
+const DEFAULT_PREMIUM_PLUGINS_REPO = null;
 
 async function premiumPluginsRepo() {
   const envRepo = process.env.AGENTPRESS_PREMIUM_PLUGINS_REPO ?? process.env.KATALYST_PREMIUM_PLUGINS_REPO;
@@ -25,6 +30,11 @@ async function premiumPluginsRepo() {
     return config.premiumPluginsRepo.trim();
   }
   return DEFAULT_PREMIUM_PLUGINS_REPO;
+}
+
+/** Only accept release assets whose filename matches the slug being synced — a release must not be able to drop arbitrary zips into the cache and shadow a good one by mtime. */
+function assetBelongsToSlug(fileName, plugin) {
+  return zipMatchesSlug(fileName, plugin);
 }
 
 /**
@@ -148,7 +158,25 @@ export async function syncPremiumPluginsFromGitHub({ selection, onStep } = {}) {
   const selected = resolveSelection(selection);
   if (!selected.length) return; // this project opted out of premium plugins
 
-  const ghProbe = await spawnCapture('gh', ['--version']);
+  const repo = await premiumPluginsRepo();
+  if (!repo) {
+    onStep?.(
+      `no premium-plugins repo configured — using only the zips already in ${PREMIUM_PLUGINS_DIR}\n` +
+        '    (set premiumPluginsRepo in ~/.agentpress/config.json to sync from your own private repo)',
+    );
+    return;
+  }
+  // A repo string reaches `gh --repo`: allow only owner/name so it can neither
+  // become another flag nor redirect gh at a different host.
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) {
+    onStep?.(`  (ignoring premiumPluginsRepo "${repo}" — expected the form owner/repo)`);
+    return;
+  }
+
+  // Absolute path only: Windows CreateProcess searches the CURRENT DIRECTORY
+  // before PATH, so a gh.exe dropped in a project folder would run instead.
+  const ghExe = await resolveOnPath('gh');
+  const ghProbe = ghExe ? await spawnCapture(ghExe, ['--version']) : { code: null };
   if (ghProbe.code === null) {
     onStep?.(
       'GitHub CLI (gh) not installed — skipping premium plugin sync (optional). To auto-install ' +
@@ -157,13 +185,12 @@ export async function syncPremiumPluginsFromGitHub({ selection, onStep } = {}) {
     return;
   }
 
-  const repo = await premiumPluginsRepo();
   const tmpDir = join(PREMIUM_PLUGINS_DIR, '.sync-tmp');
   for (const { slug } of selected) {
     try {
       await rm(tmpDir, { recursive: true, force: true });
       await mkdir(tmpDir, { recursive: true });
-      const result = await spawnCapture('gh', [
+      const result = await spawnCapture(ghExe, [
         'release',
         'download',
         slug,
@@ -176,9 +203,16 @@ export async function syncPremiumPluginsFromGitHub({ selection, onStep } = {}) {
         '*.zip',
       ]);
       if (result.code === 0) {
+        const plugin = selected.find((p2) => p2.slug === slug);
         for (const f of await readdir(tmpDir)) {
-          await rm(join(PREMIUM_PLUGINS_DIR, f), { force: true });
-          await rename(join(tmpDir, f), join(PREMIUM_PLUGINS_DIR, f));
+          // basename() so a crafted asset name can never traverse out of the cache
+          const safe = basename(f);
+          if (!plugin || !assetBelongsToSlug(safe, plugin)) {
+            onStep?.(`  (ignoring unexpected asset "${safe}" in the ${slug} release)`);
+            continue;
+          }
+          await rm(join(PREMIUM_PLUGINS_DIR, safe), { force: true });
+          await rename(join(tmpDir, f), join(PREMIUM_PLUGINS_DIR, safe));
         }
         onStep?.(`synced ${slug} from ${repo}`);
       } else {
@@ -323,7 +357,10 @@ export async function installAgentConnector({ path, onStep }) {
   for (const [option, value] of [
     ['agent_connector_for_wp_enabled', '1'],
     ['agent_connector_for_wp_builtin_abilities', '1'],
-    ['agent_connector_for_wp_mcp_debug', '1'],
+    // '0', not '1': debug logging persists raw JSON-RPC request/response
+    // bodies into the site database indefinitely. Opt in per site in wp-admin
+    // when you actually need to debug MCP.
+    ['agent_connector_for_wp_mcp_debug', '0'],
   ]) {
     const result = await runWp(['option', 'update', option, value], { path });
     if (result.code !== 0) fail(`wp option update ${option}`, result);

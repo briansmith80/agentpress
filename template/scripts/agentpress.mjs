@@ -46,8 +46,19 @@ try {
   // optional file
 }
 
-const HOST = env.SITE_HOST || 'localhost';
-const SITE = `${env.SITE_SCHEME || 'http'}://${HOST}`;
+// .env is a file that can be copied between projects or arrive with someone
+// else's project, so its values are NOT trusted here: SITE_HOST reaches a
+// URL that used to be handed to cmd.exe, where '&' would start a second
+// command. Validate, don't sanitise.
+function safeHost(value) {
+  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:d{1,5})?$/i.test(value || '') ? value : null;
+}
+const HOST = safeHost(env.SITE_HOST) || 'localhost';
+if (env.SITE_HOST && !safeHost(env.SITE_HOST)) {
+  console.error(`✖ Refusing to use SITE_HOST from .env — "${env.SITE_HOST}" is not a valid hostname.`);
+  process.exit(1);
+}
+const SITE = `${env.SITE_SCHEME === 'https' ? 'https' : 'http'}://${HOST}`;
 
 const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && !process.env.CI;
 const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;255;45;120m' : '\x1b[38;5;198m';
@@ -61,7 +72,14 @@ function openBrowser(url) {
     return;
   }
   try {
-    spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+    // rundll32's FileProtocolHandler opens the default browser with the URL as
+    // ONE argv entry — no shell parses it, so '&'/'|' can never become operators
+    // (cmd /c start did, and libuv only quotes args containing spaces).
+    spawn(join(process.env.SystemRoot || 'C:\Windows', 'System32', 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], {
+      detached: true,
+      stdio: 'ignore',
+      shell: false,
+    }).unref();
   } catch {
     console.log(`  ${dim('Open:')} ${url}`);
   }

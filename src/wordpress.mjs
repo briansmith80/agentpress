@@ -4,7 +4,7 @@
 import { rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { runWp, spawnCapture } from './wp.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 import { psCapture } from './win.mjs';
@@ -55,7 +55,33 @@ async function downloadAndExtractCore(publicDir) {
   const tmpFile = join(tmpdir(), `agentpress-wp-core-${randomBytes(6).toString('hex')}.tar.gz`);
   const res = await fetch(WP_DOWNLOAD_URL);
   if (!res.ok) throw new Error(`Failed to download WordPress core: HTTP ${res.status}`);
-  await writeFile(tmpFile, Buffer.from(await res.arrayBuffer()));
+  const bytes = Buffer.from(await res.arrayBuffer());
+
+  // Bypassing `wp core download` (see above) also bypassed the checksum IT
+  // verifies, so this restores it: wordpress.org publishes a .sha1 sidecar for
+  // the tarball. Be clear about the strength — a digest fetched from the same
+  // origin over the same TLS chain proves the tarball was not corrupted or
+  // swapped in transit/at a CDN edge, but NOT that wordpress.org itself is
+  // honest (it could serve a matching bad pair). A pinned constant would be
+  // stronger, but WordPress core must track latest for a dev tool, so this is
+  // the strongest check available without freezing the version.
+  const sha1 = await fetch(`${WP_DOWNLOAD_URL}.sha1`)
+    .then((r) => (r.ok ? r.text() : null))
+    .then((t) => (t ? t.trim().split(/\s+/)[0].toLowerCase() : null))
+    .catch(() => null);
+  if (sha1 && /^[a-f0-9]{40}$/.test(sha1)) {
+    const actual = createHash('sha1').update(bytes).digest('hex');
+    if (actual !== sha1) {
+      throw new Error(
+        `WordPress core failed its published SHA-1 check — nothing was extracted.\n` +
+          `  expected ${sha1}\n  actual   ${actual}`,
+      );
+    }
+  } else {
+    console.log('  (could not fetch the published WordPress checksum — continuing without that check)');
+  }
+
+  await writeFile(tmpFile, bytes);
   try {
     const tarExe = await resolveTarExe();
     const result = await spawnCapture(tarExe, ['xzf', tmpFile, '-C', publicDir, '--strip-components=1']);
@@ -175,7 +201,23 @@ export async function installWordPress({
   if (result.code !== 0) fail('wp rewrite flush', result);
   await writeFile(
     join(publicDir, '.htaccess'),
-    `# BEGIN WordPress
+    `# BEGIN AgentPress
+# The MCP route is LOOPBACK-ONLY. The Agent Connector's abilities pack grants
+# shell-exec, php-eval and filesystem write to an authenticated admin — that
+# is the point of an AI-agent dev site, but nothing needs it reachable off
+# this machine, and Laragon's Apache binds every interface (so a laptop on a
+# café network would otherwise expose that chain to anyone holding the
+# application password). Agents run locally, so this costs no functionality.
+# Remove these three lines only if you deliberately want remote agent access.
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteCond %{REQUEST_URI} ^/wp-json/mcp/ [NC]
+RewriteCond %{REMOTE_ADDR} !^(127\\.[0-9.]+|::1)$
+RewriteRule .* - [F,L]
+</IfModule>
+# END AgentPress
+
+# BEGIN WordPress
 <IfModule mod_rewrite.c>
 RewriteEngine On
 # Confirmed live: without this, Application Passwords fail outright with a

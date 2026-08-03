@@ -75,6 +75,12 @@ export function psRun(cmd, args) {
   return psCapture(`& ${[cmd, ...args].map(psQuote).join(' ')}`);
 }
 
+/** Absolute path for an executable on PATH, or null. Bare-name spawn on Windows searches the CURRENT DIRECTORY first, so anything we launch by name is CWD-hijackable. */
+export async function resolveOnPath(cmd) {
+  const { stdout } = await psCapture(`(Get-Command '${String(cmd).replace(/'/g, "''")}' -ErrorAction SilentlyContinue | Select-Object -First 1).Source`);
+  return stdout.trim() || null;
+}
+
 export async function processRunning(name) {
   const { stdout } = await psCapture(`if (Get-Process -Name '${name}' -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }`);
   return stdout.trim() === 'yes';
