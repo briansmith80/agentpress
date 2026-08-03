@@ -12,7 +12,8 @@
   "files": [
     "index.js",
     "src",
-    "template"
+    "template",
+    "SECURITY.md"
   ],
   "engines": {
     "node": ">=18"
