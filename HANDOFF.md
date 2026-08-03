@@ -8,6 +8,11 @@ status: in-progress
 handoff_reason: switching-machines
 ---
 
+> **SECURITY (2026-08-03): v1.2.0 published after a full audit — abilities pack contained to
+> loopback, destroy data-loss guard, verified-on-every-run wp-cli, app password off command
+> lines, no default premium repo. LESSON: 1.1.0 was believed published but never landed (auth
+> silently stale); ALWAYS verify with `npm view create-agentpress version` after publishing.**
+>
 > **PUBLIC: the GitHub repo went public 2026-08-02 (history pre-scanned: no keys or
 > tokens ever committed; work email in two old HANDOFF revisions accepted as harmless).**
 >
