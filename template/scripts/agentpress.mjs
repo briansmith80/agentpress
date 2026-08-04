@@ -201,6 +201,11 @@ async function adminUrl() {
       const u = new URL(out);
       u.hostname = HOST;
       u.port = '';
+      // Force the scheme as well as the host: wp-cli has no $_SERVER['HTTPS'],
+      // so the link comes back http:// even for an https site, and following it
+      // makes WordPress report http:// as its own address. Same fix as
+      // src/admin-login.mjs (this file carries its own copy by design).
+      u.protocol = env.SITE_SCHEME === 'https' ? 'https:' : 'http:';
       return u.toString();
     } catch {
       // fall through

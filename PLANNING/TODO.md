@@ -278,6 +278,42 @@ site's WordPress Address (URL) is `http://` and the user expected `https://`.
 **Decision:** Add the missing visibility to `doctor`; no change needed to
 the scheme-detection logic itself, which is already correct.
 
+### ROOT CAUSE FOUND (2026-08-04, by live scaffold test) — there WAS a real bug
+
+The "no change needed" conclusion above was **wrong**, and only a real scaffold
+found it. `aptest1300` scaffolded on an SSL-enabled machine printed:
+
+```
+Site   https://aptest1300.test
+Admin  http://aptest1300.test/?acfw_login=...
+```
+
+The site is https; the **one-click admin link is http**. Cause:
+`mintAdminLoginUrl()` (`src/admin-login.mjs`) rewrote the minted URL's
+`hostname` and `port` but never its `protocol`. WP-CLI runs with no
+`$_SERVER['HTTPS']`, so wp-config.php's per-request `WP_HOME` resolves to
+`http://` and the link comes back http even for an https site.
+
+Because `WP_HOME`/`WP_SITEURL` are derived per request, **following that http
+link makes WordPress report `http://` as its own WordPress Address in
+Settings → General** — which is exactly the symptom originally reported. So
+the observation was correct and the diagnosis of "expected, SSL just wasn't
+live at scaffold time" was incomplete.
+
+Verified live over the same site: requesting over https makes WP emit
+`https://aptest1300.test`; requesting over http makes it emit
+`http://aptest1300.test`. Confirms the mechanism.
+
+**Fixed** by forcing `url.protocol = \`${scheme}:\`` in
+`src/admin-login.mjs`, plus the same fix in the per-site menu's own duplicated
+`adminUrl()` (`template/scripts/agentpress.mjs`). Proven by minting a real link
+against the live test site: now returns `https://…`, protocol `https:`.
+
+**Lesson worth keeping:** this class of bug is invisible to code review and to
+`doctor` — it only appears in the composed output of a real scaffold. It is the
+one defect the whole review pass missed, and the reason the scaffold test was
+worth running before publishing.
+
 **Tasks:**
 
 - [ ] `doctor.mjs`: add a "TCP :443 (SSL)" row and an "SSL certificate" row,
