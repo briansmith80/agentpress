@@ -110,6 +110,11 @@ auto-detected), `AGENTPRESS_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"
 `AGENTPRESS_MYSQL_PORT` (when MySQL isn't on 3306), `AGENTPRESS_PREMIUM_PLUGINS_REPO` (see
 below). Legacy `KATALYST_*` names from before the rename are still honored.
 
+Output appearance: `AGENTPRESS_NO_BANNER=1` hides the wordmark header, and the standard
+`NO_COLOR=1` / `FORCE_COLOR=1` turn colour off / on. Colour and the banner are suppressed
+automatically when output isn't a terminal, so piping or redirecting any command gives you
+clean plain text.
+
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
 Selection is **per project**: every scaffold shows the plugins that are available on your
