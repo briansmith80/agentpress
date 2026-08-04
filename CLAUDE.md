@@ -1,0 +1,153 @@
+# CLAUDE.md — working on AgentPress
+
+Guidance for Claude Code working in this repo. **Not user documentation** — that's
+[README.md](README.md). Session-by-session narrative lives in [HANDOFF.md](HANDOFF.md);
+in-flight plans live in `PLANNING/`.
+
+`create-agentpress` scaffolds AI-agent-ready WordPress sites on Laragon (Windows, native
+Apache/MySQL/PHP, no Docker). `index.js` → `src/engine.js` (`create()` is the single command
+dispatch point); one module per concern under `src/`; `template/` is the payload copied into
+each scaffolded site.
+
+---
+
+## Release order — do not improvise this
+
+Every step below exists because skipping it has burned this project at least once.
+
+1. **Verify locally.**
+   - `node --check` every changed `.js`/`.mjs`.
+   - `node index.js doctor` → must exit 0. Force a blocker
+     (`AGENTPRESS_LARAGON_ROOT=C:/nope node index.js doctor`) → must exit 1.
+   - **Run a real scaffold** if anything on the scaffold path changed. Code review does not
+     catch composed-output bugs — see "Live testing" below for the recipe and why.
+2. **Commit.** Branch, then merge to `main` with `--no-ff`.
+3. **Bump the version in `package.json`. This is mandatory, not optional.** npm refuses to
+   republish an existing version with different content, so an unbumped version cannot ship
+   at all. Minor for new user-visible behaviour or a new env var; patch for pure fixes.
+4. **Push to GitHub:** `git push origin main`.
+5. **`npm publish`** — needs a **real terminal**. 2FA requires a browser confirmation;
+   non-TTY shells fail with `EOTP` and have no web fallback. An agent generally cannot do
+   this step; hand the command to the user.
+6. **Verify the publish actually landed — two checks, not one.**
+   - `npm view create-agentpress version` must print the new version. *1.1.0 was believed
+     published and never landed — auth had gone silently stale. `npm view … versions` still
+     shows the gap: 1.0.0, 1.0.1, 1.2.0, 1.3.0.*
+   - Then verify **contents**, not just the number: download the published tarball
+     (`npm pack create-agentpress@X.Y.Z`) and grep for something you just added. A correct
+     version number over stale files looks identical from the outside.
+7. **Create the GitHub release** — a push alone does **not** update the repo's advertised
+   version; that comes from the release/tag:
+   ```
+   gh release create vX.Y.Z --repo briansmith80/agentpress --target main \
+     --title "AgentPress X.Y.Z — <summary>" --notes-file <notes.md>
+   ```
+   Match the existing notes style: user-facing `##` sections explaining *why each change
+   matters*, and disclose known-broken behaviour rather than omitting it.
+8. **Update `HANDOFF.md`.**
+
+`package.json`'s `files` allowlist is `["index.js","src","template","SECURITY.md"]` — a new
+top-level directory shipping code **will not be published** unless it's added there. Check
+with `npm pack --dry-run`.
+
+---
+
+## Live testing is the test suite
+
+There is **no automated test suite**. Every shipped behaviour in this codebase was proven by
+running it against real Laragon, and most real bugs were found that way rather than by
+inspection. Budget for it.
+
+**Throwaway scaffold recipe:**
+
+```
+node index.js aptestNNN --yes --premium=none    # --premium=none unless testing premium
+curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/hello-world/   # 200 = permalinks + .htaccess
+curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/.env           # 404 = docroot correct
+cd C:/laragon/www/aptestNNN && node <repo>/index.js destroy --yes
+```
+
+**Back up `~/.claude.json` first.** MCP wiring is `--scope user` (machine-global), so
+scaffolding **repoints the live `wordpress` MCP connection** at the test site, and destroying
+that site then **removes the entry entirely** — leaving no MCP wiring at all. Snapshot the
+`mcpServers` block before, restore it after. Restore only that block; the rest of the file is
+live session state.
+
+Expect a **UAC prompt** for the hosts-file write. Declining is non-fatal (the tool prints the
+line to add by hand and completes).
+
+After `destroy`, verify no residue: project dir gone, no conf in `sites-enabled`, absent from
+`SHOW DATABASES`, absent from `~/.agentpress/environments.json`. A dangling hosts line is
+expected and documented.
+
+---
+
+## Hard-won rules
+
+**Zero npm dependencies, deliberately.** `package.json` has no `dependencies` key and
+"nothing to `npm install`" is a design property. Hand-roll instead — `src/ansi.mjs` is ~15
+lines of escape codes in place of chalk.
+
+**Never spawn a competing Apache.** Tried and reverted: it restores the TCP port with a
+*stale in-memory config*, serving every existing site while silently 404ing the new one —
+worse than a clear outage. Detect and report; recovery is the user's Stop All → Start All.
+`laragon.exe reload` is unreliable for the same reason; "instant mode" (`setup`'s wildcard
+vhost) exists to bypass reloads entirely.
+
+**Windows `spawn` cannot launch `.cmd`/`.ps1` shims with `shell:false`.** `claude`, `codex`,
+`gh`, `wp.bat` all resolve to shims. Route through `psRun()`/`psCapture()` in `src/win.mjs`.
+This bug shipped silently twice.
+
+**`spawnCapture`/`psCapture` never throw — always check `.code`.** Assumed success is the
+root cause of the two worst silent failures in this project's history (MCP wiring recorded as
+done while nothing was registered; `destroy` reporting a dropped database that wasn't).
+
+**Environment variables are strings.** `Boolean(process.env.X)` is true for `"0"`, so
+`FORCE_COLOR=0` and `NO_COLOR=0` — the conventional spellings of *off* — read as *on*. Use
+`envOn()` in `src/ansi.mjs`. Same class of bug: `'C:\Windows'` in a single-quoted JS string
+evaluates to `C:Windows`, because `\W` is not an escape sequence.
+
+**ANSI escapes count toward `String.length`.** Pad the **raw** string, then colour.
+`green(x).padEnd(26)` silently eats 9 columns; `x.padEnd(26)` then colour is correct. All of
+`doctor`'s layout depends on this.
+
+**Status colour must not cry wolf.** `doctor` uses green ✓ healthy / yellow ⚠ real
+non-blocking warning / red ✖ blocker / cyan → next action / dim · information. Information
+stays uncoloured so a ✓ still means something. Never mark a row `warn` whose own text says
+"normal", "harmless", or "ignore".
+
+**`template/scripts/agentpress.mjs` is frozen into every scaffolded site and must stay
+import-free.** It cannot import from `src/` (that doesn't exist beside a scaffolded site), so
+it carries deliberate duplicated copies (`ADMIN_LOGIN_PHP`, `BANNER_LINES`, the colour gate).
+Changing one copy means changing both — verify parity programmatically, not by eye. Existing
+sites only pick up changes when `update` is run in them.
+
+**`wp eval-file` needs a literal `<?php` tag** (unlike `wp eval`). Without it the payload
+prints itself instead of executing.
+
+**Secrets.** Admin login links are single-use with a ~300s TTL — always mint fresh, never
+reuse or paste an old one. Per-site secrets live only in each site's gitignored `.env`. Never
+commit or echo generated passwords, app passwords, or license keys.
+
+---
+
+## Style
+
+Comments explain **why**, not what, and cite the live-verified failure that motivated them —
+often naming the exact symptom ("served every pre-existing site fine, silently 404'd the new
+one"). Match that density and voice. Read a file's header comment before editing it; several
+encode failure modes that are not obvious from the code.
+
+Prefer extending an existing seam over adding a call site: `doctor`'s `row()`/`blocked()`,
+`win.mjs`'s `psRun()`, `wp.mjs`'s spawn primitive.
+
+---
+
+## Known-broken, tracked but unfixed
+
+Oxygen's `html-to-page` MCP tool fails on **every** input on 6.2.0-beta.2 — the builder's
+`parse_fragment()` pairs a leading `<meta charset>` with `LIBXML_HTML_NOIMPLIED`, which trips
+a spurious "Memory allocation failed" on libxml ≥ 2.10. Workaround is `edit-post` +
+`insert-stylesheet`. The break ships from the **cached premium zip** in
+`~/.agentpress/premium-plugins/`, so every scaffold installs it. Candidate fixes and the
+full diagnosis are in `PLANNING/TODO.md`; this needs a scope decision, not a patch.
