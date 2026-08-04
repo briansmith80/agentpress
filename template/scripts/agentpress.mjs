@@ -24,8 +24,30 @@ const LOCK_PATH = join(CWD, '.agentpress.lock');
 const WP_BAT = "__WP_BAT_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
 
+// --- colour ---
+// Declared up here, ahead of the early bails below, so those failure messages
+// can use red() too — a bare ✖ here beside a red ✖ from the main CLI is the
+// kind of split that makes one product look like two.
+// Kept deliberately identical to src/ansi.mjs's gate (this file can't import
+// it — see the BANNER_LINES comment further down). Env values are STRINGS, so a
+// bare truthiness test would make FORCE_COLOR=0 and NO_COLOR=0 — the
+// conventional spellings of "off" — read as ON; and NO_COLOR is checked first
+// so an explicit "off" always beats an "on".
+const OFF_VALUES = new Set(['', '0', 'false', 'no', 'off']);
+const envOn = (name) => {
+  const v = process.env[name];
+  return v !== undefined && !OFF_VALUES.has(String(v).trim().toLowerCase());
+};
+const COLOR = envOn('NO_COLOR')
+  ? false
+  : envOn('FORCE_COLOR') || (Boolean(process.stdout.isTTY) && !envOn('CI') && process.env.TERM !== 'dumb');
+const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;255;45;120m' : '\x1b[38;5;198m';
+const pink = (s) => (COLOR ? `${PINK}${s}\x1b[39m` : s);
+const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
+const red = (s) => (COLOR ? `\x1b[31m${s}\x1b[39m` : s);
+
 if (!existsSync(ENV_PATH)) {
-  console.error('✖ No .env here — run this from your agentpress site directory.');
+  console.error(`${red('✖')} No .env here — run this from your agentpress site directory.`);
   process.exit(1);
 }
 
@@ -51,20 +73,40 @@ try {
 // URL that used to be handed to cmd.exe, where '&' would start a second
 // command. Validate, don't sanitise.
 function safeHost(value) {
-  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:d{1,5})?$/i.test(value || '') ? value : null;
+  // `\d`, not a bare `d`: the original character class read `(:d{1,5})?`, which
+  // matches a literal "d" repeated — so any SITE_HOST carrying a port was
+  // rejected outright and the menu bailed with "not a valid hostname".
+  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(value || '') ? value : null;
 }
 const HOST = safeHost(env.SITE_HOST) || 'localhost';
 if (env.SITE_HOST && !safeHost(env.SITE_HOST)) {
-  console.error(`✖ Refusing to use SITE_HOST from .env — "${env.SITE_HOST}" is not a valid hostname.`);
+  console.error(`${red('✖')} Refusing to use SITE_HOST from .env — "${env.SITE_HOST}" is not a valid hostname.`);
   process.exit(1);
 }
 const SITE = `${env.SITE_SCHEME === 'https' ? 'https' : 'http'}://${HOST}`;
 
-const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && !process.env.CI;
-const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;255;45;120m' : '\x1b[38;5;198m';
-const pink = (s) => (COLOR ? `${PINK}${s}\x1b[39m` : s);
-const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
+// COLOR/pink/dim/red live above the early bails so those can use them too.
 const link = (url) => (process.stdout.isTTY ? pink(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`) : url);
+
+// Block-letter AGENTPRESS. A deliberate copy of src/ansi.mjs's BANNER_LINES,
+// not an import — this file is frozen into every scaffolded site, where src/
+// does not exist next to it, the same reason ADMIN_LOGIN_PHP below carries
+// its own copy of that PHP. The two must be kept in sync. Generated and
+// column-measured (49 columns) rather than typed by hand; trailing spaces are
+// trimmed so a whitespace-stripping editor or lint hook can't silently
+// reshape it — nothing follows on the line, so it renders identically.
+const BANNER_LINES = [
+  ' ██   ██  ████ █  █ ████ ███  ███  ████  ███  ███',
+  '█  █ █    █    ██ █  █   █  █ █  █ █    █    █',
+  '████ █ ██ ███  █ ██  █   ███  ███  ███   ██   ██',
+  '█  █ █  █ █    █  █  █   █    █ █  █       █    █',
+  '█  █  ██  ████ █  █  █   █    █  █ ████ ███  ███',
+];
+const BANNER_WIDTH = 49;
+// Same gate as src/ansi.mjs: an opt-out for anyone who finds it noisy, plus
+// automatic suppression wherever colour is off, because five rows of U+2588
+// in a piped log file are pure noise.
+const SHOW_BANNER = COLOR && !envOn('AGENTPRESS_NO_BANNER');
 
 function openBrowser(url) {
   if ((process.env.AGENTPRESS_NO_OPEN ?? process.env.KATALYST_NO_OPEN)) {
@@ -75,7 +117,11 @@ function openBrowser(url) {
     // rundll32's FileProtocolHandler opens the default browser with the URL as
     // ONE argv entry — no shell parses it, so '&'/'|' can never become operators
     // (cmd /c start did, and libuv only quotes args containing spaces).
-    spawn(join(process.env.SystemRoot || 'C:\Windows', 'System32', 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], {
+    // 'C:\\Windows', not 'C:\Windows' — in a single-quoted JS string `\W` is not
+    // a recognised escape, so the backslash was dropped and the fallback
+    // resolved to the relative path "C:Windows", breaking the browser launch on
+    // any machine where %SystemRoot% is unset.
+    spawn(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], {
       detached: true,
       stdio: 'ignore',
       shell: false,
@@ -155,6 +201,11 @@ async function adminUrl() {
       const u = new URL(out);
       u.hostname = HOST;
       u.port = '';
+      // Force the scheme as well as the host: wp-cli has no $_SERVER['HTTPS'],
+      // so the link comes back http:// even for an https site, and following it
+      // makes WordPress report http:// as its own address. Same fix as
+      // src/admin-login.mjs (this file carries its own copy by design).
+      u.protocol = env.SITE_SCHEME === 'https' ? 'https:' : 'http:';
       return u.toString();
     } catch {
       // fall through
@@ -186,7 +237,7 @@ try {
   const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
   const age = Date.now() - (existing.startedAt ? Date.parse(existing.startedAt) : 0);
   if (existing.pid !== process.pid && isPidAlive(existing.pid) && age < LOCK_MAX_AGE_MS) {
-    console.error(`✖ Another agentpress menu (pid ${existing.pid}) already appears to be running here.`);
+    console.error(`${red('✖')} Another agentpress menu (pid ${existing.pid}) already appears to be running here.`);
     process.exit(1);
   }
 } catch {
@@ -302,13 +353,28 @@ async function checkUpdate() {
   }
 }
 
+if (SHOW_BANNER) {
+  const subtitle = `v${VERSION} · AI-agent-ready WordPress`;
+  // Right-aligned by measuring the art, never a hardcoded run of spaces, so
+  // the subtitle stays flush with the wordmark's right edge when the version
+  // string changes length.
+  const pad = ' '.repeat(Math.max(0, BANNER_WIDTH - subtitle.length));
+  console.log(`\n${BANNER_LINES.map((l) => pink(l)).join('\n')}`);
+  console.log(`${pad}${dim(subtitle)}`);
+}
+
 console.log(`\n  WordPress  ${link(SITE)}`);
 console.log(`  Admin      ${link(`${SITE}/wp-admin`)}`);
 console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
 console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
 
 const latestVersion = await checkUpdate();
-console.log(`Welcome to agentpress v${VERSION}.\n`);
+// The version rides in the banner subtitle now, so the standalone welcome
+// line is redundant — except when the banner is suppressed, where dropping it
+// would print the version nowhere at all. Kept for exactly that case. The
+// Password row's own trailing newline supplies the blank line before the menu
+// prompt either way.
+if (!SHOW_BANNER) console.log(`Welcome to agentpress v${VERSION}.\n`);
 
 for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
