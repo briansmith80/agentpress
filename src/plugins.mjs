@@ -115,7 +115,7 @@ async function isPluginActive(path, slug) {
   return result.code === 0;
 }
 
-function zipMatchesSlug(fileName, { slug, filePrefix }) {
+export function zipMatchesSlug(fileName, { slug, filePrefix }) {
   const f = fileName.toLowerCase();
   if (!f.endsWith('.zip')) return false;
   return f === `${slug}.zip` || f.startsWith(filePrefix.toLowerCase());

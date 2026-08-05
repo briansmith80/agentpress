@@ -1,0 +1,59 @@
+# The point of this workflow is that a change can be trusted without a manual
+# audit. Everything here runs WITHOUT Laragon, Apache, MySQL or WordPress —
+# which is exactly why it can run at all. The things that genuinely need a live
+# Laragon (a real scaffold) still have to be run by hand; CLAUDE.md's release
+# order says so.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # windows-latest on purpose: this is a Windows-only tool (package.json's
+    # os field says win32), and the bugs it keeps hitting are Windows-specific
+    # — .cmd/.ps1 shims, backslash escapes, CRLF, path separators.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Skips the multi-second PowerShell probe that looks for a running
+      # laragon.exe. There is no Laragon on a runner; the tool falls back to
+      # the default path and every pure code path still works.
+      - name: Syntax-check every shipped file
+        env:
+          AGENTPRESS_LARAGON_ROOT: C:\laragon
+        shell: bash
+        run: |
+          for f in index.js src/*.mjs src/engine.js template/scripts/agentpress.mjs; do
+            node --check "$f" || exit 1
+          done
+
+      - name: Tests
+        env:
+          AGENTPRESS_LARAGON_ROOT: C:\laragon
+        run: npm test
+
+      # Catches the "ReferenceError on a path nobody ran" class that --check
+      # cannot see, and proves the CLI still starts.
+      - name: Smoke-test the CLI
+        env:
+          AGENTPRESS_LARAGON_ROOT: C:\laragon
+        shell: bash
+        run: |
+          node index.js --version
+          node index.js help > /dev/null
+          node index.js list > /dev/null
+
+      # SECURITY.md was once missing from the published tarball because the
+      # files allowlist did not mention it. Assert the payload instead of
+      # hoping.
+      - name: Assert the published tarball contains what it must
+        run: node test/assert-tarball.mjs

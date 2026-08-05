@@ -88,7 +88,7 @@ export async function resolveMysqlClientExe() {
   throw new Error(`No mysql.exe/mariadb.exe found under ${MYSQL_BASE}`);
 }
 
-function escapeSqlString(s) {
+export function escapeSqlString(s) {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 

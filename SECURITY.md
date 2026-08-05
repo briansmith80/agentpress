@@ -81,8 +81,22 @@ references are given so you don't have to take our word for it.
 
   Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
   `npx create-agentpress@latest update` from inside that site's folder to add both.
-- **Codex's MCP wiring still puts the application password on a command line.** Claude, Cursor
-  and OpenCode configs are written directly as JSON, so the credential never reaches an argv.
+- **Up to and including v1.4.0, application passwords were never actually revoked.** The code
+  passed the password's NAME to `wp user application-password delete`, which takes UUIDs, so it
+  matched nothing and silently did nothing. Two consequences: every re-mint (a re-scaffold, a
+  `resume`) left the previous credential live rather than replacing it, and `destroy` revoked
+  nothing while telling you it had. Each of those is an admin-equivalent REST credential that
+  reaches the abilities pack. v1.5.0 resolves the UUIDs and revokes all of ours, and reports
+  when it cannot. **On a site you created before v1.5.0**, run `rewire` from its folder (or
+  `destroy` it) to clear the backlog, or delete the extras in wp-admin ▸ Users ▸ Profile ▸
+  Application Passwords. Note `update` will *not* do it — it never touches credentials.
+- **Codex's MCP wiring puts the application password on a command line, and Claude's fallback
+  path can too.** Cursor and OpenCode configs are always written directly as JSON, so the
+  credential never reaches an argv for them. Claude is normally written directly as JSON as
+  well — but if `~/.claude.json` cannot be read or parsed (most commonly: Claude Code is
+  installed but has never been launched, so the file does not exist yet), the code falls back
+  to `claude mcp add --env …`, which does put the password on two process command lines. The
+  fallback prints a warning when it happens, so you will know.
   Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the
   exposure, so `codex mcp add` is still used; the credential appears briefly on that process's
   command line, where command-line auditing or EDR can persist it. It grants REST admin on a

@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -23,6 +23,10 @@ const LOCK_PATH = join(CWD, '.agentpress.lock');
 // break, while a single-quoted literal could.
 const WP_BAT = "__WP_BAT_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
+// The registry KEY is not the command. Launching used to pass the key straight
+// to the shell, so "Open Cursor CLI" ran `cursor` (a different program, or
+// nothing) instead of Cursor's agent binary, and the failure was swallowed.
+const AGENT_COMMANDS = { claude: 'claude', cursor: 'cursor-agent', codex: 'codex', opencode: 'opencode' };
 
 // --- colour ---
 // Declared up here, ahead of the early bails below, so those failure messages
@@ -45,6 +49,11 @@ const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;25
 const pink = (s) => (COLOR ? `${PINK}${s}\x1b[39m` : s);
 const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
 const red = (s) => (COLOR ? `\x1b[31m${s}\x1b[39m` : s);
+// Yellow for a real non-blocking warning, matching the project's status-colour
+// rule. The wrong-site notice was rendered in dim — the colour reserved for
+// mere information — so the one thing standing between the user and edits to
+// the WRONG WordPress looked like trivia beside "one-click login".
+const yellow = (s) => (COLOR ? `\x1b[33m${s}\x1b[39m` : s);
 
 if (!existsSync(ENV_PATH)) {
   console.error(`${red('✖')} No .env here — run this from your agentpress site directory.`);
@@ -324,6 +333,22 @@ async function choose(message, options) {
   });
 }
 
+/** A deliberate pause so a warning cannot be repainted away by what launches next. */
+function pressAnyKey() {
+  return new Promise((resolve) => {
+    process.stdout.write(`  ${dim('Press any key to continue…')}`);
+    emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once('keypress', () => {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\n\n');
+      resolve();
+    });
+  });
+}
+
 function runInherit(cmd, args = []) {
   return new Promise((resolve) => {
     let child;
@@ -333,13 +358,73 @@ function runInherit(cmd, args = []) {
       // still used here as a pragmatic default since `cmd` is always one of
       // our own small hardcoded set, never user input.
       child = spawn(cmd, args, { cwd: CWD, stdio: 'inherit', shell: true });
-    } catch {
+    } catch (err) {
+      console.log(`  ${dim(`(could not launch ${cmd}: ${err.message})`)}`);
       resolve();
       return;
     }
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
+    // Report instead of swallowing, but do not blame PATH for everything: an
+    // agent that ran and then exited non-zero (an error, a cancelled session)
+    // or one the user killed is NOT a missing binary, and saying so told people
+    // a program they had just used interactively might not be installed.
+    // cmd.exe reports "not recognized" as 1 or 9009; a signal gives null.
+    child.on('close', (code, signal) => {
+      if (signal) resolve();
+      else if (code === 1 || code === 9009) console.log(`  ${dim(`(could not run ${cmd} — is it installed and on PATH?)`)}`);
+      else if (code) console.log(`  ${dim(`(${cmd} exited with code ${code})`)}`);
+      resolve();
+    });
+    child.on('error', (err) => {
+      console.log(`  ${dim(`(could not launch ${cmd}: ${err.message})`)}`);
+      resolve();
+    });
   });
+}
+
+/**
+ * Is this site the one the agents' machine-global `wordpress` MCP entry
+ * actually points at? Duplicated rather than imported, like everything else in
+ * this frozen file. Returns null when it cannot tell (no readable config).
+ *
+ * Without this the menu launched an agent whose WordPress tools pointed at a
+ * DIFFERENT site — the agent would happily read and edit the wrong WordPress,
+ * which is worse than not being wired at all.
+ */
+function wiredHostFor(agentKey) {
+  // homedir(), matching src/mcp.mjs's readWiredHostnames exactly — these two
+  // must stay in step. USERPROFILE || HOME || '' diverged from it and, with
+  // both unset, join('', …) yields a RELATIVE path, so this would have read
+  // `<site>\.claude.json` (often a shared git repo) instead of the user's.
+  const home = homedir();
+  const read = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  // THREE states, not two. Returning null for both "no readable config" and
+  // "config is fine but has no wordpress entry" hid the commonest recovery
+  // case: destroying a site strips the wiring machine-wide, so every remaining
+  // site then had a working config with no entry — and the menu said nothing
+  // and launched an agent with no WordPress tools at all.
+  //   null    -> cannot tell (no readable config, or codex)
+  //   false   -> readable, but nothing is wired
+  //   string  -> the hostname it points at
+  let config;
+  if (agentKey === 'claude') config = read(join(home, '.claude.json'));
+  else if (agentKey === 'cursor') config = read(join(home, '.cursor', 'mcp.json'));
+  else if (agentKey === 'opencode') config = read(join(home, '.config', 'opencode', 'opencode.json'));
+  else return null; // codex config is TOML we do not parse
+  if (!config) return null;
+  const url =
+    agentKey === 'opencode' ? config.mcp?.wordpress?.environment?.WP_API_URL : config.mcpServers?.wordpress?.env?.WP_API_URL;
+  if (!url) return false;
+  try {
+    return new URL(String(url)).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 async function checkUpdate() {
@@ -384,7 +469,14 @@ for (;;) {
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
-    ...agents.map((a) => ({ value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}` })),
+    ...agents.map((a) => {
+      const wired = wiredHostFor(a);
+      let hint;
+      if (wired === false) hint = yellow('⚠ no MCP wiring — run rewire');
+      else if (wired && wired !== HOST.toLowerCase()) hint = yellow(`⚠ MCP points at ${wired}`);
+      else if (wired) hint = 'MCP points here';
+      return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
+    }),
     { value: 'shell', label: 'Open a terminal here' },
     ...(latestVersion ? [{ value: 'update', label: 'Update agentpress', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
@@ -403,6 +495,29 @@ for (;;) {
   } else if (choice === 'update') {
     console.log(`  Run: npx create-agentpress@${latestVersion} update   (from this directory)`);
   } else if (choice.startsWith('agent:')) {
-    await runInherit(choice.slice('agent:'.length));
+    const key = choice.slice('agent:'.length);
+    const wired = wiredHostFor(key);
+    // Never launch an agent whose WordPress tools address a DIFFERENT site
+    // without stopping first — it would read and edit the wrong WordPress, and
+    // the agent's own startup output repaints the terminal immediately, so a
+    // printed note alone is not read. Yellow, and it waits for a keypress.
+    if (wired === false || (wired && wired !== HOST.toLowerCase())) {
+      console.log(
+        `\n  ${yellow('⚠')} ${
+          wired === false
+            ? `No wordpress MCP server is configured for ${AGENT_LABELS[key]}.`
+            : `${AGENT_LABELS[key]}'s wordpress MCP server points at ${yellow(wired)}, not ${HOST}.`
+        }\n` +
+          `  ${dim(
+            wired === false
+              ? 'Destroying a site removes the wiring machine-wide, which is the usual cause.'
+              : 'MCP wiring is machine-wide, so the most recently scaffolded site owns it.',
+          )}\n` +
+          `  ${dim('Point it at this site with:')} npx create-agentpress@latest rewire\n` +
+          `  ${dim('Launching anyway — the agent will have no WordPress tools for THIS site.')}\n`,
+      );
+      await pressAnyKey();
+    }
+    await runInherit(AGENT_COMMANDS[key] || key);
   }
 }

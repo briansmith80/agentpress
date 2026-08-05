@@ -18,6 +18,7 @@ import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight, sslP
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
 import { psCapture } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
+import { readWiredHostnames } from './mcp.mjs';
 import { sslCertPresent, wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
 import { bold, dim, green, mark, red, tint } from './ansi.mjs';
 import { join } from 'node:path';
@@ -306,6 +307,33 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
       "BOTH are wired automatically for every scaffolded site — wordpress (the site's REST API) and playwright (browser automation); no separate install step",
       'info',
     );
+    // Read the wiring back rather than asserting it. The entry is
+    // machine-global and the newest scaffold wins, so "which site am I actually
+    // pointed at?" is a real question a user cannot otherwise answer — and
+    // getting it wrong means an agent silently edits the wrong site.
+    const wired = await readWiredHostnames();
+    const targets = [...new Set(Object.values(wired).filter(Boolean))];
+    // codex's target is deliberately unreadable (TOML we do not parse), so
+    // every statement here must be about the READABLE configs only. Claiming
+    // "no wiring" as a warning on a codex-only machine would be crying wolf at
+    // a user whose setup is fine and who cannot clear the warning.
+    const codexOnly = Boolean(agents.codex) && !targets.length;
+    const codexNote = agents.codex ? " (codex's target lives in TOML this tool doesn't read, so it isn't shown)" : '';
+    if (!Object.keys(wired).length) {
+      row('  MCP target', `no agent config readable yet — scaffold a site, or run \`rewire\` in one${codexNote}`, 'info');
+    } else if (!targets.length) {
+      row(
+        '  MCP target',
+        `no wordpress entry in the readable agent configs — run \`rewire\` from a site folder to point agents at it${codexNote}`,
+        codexOnly ? 'info' : 'warn',
+      );
+    } else {
+      row(
+        '  MCP target',
+        `${targets.join(', ')}${targets.length > 1 ? ' (agents disagree)' : ''} — the site the readable agent configs point at; run \`rewire\` in another site's folder to switch${codexNote}`,
+        'info',
+      );
+    }
     const prefix = await npmGlobalPrefix();
     const execDir = process.execPath.replace(/\\[^\\]+$/, '');
     if (prefix && prefix.toLowerCase() !== execDir.toLowerCase()) {

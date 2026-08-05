@@ -98,6 +98,7 @@ from a git checkout):
 
 # from inside a scaffolded site's directory:
 … update               # refresh the site's AgentPress-owned files
+… rewire               # point the AI agents' MCP connection back at THIS site
 … destroy              # permanently remove the site
 
 # flags
@@ -207,6 +208,20 @@ points at the **most recently scaffolded** site. Scaffolding a second site re-po
 destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever URL it
 is given, so it never needs re-pointing.)
 
+**To take it back**, run `rewire` from inside the site you want the agents to talk to:
+
+```bash
+cd <laragon>\www\my-site
+npx create-agentpress@latest rewire
+```
+
+It re-points every detected agent CLI at that site, checks the endpoint actually answers (it
+prints the number of MCP tools it found), and tells you which site it took the wiring from. It
+also mints a fresh application password, which invalidates the site's previous one. Use it after
+destroying the site that owned the wiring, or to wire an agent CLI you installed after the site
+was created. The site's own `npm run agentpress` menu warns you when the wiring points elsewhere,
+and `doctor` shows which site currently owns it.
+
 ## Architecture
 
 Source lives in `src/`, one module per concern:
@@ -263,7 +278,8 @@ asks for a UAC prompt.
   `laragon.mjs` for the full story. When it happens: full Stop All → Start All in Laragon,
   then the `resume <name>` command the failure message prints. **Instant mode removes this
   entire failure class** — run `setup` once.
-- **One MCP connection per agent CLI, machine-wide** — see the note above.
+- **One MCP connection per agent CLI, machine-wide** — see the note above. `rewire` moves it
+  between sites; there is no way to have two sites wired at once.
 - **`--setup-script=`/`--dev-script=` are not implemented.** The original's customization
   hooks didn't make it into this port.
 - **Agent CLIs are detected, never installed.** If a selected agent isn't found on PATH, the

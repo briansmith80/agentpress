@@ -1,6 +1,6 @@
 {
   "name": "create-agentpress",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "AgentPress: scaffold AI-agent-ready WordPress sites on Laragon (Windows) — instant vhosts, https, premium plugin licensing, MCP wiring.",
   "bin": {
@@ -15,6 +15,11 @@
     "template",
     "SECURITY.md"
   ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check index.js && node --check src/engine.js && node --check template/scripts/agentpress.mjs",
+    "prepublishOnly": "npm test"
+  },
   "engines": {
     "node": ">=18"
   },
