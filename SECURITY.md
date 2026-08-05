@@ -81,6 +81,15 @@ references are given so you don't have to take our word for it.
 
   Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
   `npx create-agentpress@latest update` from inside that site's folder to add both.
+- **Up to and including v1.4.0, application passwords were never actually revoked.** The code
+  passed the password's NAME to `wp user application-password delete`, which takes UUIDs, so it
+  matched nothing and silently did nothing. Two consequences: every re-mint (a re-scaffold, a
+  `resume`) left the previous credential live rather than replacing it, and `destroy` revoked
+  nothing while telling you it had. Each of those is an admin-equivalent REST credential that
+  reaches the abilities pack. v1.5.0 resolves the UUIDs and revokes all of ours, and reports
+  when it cannot. **On a site you created before v1.5.0**, run `rewire` from its folder (or
+  `destroy` it) to clear the backlog, or delete the extras in wp-admin ▸ Users ▸ Profile ▸
+  Application Passwords. Note `update` will *not* do it — it never touches credentials.
 - **Codex's MCP wiring puts the application password on a command line, and Claude's fallback
   path can too.** Cursor and OpenCode configs are always written directly as JSON, so the
   credential never reaches an argv for them. Claude is normally written directly as JSON as

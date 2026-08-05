@@ -313,14 +313,24 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
     // getting it wrong means an agent silently edits the wrong site.
     const wired = await readWiredHostnames();
     const targets = [...new Set(Object.values(wired).filter(Boolean))];
+    // codex's target is deliberately unreadable (TOML we do not parse), so
+    // every statement here must be about the READABLE configs only. Claiming
+    // "no wiring" as a warning on a codex-only machine would be crying wolf at
+    // a user whose setup is fine and who cannot clear the warning.
+    const codexOnly = Boolean(agents.codex) && !targets.length;
+    const codexNote = agents.codex ? " (codex's target lives in TOML this tool doesn't read, so it isn't shown)" : '';
     if (!Object.keys(wired).length) {
-      row('  MCP target', 'no agent config readable yet — scaffold a site (or run `rewire` in one) to wire it', 'info');
+      row('  MCP target', `no agent config readable yet — scaffold a site, or run \`rewire\` in one${codexNote}`, 'info');
     } else if (!targets.length) {
-      row('  MCP target', 'no wordpress MCP entry is configured — run `rewire` from a site folder to point agents at it', 'warn');
+      row(
+        '  MCP target',
+        `no wordpress entry in the readable agent configs — run \`rewire\` from a site folder to point agents at it${codexNote}`,
+        codexOnly ? 'info' : 'warn',
+      );
     } else {
       row(
         '  MCP target',
-        `${targets.join(', ')}${targets.length > 1 ? ' (agents disagree)' : ''} — this is the ONLY site agents can reach; run \`rewire\` in another site's folder to switch`,
+        `${targets.join(', ')}${targets.length > 1 ? ' (agents disagree)' : ''} — the site the readable agent configs point at; run \`rewire\` in another site's folder to switch${codexNote}`,
         'info',
       );
     }

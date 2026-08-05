@@ -40,6 +40,23 @@ npx create-agentpress@latest update
 
 Refreshes `scripts/`, `wp-cli.yml`, `.gitignore`, this README, and `package.json`'s own
 scripts (any script you added under a different name is preserved, and so are any
-dependencies you added). Never touches `.env`, `sandbox.config.json`, or anything under
-`public/`. If you hand-edited `.gitignore` or this README, re-apply those edits after
-updating.
+dependencies you added). Never touches `.env` or `sandbox.config.json`. The one thing it
+writes under `public/` is the agent-API loopback guard, which is a file AgentPress owns. If
+you hand-edited `.gitignore` or this README, re-apply those edits after updating.
+
+## When the AI agents can't see this site
+
+The MCP wiring is machine-wide: there is one `wordpress` server per agent CLI, and it points
+at whichever site was scaffolded (or rewired) most recently. So if you scaffold another site,
+or destroy the site that owned the wiring, your agents stop being able to reach **this** one.
+The menu warns you about that before it launches an agent.
+
+To point them back here, from this directory:
+
+```bash
+npx create-agentpress@latest rewire
+```
+
+It re-points every agent CLI it finds at this site and confirms the endpoint answers, printing
+how many MCP tools it saw. It also mints a fresh application password for this site, which
+invalidates the previous one.

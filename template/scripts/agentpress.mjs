@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -49,6 +49,11 @@ const PINK = (process.env.COLORTERM || '').includes('truecolor') ? '\x1b[38;2;25
 const pink = (s) => (COLOR ? `${PINK}${s}\x1b[39m` : s);
 const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[22m` : s);
 const red = (s) => (COLOR ? `\x1b[31m${s}\x1b[39m` : s);
+// Yellow for a real non-blocking warning, matching the project's status-colour
+// rule. The wrong-site notice was rendered in dim — the colour reserved for
+// mere information — so the one thing standing between the user and edits to
+// the WRONG WordPress looked like trivia beside "one-click login".
+const yellow = (s) => (COLOR ? `\x1b[33m${s}\x1b[39m` : s);
 
 if (!existsSync(ENV_PATH)) {
   console.error(`${red('✖')} No .env here — run this from your agentpress site directory.`);
@@ -328,6 +333,22 @@ async function choose(message, options) {
   });
 }
 
+/** A deliberate pause so a warning cannot be repainted away by what launches next. */
+function pressAnyKey() {
+  return new Promise((resolve) => {
+    process.stdout.write(`  ${dim('Press any key to continue…')}`);
+    emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once('keypress', () => {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\n\n');
+      resolve();
+    });
+  });
+}
+
 function runInherit(cmd, args = []) {
   return new Promise((resolve) => {
     let child;
@@ -342,11 +363,15 @@ function runInherit(cmd, args = []) {
       resolve();
       return;
     }
-    // Report instead of swallowing: a missing or renamed binary exits non-zero
-    // (or errors), and staying silent made "nothing happened" indistinguishable
-    // from "the agent ran and quit".
-    child.on('close', (code) => {
-      if (code !== 0) console.log(`  ${dim(`(${cmd} exited with code ${code} — is it installed and on PATH?)`)}`);
+    // Report instead of swallowing, but do not blame PATH for everything: an
+    // agent that ran and then exited non-zero (an error, a cancelled session)
+    // or one the user killed is NOT a missing binary, and saying so told people
+    // a program they had just used interactively might not be installed.
+    // cmd.exe reports "not recognized" as 1 or 9009; a signal gives null.
+    child.on('close', (code, signal) => {
+      if (signal) resolve();
+      else if (code === 1 || code === 9009) console.log(`  ${dim(`(could not run ${cmd} — is it installed and on PATH?)`)}`);
+      else if (code) console.log(`  ${dim(`(${cmd} exited with code ${code})`)}`);
       resolve();
     });
     child.on('error', (err) => {
@@ -366,7 +391,11 @@ function runInherit(cmd, args = []) {
  * which is worse than not being wired at all.
  */
 function wiredHostFor(agentKey) {
-  const home = process.env.USERPROFILE || process.env.HOME || '';
+  // homedir(), matching src/mcp.mjs's readWiredHostnames exactly — these two
+  // must stay in step. USERPROFILE || HOME || '' diverged from it and, with
+  // both unset, join('', …) yields a RELATIVE path, so this would have read
+  // `<site>\.claude.json` (often a shared git repo) instead of the user's.
+  const home = homedir();
   const read = (p) => {
     try {
       return JSON.parse(readFileSync(p, 'utf8'));
@@ -374,16 +403,27 @@ function wiredHostFor(agentKey) {
       return null;
     }
   };
-  let url = null;
-  if (agentKey === 'claude') url = read(join(home, '.claude.json'))?.mcpServers?.wordpress?.env?.WP_API_URL;
-  else if (agentKey === 'cursor') url = read(join(home, '.cursor', 'mcp.json'))?.mcpServers?.wordpress?.env?.WP_API_URL;
-  else if (agentKey === 'opencode') url = read(join(home, '.config', 'opencode', 'opencode.json'))?.mcp?.wordpress?.environment?.WP_API_URL;
+  // THREE states, not two. Returning null for both "no readable config" and
+  // "config is fine but has no wordpress entry" hid the commonest recovery
+  // case: destroying a site strips the wiring machine-wide, so every remaining
+  // site then had a working config with no entry — and the menu said nothing
+  // and launched an agent with no WordPress tools at all.
+  //   null    -> cannot tell (no readable config, or codex)
+  //   false   -> readable, but nothing is wired
+  //   string  -> the hostname it points at
+  let config;
+  if (agentKey === 'claude') config = read(join(home, '.claude.json'));
+  else if (agentKey === 'cursor') config = read(join(home, '.cursor', 'mcp.json'));
+  else if (agentKey === 'opencode') config = read(join(home, '.config', 'opencode', 'opencode.json'));
   else return null; // codex config is TOML we do not parse
-  if (!url) return null;
+  if (!config) return null;
+  const url =
+    agentKey === 'opencode' ? config.mcp?.wordpress?.environment?.WP_API_URL : config.mcpServers?.wordpress?.env?.WP_API_URL;
+  if (!url) return false;
   try {
     return new URL(String(url)).hostname.toLowerCase();
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -431,12 +471,11 @@ for (;;) {
     { value: 'site', label: 'Open the site', hint: 'front end' },
     ...agents.map((a) => {
       const wired = wiredHostFor(a);
-      const mismatch = wired && wired !== HOST.toLowerCase();
-      return {
-        value: `agent:${a}`,
-        label: `Open ${AGENT_LABELS[a]}`,
-        hint: mismatch ? `⚠ MCP points at ${wired}` : wired ? 'MCP points here' : undefined,
-      };
+      let hint;
+      if (wired === false) hint = yellow('⚠ no MCP wiring — run rewire');
+      else if (wired && wired !== HOST.toLowerCase()) hint = yellow(`⚠ MCP points at ${wired}`);
+      else if (wired) hint = 'MCP points here';
+      return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
     }),
     { value: 'shell', label: 'Open a terminal here' },
     ...(latestVersion ? [{ value: 'update', label: 'Update agentpress', hint: `v${VERSION} → v${latestVersion}` }] : []),
@@ -458,14 +497,26 @@ for (;;) {
   } else if (choice.startsWith('agent:')) {
     const key = choice.slice('agent:'.length);
     const wired = wiredHostFor(key);
-    if (wired && wired !== HOST.toLowerCase()) {
-      // Do not launch an agent whose WordPress tools address a different site
-      // without saying so — it would read and edit the wrong WordPress.
+    // Never launch an agent whose WordPress tools address a DIFFERENT site
+    // without stopping first — it would read and edit the wrong WordPress, and
+    // the agent's own startup output repaints the terminal immediately, so a
+    // printed note alone is not read. Yellow, and it waits for a keypress.
+    if (wired === false || (wired && wired !== HOST.toLowerCase())) {
       console.log(
-        `\n  ${dim('⚠')} ${AGENT_LABELS[key]}'s wordpress MCP server currently points at ${wired}, not ${HOST}.\n` +
-          `  ${dim('MCP wiring is machine-wide, so the most recently scaffolded site owns it.')}\n` +
-          `  ${dim('To point it back at this site, run:')} npx create-agentpress@latest rewire\n`,
+        `\n  ${yellow('⚠')} ${
+          wired === false
+            ? `No wordpress MCP server is configured for ${AGENT_LABELS[key]}.`
+            : `${AGENT_LABELS[key]}'s wordpress MCP server points at ${yellow(wired)}, not ${HOST}.`
+        }\n` +
+          `  ${dim(
+            wired === false
+              ? 'Destroying a site removes the wiring machine-wide, which is the usual cause.'
+              : 'MCP wiring is machine-wide, so the most recently scaffolded site owns it.',
+          )}\n` +
+          `  ${dim('Point it at this site with:')} npx create-agentpress@latest rewire\n` +
+          `  ${dim('Launching anyway — the agent will have no WordPress tools for THIS site.')}\n`,
       );
+      await pressAnyKey();
     }
     await runInherit(AGENT_COMMANDS[key] || key);
   }

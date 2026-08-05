@@ -1196,18 +1196,29 @@ async function rewireCommand() {
   console.log('');
   for (const line of reportMcpOutcome(result)) console.log(line);
 
-  // Keep the site's own record honest, so its menu offers exactly the agents
-  // that are really wired. This is what makes the menu's ownership check work.
+  // ONLY record when something actually landed. Writing the empty result was a
+  // real bug: on every failure path (mint failed, no agent CLI on PATH, every
+  // configurer threw) nothing had been changed on the agent side, yet the
+  // site's own record was wiped — and that record is load-bearing. The frozen
+  // menu builds its agent list from it, and `destroy` decides which MCP entries
+  // to remove from it, so an empty list silently disarms teardown and leaves a
+  // machine-global entry pointing at a deleted site.
+  if (!result.configuredAgents.length) {
+    console.log(`  ${dim("This site's recorded agents were left unchanged.")}`);
+    process.exitCode = 1;
+    return;
+  }
   const sandboxPath = join(cwd, 'sandbox.config.json');
   try {
     const cfg = JSON.parse(await readFile(sandboxPath, 'utf8'));
-    cfg.agents = result.configuredAgents;
+    // Union, not replace: rewiring claude must not un-record cursor, which is
+    // still wired and which destroy still needs to clean up.
+    cfg.agents = [...new Set([...(Array.isArray(cfg.agents) ? cfg.agents : []), ...result.configuredAgents])];
     await writeFile(sandboxPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
   } catch {
     // no sandbox.config.json (a very old site) — the wiring still landed
   }
   await recordEnvironment({ dir: cwd, agents: result.configuredAgents, updatedAt: new Date().toISOString() });
-  if (!result.configuredAgents.length) process.exitCode = 1;
 }
 
 async function updateProject({ yes }) {
@@ -1342,9 +1353,18 @@ async function destroyCommand({ yes }) {
   console.log(
     `\n${green(OK)} Destroyed.${result.removedAgents.length ? ` MCP entries removed for: ${result.removedAgents.join(', ')}.` : ''}` +
       `${result.dbDropped ? ' Database dropped.' : ` (database not dropped: ${result.dbSkipReason})`}\n` +
+      // The preamble above promises this credential is removed, so a failure to
+      // revoke belongs in the SUMMARY, not only in a step line that scrolled
+      // past mid-teardown. It is an admin-equivalent REST credential and the
+      // site is about to stop existing, so it cannot be revoked later.
+      (result.appPasswordRevoked === null
+        ? `\n${yellow(WARN)} The application password could NOT be confirmed revoked. It still grants REST admin.\n` +
+          '  Remove it by hand in wp-admin ▸ Users ▸ Profile ▸ Application Passwords before the site goes.\n'
+        : '') +
       (result.hostname ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
+  if (result.appPasswordRevoked === null) process.exitCode = 1;
 }
 
 /**

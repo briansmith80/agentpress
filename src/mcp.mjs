@@ -198,7 +198,16 @@ async function writeClaudeConfig(creds) {
 
   const tmp = `${path}.agentpress-tmp-${randomBytes(4).toString('hex')}`;
   await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-  await rename(tmp, path); // atomic on NTFS — no truncated-file window
+  try {
+    await rename(tmp, path); // atomic on NTFS — no truncated-file window
+  } catch (err) {
+    // This temp file holds the ENTIRE Claude config plus the app password just
+    // minted. Leaving it behind on a failed rename (AV lock, permissions) would
+    // be a worse leak than the .agentpress-bak this release just stopped
+    // leaving around — the same cleanup updateJsonConfig already does.
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 
   try {
     const back = JSON.parse(await readFile(path, 'utf8'));
@@ -322,6 +331,22 @@ export async function verifyMcpEndpoint({ wpApiUrl, username, password, timeoutM
     return { ok: false, detail: `not a valid URL: ${wpApiUrl}` };
   }
   const auth = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+  /**
+   * Settles on EVERY terminal condition, not just the happy one, and behind a
+   * wall-clock deadline.
+   *
+   * The first version listened only for res 'end', req 'timeout' and req
+   * 'error'. When a peer closes the connection AFTER headers arrive — a PHP
+   * fatal mid-response, an FcgidIOTimeout kill, or the Laragon Stop All this
+   * project's own docs keep asking for — Node emits res 'aborted'/'close' and
+   * req 'close' instead, and req 'error' never fires. The `timeout` option is a
+   * socket-inactivity timer, so once that socket is destroyed it cannot fire
+   * either. The promise never settled, and because nothing else held the event
+   * loop open the process could reach exit(0) without ever running the rest of
+   * the scaffold: the run vanished after "checking the MCP endpoint answers…"
+   * having already created the site but not its templates, sandbox.config.json,
+   * registry entry or admin link. Reproduced three ways before fixing.
+   */
   const call = (payload, sessionId) =>
     new Promise((resolve) => {
       const body = JSON.stringify(payload);
@@ -334,19 +359,40 @@ export async function verifyMcpEndpoint({ wpApiUrl, username, password, timeoutM
         'Content-Length': Buffer.byteLength(body),
       };
       if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+      let settled = false;
+      let deadline;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve(value);
+      };
       const req = http.request(
         { host: '127.0.0.1', port: target.port || 80, path: target.pathname, method: 'POST', headers, timeout: timeoutMs },
         (res) => {
           let text = '';
           res.on('data', (d) => (text += d));
-          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: text }));
+          res.on('end', () => done({ status: res.statusCode, headers: res.headers, body: text }));
+          // A response cut short after headers: 'aborted'/'error'/'close' are
+          // the only signals, and an unhandled res 'error' is swallowed.
+          res.on('aborted', () => done({ status: 0, body: 'the connection closed before the response finished' }));
+          res.on('error', (err) => done({ status: 0, body: err.code || String(err.message) }));
+          res.on('close', () => done({ status: 0, body: 'the connection closed before the response finished' }));
         },
       );
+      // Wall clock, not socket inactivity — the backstop that makes it
+      // impossible for any transport quirk to stall a scaffold.
+      deadline = setTimeout(() => {
+        req.destroy();
+        done({ status: 0, body: 'timed out' });
+      }, timeoutMs);
+      if (typeof deadline.unref === 'function') deadline.unref();
       req.on('timeout', () => {
         req.destroy();
-        resolve({ status: 0, body: 'timed out' });
+        done({ status: 0, body: 'timed out' });
       });
-      req.on('error', (err) => resolve({ status: 0, body: err.code || String(err.message) }));
+      req.on('error', (err) => done({ status: 0, body: err.code || String(err.message) }));
+      req.on('close', () => done({ status: 0, body: 'the connection closed before a response arrived' }));
       req.end(body);
     });
 
