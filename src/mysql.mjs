@@ -5,8 +5,12 @@
 //     not whatever "mysql" happens to resolve to on PATH — same reasoning as
 //     resolvePhpExe in wp.mjs (PATH and "what's actually serving" have
 //     already been shown to diverge for PHP on this machine).
-//   - Password never goes on argv (`-p<pw>` lands in the process list, and
-//     in any log that tees stdout/stderr wholesale) — always MYSQL_PWD.
+//   - The ROOT password never goes on argv (`-p<pw>` lands in the process
+//     list, and in any log that tees stdout/stderr wholesale) — always
+//     MYSQL_PWD. Note the scope: a per-site password being CREATED does reach
+//     argv inside the `-e` statement, unavoidably, and the same secret already
+//     reaches argv via `wp config create --dbpass` (see wordpress.mjs) — so
+//     this invariant is about the root credential, not about every secret.
 //   - No explicit auth plugin in CREATE USER. my.ini sets
 //     default_authentication_plugin=mysql_native_password, but laragon.log
 //     shows repeated "Plugin 'mysql_native_password' is not loaded" — naming
@@ -167,6 +171,15 @@ export async function provisionDatabase(siteName, cred) {
   const sql = [
     `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
     `CREATE USER IF NOT EXISTS '${dbUser}'@'127.0.0.1' IDENTIFIED BY '${escapeSqlString(dbPassword)}';`,
+    // CREATE USER IF NOT EXISTS keeps a PRE-EXISTING user's old password while
+    // the freshly generated one goes into wp-config.php. uniqueDbName only
+    // guarantees the DATABASE is new, and dbUser is derived from it, so the
+    // realistic half-cleanup — database dropped by hand in phpMyAdmin, user
+    // left behind — reuses that user name and hands WordPress a password the
+    // server doesn't have. The symptom is WP's generic "Error establishing a
+    // database connection", pointing nowhere near the cause. ALTER makes the
+    // password deterministic (MySQL 5.7.6+ / MariaDB 10.2+).
+    `ALTER USER '${dbUser}'@'127.0.0.1' IDENTIFIED BY '${escapeSqlString(dbPassword)}';`,
     `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'127.0.0.1';`,
     'FLUSH PRIVILEGES;',
   ].join('\n');

@@ -29,9 +29,12 @@ if (!existsSync(ENV_PATH)) {
   process.exit(1);
 }
 
+// Split on either line ending: a CRLF-normalised .env (a Notepad "save") made
+// every line fail this match — `.` never matches `\r`, and `$` is not in
+// multiline mode — leaving the menu with an empty env and no site host.
 function parseEnv(text) {
   const out = {};
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
     if (m) out[m[1]] = m[2];
   }
@@ -50,8 +53,11 @@ try {
 // else's project, so its values are NOT trusted here: SITE_HOST reaches a
 // URL that used to be handed to cmd.exe, where '&' would start a second
 // command. Validate, don't sanitise.
+// `:\d{1,5}` — the backslash was missing, so the port branch matched a literal
+// ':ddddd' and any real host:port (a hand-edited .env for a non-80 Apache) was
+// rejected, hard-exiting this menu on a benign value.
 function safeHost(value) {
-  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:d{1,5})?$/i.test(value || '') ? value : null;
+  return /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(value || '') ? value : null;
 }
 const HOST = safeHost(env.SITE_HOST) || 'localhost';
 if (env.SITE_HOST && !safeHost(env.SITE_HOST)) {
@@ -75,7 +81,7 @@ function openBrowser(url) {
     // rundll32's FileProtocolHandler opens the default browser with the URL as
     // ONE argv entry — no shell parses it, so '&'/'|' can never become operators
     // (cmd /c start did, and libuv only quotes args containing spaces).
-    spawn(join(process.env.SystemRoot || 'C:\Windows', 'System32', 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], {
+    spawn(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], {
       detached: true,
       stdio: 'ignore',
       shell: false,

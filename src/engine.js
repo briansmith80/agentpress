@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDoctor } from './doctor.mjs';
-import { AGENTPRESS_HOME, LARAGON_ROOT, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
+import { AGENTPRESS_HOME, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
 import {
   findVhostForProject,
@@ -22,7 +22,7 @@ import {
 import { renameWithRetry, rmWithRetry } from './fsutil.mjs';
 import { sleep } from './win.mjs';
 import { MYSQL_PORT, provisionDatabase, resolveRootCredential, sanitizeDbIdentifier } from './mysql.mjs';
-import { installWordPress } from './wordpress.mjs';
+import { installWordPress, writeMcpLoopbackGuard } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
@@ -190,10 +190,57 @@ async function acquireScaffoldLock() {
 
 let warnedAboutReloadThisSession = false;
 
-/** The one-liner every interrupted-scaffold failure path must end with — resume exists precisely for these states, but nobody finds it in the README mid-failure. Echo --plugins so a retried run doesn't silently drop the original request. */
-function resumeHint(name, extraPlugins = []) {
+/**
+ * Echo BOTH selection flags: a bare `resume` defaults premium plugins to
+ * "every available zip", so a printed command that dropped --premium would
+ * install commercial plugins the user had just declined. (The pending-selection
+ * file written at staging time covers the same ground for anyone who types
+ * `resume` from memory instead of copying this line.) `--premium=` is emitted
+ * only when a selection was actually resolved — `null` means we failed before
+ * that point, where staying silent and letting resume's own default apply is
+ * right.
+ */
+function resumeCommandLine(name, extraPlugins = [], premiumSelection = null) {
   const pluginsFlag = extraPlugins.length ? ` --plugins=${extraPlugins.join(',')}` : '';
-  return `\n  When the site responds again, finish the install with: ${CLI} resume ${name}${pluginsFlag}`;
+  const premiumFlag = Array.isArray(premiumSelection)
+    ? ` --premium=${premiumSelection.length ? premiumSelection.join(',') : 'none'}`
+    : '';
+  return `${CLI} resume ${name}${pluginsFlag}${premiumFlag}`;
+}
+
+/** The one-liner every interrupted-scaffold failure path must end with — resume exists precisely for these states, but nobody finds it in the README mid-failure. */
+function resumeHint(name, extraPlugins = [], premiumSelection = null) {
+  return `\n  When the site responds again, finish the install with: ${resumeCommandLine(name, extraPlugins, premiumSelection)}`;
+}
+
+/**
+ * The scaffold's resolved selections, parked in the project directory so an
+ * interrupted run can be finished with the SAME choices. Deleted once the
+ * site is complete, so its presence also marks "this scaffold never finished".
+ */
+const PENDING_SELECTION_FILE = '.agentpress-pending.json';
+
+async function readPendingSelection(projectDir) {
+  const path = join(projectDir, PENDING_SELECTION_FILE);
+  let text;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch {
+    return { plugins: null, premium: null }; // never parked, or already cleaned up
+  }
+  try {
+    const raw = JSON.parse(text);
+    return {
+      plugins: Array.isArray(raw.plugins) ? raw.plugins.filter((s) => typeof s === 'string') : null,
+      premium: Array.isArray(raw.premium) ? raw.premium.filter((s) => typeof s === 'string') : null,
+    };
+  } catch (err) {
+    // A file that EXISTS but cannot be parsed is not the same as "nothing was
+    // parked": silently falling back would install every available premium
+    // plugin while the user believes their original choice is being honoured.
+    console.log(`⚠ ${path} is unreadable (${err.message}) — cannot tell what this scaffold originally chose.\n  Pass --premium= explicitly if it matters; otherwise every available premium plugin is installed.`);
+    return { plugins: null, premium: null };
+  }
 }
 
 /**
@@ -361,14 +408,14 @@ async function ensureHostsEntryWithGuidance(hostname) {
  * Prints an actionable config-syntax check when Apache genuinely won't come
  * back on its own.
  */
-async function reportApacheStillDown(name, hostname, extraPlugins = []) {
+async function reportApacheStillDown(name, hostname, extraPlugins = [], premiumSelection = null) {
   const test = await testApacheConfig();
   bail(
     `✖ Apache is still down.${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
       `  Start it in Laragon (Start All), then check http://${hostname} — the folder,\n` +
       '  vhost, and hosts entry this run already produced are left in place.\n' +
       '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-      resumeHint(name, extraPlugins),
+      resumeHint(name, extraPlugins, premiumSelection),
   );
 }
 
@@ -396,7 +443,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     return;
   }
 
-  const { collisions, hostname: guessedHostname, projectDir, stagingDir } = await findCollisions(name);
+  const { collisions, kinds, hostname: guessedHostname, projectDir, stagingDir } = await findCollisions(name);
   let hostname = guessedHostname;
   if (collisions.length) {
     bail(`✖ "${name}" is not available:`);
@@ -417,6 +464,26 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       console.log(`\n  This looks like a scaffold that failed near the end — try: ${CLI} resume ${name}`);
     } else if (hasFolder && hasEnv) {
       console.log(`\n  This site already exists. To remove it: cd ${projectDir} then ${CLI} destroy`);
+    } else {
+      // No folder, so none of the resume/destroy advice applies. Offer ONLY the
+      // remedies whose surface actually fired: a blanket "delete the conf named
+      // above" is actively dangerous, because the conf named above may be
+      // another LIVE project's vhost (kinds.hostnameOwnedElsewhere), where the
+      // correct action is renaming this site, not deleting their config.
+      const remedies = [];
+      if (kinds.registry) remedies.push(`    - registry entry: remove "${name}" from ${REGISTRY_PATH}`);
+      if (kinds.vhostUnderProject) remedies.push("    - leftover vhost for THIS project: delete the conf named above, then Reload in Laragon");
+      if (kinds.staging) remedies.push(`    - staging dir: delete ${stagingDir}`);
+      if (kinds.hostnameOwnedElsewhere) {
+        remedies.push('    - hostname taken by another site: scaffold under a different name (leave that conf alone)');
+      }
+      if (kinds.foreignHostsEntry) remedies.push('    - hosts entry: remove the line named above (as administrator)');
+      console.log(
+        `\n  There is no folder at ${projectDir}, so nothing of this site exists to resume.` +
+          (remedies.length
+            ? `\n  ${remedies.length > 1 ? 'Clear whichever applies, then retry' : 'Next step'}:\n${remedies.join('\n')}`
+            : ''),
+      );
     }
     return;
   }
@@ -500,6 +567,20 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     await renameWithRetry(stagingDir, projectDir);
     console.log(`✓ Project created at ${projectDir}`);
 
+    // Park the resolved selections before anything can fail: `resume` reads
+    // them so an interrupted run finishes with the choices already made,
+    // rather than defaulting to "every available premium zip".
+    await writeFile(
+      join(projectDir, PENDING_SELECTION_FILE),
+      `${JSON.stringify({ plugins: extraPlugins, premium: premiumSelection }, null, 2)}\n`,
+      'utf8',
+      // Non-fatal, but NOT silent: without this file a later bare `resume` falls
+      // back to installing every available premium plugin, so the user needs to
+      // know their choice is no longer recorded anywhere.
+    ).catch((err) => {
+      console.log(`  (could not record this run's plugin choices: ${err.message} — if you need to resume, pass --premium= explicitly)`);
+    });
+
     if (instant) {
       console.log('→ Instant mode: no Laragon reload needed.');
       await ensureHostsEntryWithGuidance(hostname);
@@ -507,7 +588,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         bail(
           `✖ The wildcard vhost did not serve ${hostname} within 12s — Apache may be down or the\n` +
             `  wildcard conf (${WILDCARD_CONF_PATH}) may have been removed.\n` +
-            `  Run \`${CLI} doctor\`, fix what it reports, then:${resumeHint(name, extraPlugins)}`,
+            `  Run \`${CLI} doctor\`, fix what it reports, then:${resumeHint(name, extraPlugins, premiumSelection)}`,
         );
         return;
       }
@@ -518,7 +599,13 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       return;
     }
 
-    await snapshotHosts();
+    // Best-effort, exactly as in ensureHostsEntry: this is a BACKUP of a file
+    // we are not the ones rewriting (Laragon's reload is), so an unreadable
+    // hosts file or a full backups dir must not sink a scaffold whose project
+    // folder is already in place.
+    await snapshotHosts().catch((err) => {
+      console.log(`  (could not back up the hosts file first: ${err.message} — continuing)`);
+    });
     console.log('→ Reloading Laragon (this can take a while, and may need you to approve a Windows permission prompt)…');
     triggerReload();
 
@@ -530,7 +617,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     if (pollResult.hostname) hostname = pollResult.hostname;
 
     if (!pollResult.ok && pollResult.reason === 'apache-down') {
-      await reportApacheStillDown(name, hostname, extraPlugins);
+      await reportApacheStillDown(name, hostname, extraPlugins, premiumSelection);
       return;
     }
     if (!pollResult.ok) {
@@ -541,7 +628,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
           hostname +
           ' once it settles.\n' +
           '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-          resumeHint(name, extraPlugins),
+          resumeHint(name, extraPlugins, premiumSelection),
       );
       return;
     }
@@ -572,8 +659,8 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       triggerReload();
       const repoll = await pollForVhost(projectDir, hostname, { timeoutMs: 60_000 });
       if (!repoll.ok) {
-        if (repoll.reason === 'apache-down') await reportApacheStillDown(name, hostname, extraPlugins);
-        else bail(`✖ Retry reload did not complete (reason: ${repoll.reason}).${resumeHint(name, extraPlugins)}`);
+        if (repoll.reason === 'apache-down') await reportApacheStillDown(name, hostname, extraPlugins, premiumSelection);
+        else bail(`✖ Retry reload did not complete (reason: ${repoll.reason}).${resumeHint(name, extraPlugins, premiumSelection)}`);
         return;
       }
       await sleep(3000);
@@ -589,7 +676,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
             hostname +
             '.\n' +
             '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
-            resumeHint(name, extraPlugins),
+            resumeHint(name, extraPlugins, premiumSelection),
         );
         return;
       }
@@ -604,7 +691,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     if (await fileExists(projectDir)) {
       console.log(
         `  The partly-built site at ${projectDir} was left in place.\n` +
-          `  To retry from where it stopped: ${CLI} resume ${name}\n` +
+          `  To retry from where it stopped: ${resumeCommandLine(name, extraPlugins, premiumSelection)}\n` +
           `  To start over: cd ${projectDir} then ${CLI} destroy, and scaffold again.`,
       );
     }
@@ -696,6 +783,12 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   // user's own plugin selection).
   await installAgentConnector({ path: publicDir, onStep });
 
+  // Re-asserted here, not only in installWordPress: this is the function that
+  // installs the abilities pack, and it also runs for a `resume` whose
+  // WordPress was installed by an OLDER version of this tool that never wrote
+  // the guard. Idempotent, so the double-write on a fresh scaffold is free.
+  await writeMcpLoopbackGuard(publicDir, { onStep });
+
   onStep('syncing premium plugins from GitHub…');
   await syncPremiumPluginsFromGitHub({ selection: premiumSelection, onStep });
   const premiumPlugins = await installPremiumPlugins({ path: publicDir, selection: premiumSelection, onStep });
@@ -740,7 +833,15 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   if (extraPlugins.length) sandboxConfig.plugins = extraPlugins;
   if (premiumPlugins.length) sandboxConfig.premiumPlugins = premiumPlugins;
   sandboxConfig.agents = configuredAgents;
+  // Set explicitly rather than trusting the template's own token: the template
+  // shipped an unsubstituted __KATALYST_VERSION__ placeholder here (fixed, but
+  // this also self-heals a site resumed with an old template on disk).
+  sandboxConfig.scaffolderVersion = ENGINE_VERSION;
   await writeFile(sandboxConfigPath, `${JSON.stringify(sandboxConfig, null, 2)}\n`, 'utf8');
+
+  // The site is complete — the parked selections have served their purpose,
+  // and leaving the file behind would misreport a finished site as interrupted.
+  await rm(join(projectDir, PENDING_SELECTION_FILE), { force: true }).catch(() => {});
 
   await recordEnvironment({
     name,
@@ -778,19 +879,23 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
  * sandbox.config.json present = genuinely complete; point at `update`.
  */
 async function resumeCommand(name, { flags = {} } = {}) {
+  const projectDir = join(WWW_DIR, name);
+  if (!(await fileExists(projectDir))) {
+    bail(`✖ No folder at ${projectDir} — nothing to resume. Use the normal scaffold command instead.`);
+    return;
+  }
+  // An explicit flag always wins; otherwise inherit what the interrupted
+  // scaffold had already resolved, so resuming can't quietly install premium
+  // plugins the user declined (an absent file falls back to the old default of
+  // every available zip, which is right for a site scaffolded before this).
+  const pending = await readPendingSelection(projectDir);
   const extraPlugins =
     typeof flags.plugins === 'string'
       ? flags.plugins
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)
-      : [];
-
-  const projectDir = join(WWW_DIR, name);
-  if (!(await fileExists(projectDir))) {
-    bail(`✖ No folder at ${projectDir} — nothing to resume. Use the normal scaffold command instead.`);
-    return;
-  }
+      : pending.plugins || [];
   const hasEnv = await fileExists(join(projectDir, '.env'));
   const hasSandbox = await fileExists(join(projectDir, 'sandbox.config.json'));
   if (hasEnv && hasSandbox) {
@@ -871,12 +976,21 @@ async function resumeCommand(name, { flags = {} } = {}) {
 
   const scheme = env.SITE_SCHEME || (sslCertPresent() && (await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 })) ? 'https' : 'http');
 
-  // Resume finishes the job without a picker — default is every available
-  // plugin, same as a --yes scaffold; pass --premium= to override.
+  // Resume finishes the job without a picker: an explicit --premium wins, else
+  // the interrupted scaffold's own parked answer, else (nothing parked) every
+  // available zip, same as a --yes scaffold. An empty parked selection must
+  // resolve to the literal 'none' — `[].join(',')` is '', which would read as
+  // "no flag given" and silently install everything.
+  const parkedPremium = pending.premium ? pending.premium.join(',') || 'none' : undefined;
   const premiumSelection = await choosePremiumPlugins({
-    flagValue: typeof flags.premium === 'string' ? flags.premium : undefined,
+    flagValue: typeof flags.premium === 'string' ? flags.premium : parkedPremium,
     yes: true,
   });
+  if (parkedPremium !== undefined && typeof flags.premium !== 'string') {
+    console.log(
+      `  (premium plugins: reusing this scaffold's original choice — ${premiumSelection.length ? premiumSelection.join(', ') : 'none'}; override with --premium=)`,
+    );
+  }
 
   const release = await acquireScaffoldLock();
   try {
@@ -898,7 +1012,11 @@ async function resumeCommand(name, { flags = {} } = {}) {
       await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme });
     }
   } catch (err) {
-    bail(`✖ Resume failed: ${err.message}\n  Safe to retry: ${CLI} resume ${name}`);
+    // Echo the resolved selections, same as the scaffold's own hints: a bare
+    // retry line here would re-introduce exactly the bug this release fixes,
+    // since a resume that already narrowed --premium would widen again on the
+    // next attempt (and the parked file is gone once extras have completed).
+    bail(`✖ Resume failed: ${err.message}\n  Safe to retry: ${resumeCommandLine(name, extraPlugins, premiumSelection)}`);
   } finally {
     await release();
   }
@@ -908,9 +1026,16 @@ async function listCommand() {
   console.log(formatEnvironmentsTable(await listEnvironments()));
 }
 
+/**
+ * Split on either line ending. We write LF, but an editor that normalises to
+ * CRLF (a Notepad "save") used to make EVERY line fail this match — `.` never
+ * matches `\r` and `$` isn't in multiline mode — silently yielding an empty
+ * env. That was not a cosmetic bug: destroy then saw no DB_NAME and skipped
+ * dropping the database, and resume lost SITE_HOST.
+ */
 function parseEnvFile(text) {
   const out = {};
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
     if (m) out[m[1]] = m[2];
   }
@@ -920,8 +1045,17 @@ function parseEnvFile(text) {
 /**
  * Refreshes only AgentPress-owned files (scripts/, wp-cli.yml, README,
  * .gitignore, package.json's known scripts) — never .env, sandbox.config.json,
- * or anything under public/. Ported policy from the Docker original; the
+ * or the user's own content. Ported policy from the Docker original; the
  * skip-set + package.json merge model is backend-agnostic.
+ *
+ * ONE deliberate exception under public/: the agent-API loopback guard (the
+ * mu-plugin and our marked `.htaccess` block, both written by
+ * writeMcpLoopbackGuard). Those are files AgentPress owns outright, and this is
+ * the only backfill route for sites scaffolded before the guard existed — up to
+ * v1.2.0 the containment was a single .htaccess rule that was bypassable, so
+ * "update never touches public/" would have left every existing site exposed
+ * with no way to fix it short of re-scaffolding. Nothing else under public/ is
+ * read or written.
  */
 async function updateProject({ yes }) {
   const cwd = process.cwd();
@@ -958,10 +1092,10 @@ async function updateProject({ yes }) {
   };
 
   console.log(
-    "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, and package.json's known\n" +
-      'scripts. Your .env, sandbox.config.json, and any custom package.json scripts are\n' +
-      'preserved. If you hand-edited any refreshed file, those edits will be overwritten —\n' +
-      'take a backup first (a git commit, or a copy of the folder).',
+    "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, package.json's known\n" +
+      'scripts, and the MCP loopback guard mu-plugin. Your .env, sandbox.config.json, and any\n' +
+      'custom package.json scripts are preserved. If you hand-edited any refreshed file, those\n' +
+      'edits will be overwritten — take a backup first (a git commit, or a copy of the folder).',
   );
   if (!yes) {
     if (!process.stdin.isTTY) {
@@ -979,6 +1113,15 @@ async function updateProject({ yes }) {
 
   await copyTemplates(TEMPLATE_DIR, cwd, vars, { skip: new Set(['package.json', 'sandbox.config.json']) });
   await mergePackageJson(join(TEMPLATE_DIR, 'package.json'), join(cwd, 'package.json'), vars);
+  // The one deliberate exception to "update never touches public/": this is a
+  // file AgentPress owns outright, and it is the backfill path for sites
+  // scaffolded before the guard existed (up to v1.2.0, where the .htaccess
+  // rewrite was the only containment layer and was bypassable). Skipped for a
+  // site with no public/ rather than creating a stray tree.
+  if (await fileExists(join(cwd, 'public'))) {
+    const wrote = await writeMcpLoopbackGuard(join(cwd, 'public'), { onStep: (msg) => console.log(`  ${msg}`) });
+    if (wrote) console.log('  … MCP loopback guard in place');
+  }
   await recordEnvironment({ dir: cwd, updatedAt: new Date().toISOString() });
   console.log(`✓ Updated to v${ENGINE_VERSION}.`);
 }
@@ -1104,7 +1247,7 @@ async function setupPreferences() {
         await mkdir(dir, { recursive: true });
         // Absolute path: bare 'explorer' would let an explorer.exe in the CWD win
         // (Windows CreateProcess searches the current directory).
-        spawn(join(process.env.SystemRoot || 'C:\Windows', 'explorer.exe'), [dir], { detached: true, stdio: 'ignore' }).unref();
+        spawn(join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [dir], { detached: true, stdio: 'ignore' }).unref();
         await rl.question('  Press Enter when you have added your zips (or Enter to continue without)… ');
         availability = await premiumPluginAvailability();
         printAvailabilityTable(availability);

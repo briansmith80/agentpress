@@ -1,7 +1,7 @@
 // The step the Docker original never needed to write — the `wordpress:latest`
 // image did `wp core download` + `wp config create` implicitly via its
 // entrypoint. Natively, this module is that entrypoint.
-import { rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -119,6 +119,256 @@ if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
 }
 `;
 
+/**
+ * The load-bearing half of the agent-API containment control (the `.htaccess`
+ * rewrite below is the other, weaker half).
+ *
+ * Why a plugin and not just Apache: the rewrite can only match URL SHAPES,
+ * and WordPress reaches the identical REST controller through several —
+ * `/wp-json/<ns>/...`, `/?rest_route=/<ns>/...`,
+ * `/index.php/wp-json/<ns>/...`, and the query-string forms percent-encoded,
+ * which Apache does not decode before matching. Confirmed live: a
+ * REQUEST_URI-only guard is bypassed by the `?rest_route=` form.
+ * `rest_pre_dispatch` sees WP's OWN resolved route instead, which every shape
+ * converges on, so this cannot be walked around by re-spelling the URL.
+ *
+ * TWO namespaces, not one — this is the trap. Blocking only `mcp/` looks
+ * complete but is not: WordPress core (7.0+) registers its own Abilities REST
+ * API at `wp-abilities/v1`, and every ability in the pack declares
+ * `show_in_rest => true`, so `POST /wp-json/wp-abilities/v1/abilities/
+ * agent-connector-for-wp/shell-exec/run` reaches shell-exec through core's
+ * controller without ever touching an `mcp` route. Verified live on a
+ * scaffolded site: that path returns `rest_ability_cannot_execute` (401),
+ * i.e. it resolves and reaches the ability, and only auth stands in the way.
+ * Both prefixes must be listed. Anything added to the pack's exposure surface
+ * later needs adding here too.
+ *
+ * String.raw: this PHP contains regex backslashes that a normal template
+ * literal would eat (`\d` -> `d`), silently widening the address check.
+ */
+const MCP_GUARD_PHP = String.raw`<?php
+/**
+ * Plugin Name: AgentPress agent-API loopback guard
+ * Description: Rejects non-loopback requests to the MCP and Abilities REST namespaces. Written by create-agentpress; delete it only if you deliberately want remote agent access.
+ */
+
+// The Agent Connector's abilities pack grants shell-exec, PHP-eval and
+// filesystem write to an authenticated administrator. That capability IS the
+// point of an AI-agent dev site, but nothing needs it reachable off this
+// machine, and Laragon's Apache binds every interface — so a laptop on a cafe
+// network would otherwise expose that chain to anyone holding the application
+// password. Agents run locally, so this costs no functionality.
+//
+// Guarding BOTH namespaces is required, not belt-and-braces: the abilities are
+// reachable through core's own wp-abilities/v1 controller as well as through
+// the MCP adapter, and blocking only mcp/ leaves shell-exec fully exposed.
+//
+// REMOTE_ADDR only, never X-Forwarded-For: that header is attacker-supplied
+// and there is no trusted reverse proxy in front of a Laragon dev site.
+
+if ( ! function_exists( 'agentpress_is_loopback_remote_addr' ) ) {
+	function agentpress_is_loopback_remote_addr( $addr ) {
+		$addr = strtolower( trim( (string) $addr ) );
+		if ( '' === $addr ) {
+			return false;
+		}
+		if ( '::1' === $addr || '0:0:0:0:0:0:0:1' === $addr ) {
+			return true;
+		}
+		// IPv4-mapped IPv6, e.g. ::ffff:127.0.0.1
+		if ( 0 === strpos( $addr, '::ffff:' ) ) {
+			$addr = substr( $addr, 7 );
+		}
+		return 1 === preg_match( '/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/', $addr );
+	}
+}
+
+if ( ! function_exists( 'agentpress_is_guarded_rest_route' ) ) {
+	function agentpress_is_guarded_rest_route( $route ) {
+		$route = strtolower( ltrim( (string) $route, '/' ) );
+		if ( '' === $route ) {
+			return false;
+		}
+		foreach ( array( 'mcp', 'wp-abilities' ) as $ns ) {
+			if ( $ns === $route || 0 === strpos( $route, $ns . '/' ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
+// PHP_INT_MAX, not 0: every rest_pre_dispatch filter runs and each receives the
+// previous one's value, so a plugin registered after us at a higher priority
+// could return null and discard our 403. Running LAST means nothing downstream
+// can re-allow a request we rejected. (For allowed requests we hand back
+// whatever earlier filters produced, untouched.)
+add_filter(
+	'rest_pre_dispatch',
+	function ( $result, $server, $request ) {
+		if ( ! is_object( $request ) || ! method_exists( $request, 'get_route' ) ) {
+			return $result;
+		}
+		// WP has already normalised the route by this point, whatever URL shape
+		// carried it: "/mcp/mcp-adapter-default-server" either way.
+		if ( ! agentpress_is_guarded_rest_route( $request->get_route() ) ) {
+			return $result;
+		}
+		if ( agentpress_is_loopback_remote_addr( isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '' ) ) {
+			return $result;
+		}
+		return new WP_Error(
+			'agentpress_loopback_only',
+			'This site restricts its agent API (MCP and Abilities) to the local machine.',
+			array( 'status' => 403 )
+		);
+	},
+	PHP_INT_MAX,
+	3
+);
+`;
+
+export const MCP_GUARD_RELATIVE_PATH = join('wp-content', 'mu-plugins', 'agentpress-mcp-loopback-guard.php');
+
+/**
+ * The Apache half, as a marker-delimited block so it can be spliced into an
+ * existing `.htaccess` (the backfill path) as well as written fresh.
+ *
+ * Defence in depth only, and the reason is specific (all verified live against
+ * Laragon's Apache): the three conditions cover the URL shapes WordPress
+ * accepts — /wp-json/<ns>/…, /index.php/wp-json/<ns>/… and ?rest_route=/<ns>/…
+ * — but Apache decodes only the PATH before these run, never the QUERY STRING,
+ * so "?rest_route=%2Fmcp%2Fx" never matches here while PHP still hands
+ * WordPress a decoded "/mcp/x" and the route resolves. The mu-plugin is what
+ * closes that gap. Never rely on this block alone.
+ */
+const HTACCESS_GUARD_BEGIN = '# BEGIN AgentPress';
+const HTACCESS_GUARD_END = '# END AgentPress';
+
+const HTACCESS_GUARD_BLOCK = `${HTACCESS_GUARD_BEGIN}
+# The agent API (MCP + WordPress core's Abilities REST namespace) is
+# LOOPBACK-ONLY. The Agent Connector's abilities pack grants shell-exec,
+# php-eval and filesystem write to an authenticated admin — that is the point
+# of an AI-agent dev site, but nothing needs it reachable off this machine, and
+# Laragon's Apache binds every interface (so a laptop on a café network would
+# otherwise expose that chain to anyone holding the application password).
+# Agents run locally, so this costs no functionality.
+#
+# DEFENCE IN DEPTH ONLY — the control that actually holds is the mu-plugin at
+# wp-content/mu-plugins/agentpress-mcp-loopback-guard.php, which tests WP's own
+# resolved REST route rather than URL text. Apache decodes the PATH before
+# these conditions run but never the QUERY STRING, so an encoded
+# "?rest_route=%2Fmcp%2Fx" slips past this block and is caught only there.
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteCond %{REQUEST_URI} ^/(index\\.php/)?wp-json/(mcp|wp-abilities)(/|$) [NC,OR]
+RewriteCond %{QUERY_STRING} (^|&)rest_route=/?(mcp|wp-abilities)(/|&|$) [NC]
+RewriteCond %{REMOTE_ADDR} !^(127\\.[0-9.]+|::1|::ffff:127\\.[0-9.]+)$
+RewriteRule .* - [F,L]
+</IfModule>
+${HTACCESS_GUARD_END}`;
+
+/**
+ * Idempotent — overwrites in place, so it is safe to call on every scaffold
+ * and on any backfill/harden path. Best-effort by design: a site that cannot
+ * take the guard must still finish scaffolding (a half-installed site is
+ * worse), but it says so loudly rather than leaving the caller to assume the
+ * containment is in place.
+ *
+ * Writes BOTH layers. The .htaccess half is spliced by marker so an existing
+ * file keeps its WordPress block and any hand-written rules; only our own
+ * marked region is replaced (the same pattern WordPress uses for its own).
+ */
+export async function writeMcpLoopbackGuard(publicDir, { onStep, verify = true } = {}) {
+  const dest = join(publicDir, MCP_GUARD_RELATIVE_PATH);
+  let ok = true;
+  try {
+    await mkdir(join(publicDir, 'wp-content', 'mu-plugins'), { recursive: true });
+    await writeFile(dest, MCP_GUARD_PHP, 'utf8');
+  } catch (err) {
+    ok = false;
+    // Loud, not a step line: this is the control everything else defers to, and
+    // the same standard protectProjectSecrets holds itself to.
+    console.log(
+      `\n⚠ SECURITY: could not write the agent-API loopback guard (${err.message}).\n` +
+        "  Without it this site's abilities pack (shell-exec, PHP-eval, filesystem write) is\n" +
+        "  reachable from every network this machine joins by anyone holding the site's\n" +
+        `  application password. Create ${dest} by hand, or keep this site off untrusted networks.\n`,
+    );
+  }
+  try {
+    await spliceHtaccessGuard(join(publicDir, '.htaccess'));
+  } catch (err) {
+    // Non-fatal: the mu-plugin above is the control that holds, so a failure
+    // here loses defence in depth, not the containment itself.
+    onStep?.(`(could not update the .htaccess guard block: ${err.message} — the mu-plugin still enforces it)`);
+  }
+  if (ok && verify) ok = await verifyMcpLoopbackGuard(publicDir, { onStep });
+  return ok;
+}
+
+/**
+ * Written is not loaded. A file on disk proves nothing about whether WordPress
+ * actually runs it — a WP_CONTENT_DIR override, a parse error, or mu-plugins
+ * being disabled would all leave the containment silently absent while the file
+ * sits there looking correct. Asking WordPress itself whether the guard's
+ * function exists is the cheapest check that can distinguish those.
+ *
+ * Three outcomes, deliberately distinguished: loaded (silent), definitely NOT
+ * loaded (loud), and could-not-tell (a note). Never fatal — the last thing this
+ * should do is fail a scaffold because WP-CLI could not reach the database.
+ */
+export async function verifyMcpLoopbackGuard(publicDir, { onStep } = {}) {
+  const probe = await runWp(['eval', 'echo function_exists("agentpress_is_guarded_rest_route") ? "LOADED" : "MISSING";'], {
+    path: publicDir,
+  });
+  if (probe.code !== 0) {
+    onStep?.('(could not confirm the loopback guard is loaded — WP-CLI did not run; the file is in place)');
+    return true;
+  }
+  if (/LOADED/.test(probe.stdout)) return true;
+  console.log(
+    '\n⚠ SECURITY: the agent-API loopback guard was written but WordPress is not loading it\n' +
+      `  (checked with wp eval in ${publicDir}). The abilities pack may be reachable from this\n` +
+      "  machine's network. Check that must-use plugins are enabled and that wp-config.php does\n" +
+      `  not move WP_CONTENT_DIR away from ${join(publicDir, 'wp-content')}.\n`,
+  );
+  return false;
+}
+
+/**
+ * Replaces our marked block in place, prepends it when absent, and creates the
+ * file if there is none.
+ *
+ * The read failure is narrowed to ENOENT ON PURPOSE. A catch-all here treats
+ * "could not read" as "empty file" and then writes just our block over a real
+ * .htaccess — during development that is exactly what happened (a missing
+ * `readFile` import surfaced as a swallowed ReferenceError and destroyed a test
+ * site's WordPress rewrite rules). Anything other than a genuinely absent file
+ * must propagate so the caller reports it instead of clobbering.
+ */
+async function spliceHtaccessGuard(htaccessPath) {
+  let current = '';
+  try {
+    current = await readFile(htaccessPath, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  const begin = current.indexOf(HTACCESS_GUARD_BEGIN);
+  const end = current.indexOf(HTACCESS_GUARD_END);
+  let next;
+  if (begin !== -1 && end !== -1 && end > begin) {
+    next = current.slice(0, begin) + HTACCESS_GUARD_BLOCK + current.slice(end + HTACCESS_GUARD_END.length);
+  } else if (current.trim()) {
+    // Prepend: the guard must be evaluated before WordPress's own rewrite
+    // hands the request to index.php.
+    next = `${HTACCESS_GUARD_BLOCK}\n\n${current}`;
+  } else {
+    next = `${HTACCESS_GUARD_BLOCK}\n`;
+  }
+  if (next !== current) await writeFile(htaccessPath, next, 'utf8');
+}
+
 function fail(step, result) {
   throw new Error(`${step} failed (exit ${result.code}):\n${(result.stderr || result.stdout).trim()}`);
 }
@@ -199,23 +449,11 @@ export async function installWordPress({
   // Write the standard WordPress ruleset ourselves, same as the original.
   result = await runWp(['rewrite', 'flush', '--hard'], { path: publicDir });
   if (result.code !== 0) fail('wp rewrite flush', result);
+  // One definition of the guard block, shared with the backfill path — a
+  // second inline copy here is how the two drift apart.
   await writeFile(
     join(publicDir, '.htaccess'),
-    `# BEGIN AgentPress
-# The MCP route is LOOPBACK-ONLY. The Agent Connector's abilities pack grants
-# shell-exec, php-eval and filesystem write to an authenticated admin — that
-# is the point of an AI-agent dev site, but nothing needs it reachable off
-# this machine, and Laragon's Apache binds every interface (so a laptop on a
-# café network would otherwise expose that chain to anyone holding the
-# application password). Agents run locally, so this costs no functionality.
-# Remove these three lines only if you deliberately want remote agent access.
-<IfModule mod_rewrite.c>
-RewriteEngine On
-RewriteCond %{REQUEST_URI} ^/wp-json/mcp/ [NC]
-RewriteCond %{REMOTE_ADDR} !^(127\\.[0-9.]+|::1)$
-RewriteRule .* - [F,L]
-</IfModule>
-# END AgentPress
+    `${HTACCESS_GUARD_BLOCK}
 
 # BEGIN WordPress
 <IfModule mod_rewrite.c>
@@ -241,6 +479,9 @@ RewriteRule . /index.php [L]
   );
 
   await writeFile(join(publicDir, '.user.ini'), USER_INI, 'utf8');
+
+  onStep?.('installing the MCP loopback guard…');
+  await writeMcpLoopbackGuard(publicDir, { onStep });
 
   return { url: `${scheme}://${hostname}`, adminUrl: `${scheme}://${hostname}/wp-admin` };
 }
