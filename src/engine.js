@@ -30,7 +30,7 @@ import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnv
 import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, premiumPluginAvailability, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { detectAgents } from './agents.mjs';
-import { mintAppPassword, MCP_CONFIGURERS } from './mcp.mjs';
+import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
@@ -765,6 +765,83 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
 }
 
 /**
+ * The MCP half of a scaffold, extracted so `rewire` can re-run exactly this
+ * against an existing site. Until v1.5.0 the ONLY way to (re)wire was a
+ * scaffold or a resume, and resume refuses a completed site — so a site whose
+ * machine-global wiring had been taken over by a newer scaffold had no way
+ * back short of re-scaffolding or hand-editing an agent's config.
+ *
+ * Degrades, never aborts. MCP is an optional feature on a site that is
+ * otherwise complete and serving, so a failed mint or a failed agent is
+ * reported and the caller carries on. It also REPORTS failures rather than
+ * letting them scroll past: previously a per-agent failure printed one line
+ * mid-scaffold and then vanished, leaving the summary saying nothing at all
+ * about the tool's headline feature.
+ */
+async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {} }) {
+  onStep('detecting AI agent CLIs…');
+  const detected = await detectAgents();
+  const detectedKeys = Object.entries(detected)
+    .filter(([, resolvedPath]) => resolvedPath)
+    .map(([key]) => key);
+  const configuredAgents = [];
+  const failedAgents = [];
+  if (!detectedKeys.length) return { detectedKeys, configuredAgents, failedAgents, verification: null };
+
+  onStep('minting a WordPress application password for MCP…');
+  let appPassword;
+  try {
+    appPassword = await mintAppPassword({ path: publicDir, adminUser, onStep: (m) => onStep(m) });
+  } catch (err) {
+    // Used to propagate and kill the whole scaffold — discarding the templates,
+    // registry entry, admin login link and summary for an optional feature on a
+    // working site.
+    failedAgents.push({ key: 'all', reason: `could not mint the application password: ${err.message}` });
+    return { detectedKeys, configuredAgents, failedAgents, verification: null };
+  }
+  // MCP deliberately stays on http: the proxy is a Node process whose trust
+  // of Laragon's self-signed cert isn't guaranteed, and http always works.
+  const creds = { wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`, username: adminUser, password: appPassword };
+  for (const key of detectedKeys) {
+    onStep(`wiring MCP for ${key}…`);
+    try {
+      await MCP_CONFIGURERS[key](creds);
+      configuredAgents.push(key);
+    } catch (err) {
+      failedAgents.push({ key, reason: err.message });
+    }
+  }
+
+  // Prove it rather than assert it — one handshake against the endpoint with
+  // the credential we just minted.
+  let verification = null;
+  if (configuredAgents.length) {
+    onStep('checking the MCP endpoint answers…');
+    verification = await verifyMcpEndpoint(creds);
+    onStep(verification.ok ? `MCP endpoint answered (${verification.tools} tools)` : `⚠ the MCP endpoint did not answer: ${verification.detail}`);
+  }
+  return { detectedKeys, configuredAgents, failedAgents, verification };
+}
+
+/** The shared reporting for wireMcpForSite's outcome — identical for a scaffold and a rewire. */
+function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verification }) {
+  const lines = [];
+  if (!detectedKeys.length) {
+    lines.push(`${dim('·')} No AI agent CLI found on PATH, so no MCP wiring was written (everything else is set up).`);
+    return lines;
+  }
+  if (configuredAgents.length) {
+    const health = verification ? (verification.ok ? `verified, ${verification.tools} tools` : `NOT verified: ${verification.detail}`) : 'not checked';
+    lines.push(`${verification && !verification.ok ? yellow(WARN) : green(OK)} MCP wired for: ${configuredAgents.join(', ')} (${health})`);
+  }
+  for (const f of failedAgents) {
+    lines.push(`${yellow(WARN)} MCP wiring ${f.key === 'all' ? 'failed' : `failed for ${f.key}`}: ${f.reason}`);
+  }
+  if (failedAgents.length) lines.push(`  Retry with:  ${CLI} rewire   (from this site's folder)`);
+  return lines;
+}
+
+/**
  * Everything after WordPress itself is installed and .env exists: plugins,
  * the Agent Connector pair, premium plugins, MCP wiring, templates,
  * sandbox.config.json, and the registry entry. Split out of finishInstall
@@ -799,28 +876,8 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   await applyLicenses({ path: publicDir, slugs: premiumPlugins, onStep });
   await updateAllPlugins({ path: publicDir, onStep });
 
-  onStep('detecting AI agent CLIs…');
-  const detected = await detectAgents();
-  const configuredAgents = [];
-  const detectedKeys = Object.entries(detected)
-    .filter(([, resolvedPath]) => resolvedPath)
-    .map(([key]) => key);
-  if (detectedKeys.length) {
-    onStep('minting a WordPress application password for MCP…');
-    const appPassword = await mintAppPassword({ path: publicDir, adminUser });
-    // MCP deliberately stays on http: the proxy is a Node process whose trust
-    // of Laragon's self-signed cert isn't guaranteed, and http always works.
-    const creds = { wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`, username: adminUser, password: appPassword };
-    for (const key of detectedKeys) {
-      onStep(`wiring MCP for ${key}…`);
-      try {
-        await MCP_CONFIGURERS[key](creds);
-        configuredAgents.push(key);
-      } catch (err) {
-        console.log(`  (skipped ${key}: ${err.message})`);
-      }
-    }
-  }
+  const mcp = await wireMcpForSite({ publicDir, hostname, adminUser, onStep });
+  const { configuredAgents } = mcp;
 
   await copyTemplates(TEMPLATE_DIR, projectDir, {
     PROJECT_NAME: name,
@@ -859,7 +916,11 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   const adminUrl = await mintAdminLoginUrl({ path: publicDir, hostname, scheme });
 
   console.log(
-    `\n${green(OK)} WordPress is ready.${configuredAgents.length ? ` MCP wired for: ${configuredAgents.join(', ')} — wordpress (REST API) + playwright (browser automation).` : ''}\n` +
+    `\n${green(OK)} WordPress is ready.\n` +
+      // Always say something about MCP — the headline feature used to be simply
+      // absent from this panel whenever nothing was wired, whether that was
+      // because no agent CLI exists or because every one of them failed.
+      `${reportMcpOutcome(mcp).map((l) => `${l}\n`).join('')}` +
       `  Site   ${siteUrl}\n` +
       `  Admin  ${adminUrl}\n` +
       `  User   ${adminUser}\n` +
@@ -1063,6 +1124,71 @@ function parseEnvFile(text) {
  * with no way to fix it short of re-scaffolding. Nothing else under public/ is
  * read or written.
  */
+/**
+ * Re-points the machine-global MCP wiring at THIS site, from inside its folder.
+ *
+ * The wiring is machine-global by design (one `wordpress` entry per agent CLI,
+ * newest scaffold wins — documented in README). What was missing was any way
+ * back: `resume` refuses a completed site, `update` never touched MCP, and the
+ * site menu happily launched an agent whose `wordpress` server pointed at a
+ * different site. So the documented trade-off had no recovery path, and this is
+ * it. Also the only way to wire an agent CLI installed AFTER the site was made.
+ *
+ * Re-mints the application password, which invalidates the previous one — that
+ * is deliberate: the plaintext only exists at creation time, so there is
+ * nothing to reuse.
+ */
+async function rewireCommand() {
+  const cwd = process.cwd();
+  let env;
+  try {
+    env = parseEnvFile(await readFile(join(cwd, '.env'), 'utf8'));
+  } catch {
+    bail(`${red(BAD)} No .env here — run rewire from inside a scaffolded site's directory.`);
+    return;
+  }
+  if (!(await fileExists(join(cwd, 'public')))) {
+    bail(`${red(BAD)} No public\\ folder here — this does not look like a scaffolded site.`);
+    return;
+  }
+  const hostname = env.SITE_HOST;
+  if (!hostname) {
+    bail(`${red(BAD)} This site's .env has no SITE_HOST, so there is no endpoint to point agents at.`);
+    return;
+  }
+
+  // Say what is being taken over BEFORE doing it — the silent steal is the
+  // whole complaint this command exists to answer.
+  const before = await readWiredHostnames();
+  const displaced = [...new Set(Object.values(before).filter((h) => h && h !== hostname.toLowerCase()))];
+  if (displaced.length) {
+    console.log(`${cyan(STEP)} Re-pointing MCP away from ${displaced.join(', ')} and at ${hostname}.`);
+  }
+
+  const adminUser = env.WP_ADMIN_USER || 'admin';
+  const result = await wireMcpForSite({
+    publicDir: join(cwd, 'public'),
+    hostname,
+    adminUser,
+    onStep: (m) => console.log(`  … ${m}`),
+  });
+  console.log('');
+  for (const line of reportMcpOutcome(result)) console.log(line);
+
+  // Keep the site's own record honest, so its menu offers exactly the agents
+  // that are really wired. This is what makes the menu's ownership check work.
+  const sandboxPath = join(cwd, 'sandbox.config.json');
+  try {
+    const cfg = JSON.parse(await readFile(sandboxPath, 'utf8'));
+    cfg.agents = result.configuredAgents;
+    await writeFile(sandboxPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+  } catch {
+    // no sandbox.config.json (a very old site) — the wiring still landed
+  }
+  await recordEnvironment({ dir: cwd, agents: result.configuredAgents, updatedAt: new Date().toISOString() });
+  if (!result.configuredAgents.length) process.exitCode = 1;
+}
+
 async function updateProject({ yes }) {
   const cwd = process.cwd();
   let envContent;
@@ -1383,6 +1509,7 @@ create-agentpress v${ENGINE_VERSION} — local WordPress + AI-agent dev environm
 From inside a scaffolded site's directory:
 
   ${CLI} update      Refresh AgentPress's own tooling files
+  ${CLI} rewire      Point the AI agents' MCP connection back at THIS site
   ${CLI} destroy     Permanently remove that site
 
 Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
@@ -1392,7 +1519,7 @@ Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL
 }
 
 const KNOWN_FLAGS = new Set(['plugins', 'premium']);
-const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'destroy', 'register-quick-app', 'help', 'version']);
+const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'rewire', 'destroy', 'register-quick-app', 'help', 'version']);
 
 function editDistance(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -1477,6 +1604,11 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
 
   if (args.command === 'update') {
     await updateProject({ yes: args.yes });
+    return;
+  }
+
+  if (args.command === 'rewire') {
+    await rewireCommand();
     return;
   }
 

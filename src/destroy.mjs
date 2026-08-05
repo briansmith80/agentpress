@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
 import { removeDirSafely } from './junctions.mjs';
 import { dropDatabase, parseDbHost, resolveRootCredential } from './mysql.mjs';
-import { runWp } from './wp.mjs';
+import { revokeAppPasswords } from './mcp.mjs';
 import { psRun } from './win.mjs';
 import { WWW_DIR } from './paths.mjs';
 
@@ -160,10 +160,18 @@ export async function destroySite({ projectDir, onStep }) {
   onStep?.('removing MCP registrations…');
   const removedAgents = await removeMcpEntries(cfg.agents || [], env.SITE_HOST || null, onStep);
 
+  let appPasswordRevoked = null;
   if (env.WP_ADMIN_USER) {
-    onStep?.('deleting the WordPress application password…');
-    await runWp(['user', 'application-password', 'delete', env.WP_ADMIN_USER, 'agentpress'], { path: publicDir }).catch(() => {});
-    await runWp(['user', 'application-password', 'delete', env.WP_ADMIN_USER, 'katalyst-laragon'], { path: publicDir }).catch(() => {}); // pre-rename sites
+    onStep?.('revoking the WordPress application password…');
+    // Was `delete <user> agentpress` — a NAME where wp-cli wants a UUID, so it
+    // matched nothing and silently revoked nothing, while destroy's own
+    // preamble told the user the credential had been removed. That left a live
+    // admin-equivalent password (which reaches the abilities pack) on a site
+    // being torn down. revokeAppPasswords resolves the UUIDs first.
+    appPasswordRevoked = await revokeAppPasswords({ path: publicDir, adminUser: env.WP_ADMIN_USER }).catch(() => null);
+    if (appPasswordRevoked === null) {
+      onStep?.('  (could not confirm the application password was revoked — revoke it by hand in wp-admin ▸ Users ▸ Profile before the site goes away)');
+    }
   }
 
   let dbDropped = false;
@@ -204,5 +212,5 @@ export async function destroySite({ projectDir, onStep }) {
   }
   await removeDirSafely(projectDir);
 
-  return { removedAgents, dbDropped, dbSkipReason, hostname: env.SITE_HOST || vhost?.hostname || null };
+  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname: env.SITE_HOST || vhost?.hostname || null };
 }

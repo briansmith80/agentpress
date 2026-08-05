@@ -81,8 +81,13 @@ references are given so you don't have to take our word for it.
 
   Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
   `npx create-agentpress@latest update` from inside that site's folder to add both.
-- **Codex's MCP wiring still puts the application password on a command line.** Claude, Cursor
-  and OpenCode configs are written directly as JSON, so the credential never reaches an argv.
+- **Codex's MCP wiring puts the application password on a command line, and Claude's fallback
+  path can too.** Cursor and OpenCode configs are always written directly as JSON, so the
+  credential never reaches an argv for them. Claude is normally written directly as JSON as
+  well — but if `~/.claude.json` cannot be read or parsed (most commonly: Claude Code is
+  installed but has never been launched, so the file does not exist yet), the code falls back
+  to `claude mcp add --env …`, which does put the password on two process command lines. The
+  fallback prints a warning when it happens, so you will know.
   Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the
   exposure, so `codex mcp add` is still used; the credential appears briefly on that process's
   command line, where command-line auditing or EDR can persist it. It grants REST admin on a

@@ -23,6 +23,10 @@ const LOCK_PATH = join(CWD, '.agentpress.lock');
 // break, while a single-quoted literal could.
 const WP_BAT = "__WP_BAT_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
+// The registry KEY is not the command. Launching used to pass the key straight
+// to the shell, so "Open Cursor CLI" ran `cursor` (a different program, or
+// nothing) instead of Cursor's agent binary, and the failure was swallowed.
+const AGENT_COMMANDS = { claude: 'claude', cursor: 'cursor-agent', codex: 'codex', opencode: 'opencode' };
 
 // --- colour ---
 // Declared up here, ahead of the early bails below, so those failure messages
@@ -333,13 +337,54 @@ function runInherit(cmd, args = []) {
       // still used here as a pragmatic default since `cmd` is always one of
       // our own small hardcoded set, never user input.
       child = spawn(cmd, args, { cwd: CWD, stdio: 'inherit', shell: true });
-    } catch {
+    } catch (err) {
+      console.log(`  ${dim(`(could not launch ${cmd}: ${err.message})`)}`);
       resolve();
       return;
     }
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
+    // Report instead of swallowing: a missing or renamed binary exits non-zero
+    // (or errors), and staying silent made "nothing happened" indistinguishable
+    // from "the agent ran and quit".
+    child.on('close', (code) => {
+      if (code !== 0) console.log(`  ${dim(`(${cmd} exited with code ${code} — is it installed and on PATH?)`)}`);
+      resolve();
+    });
+    child.on('error', (err) => {
+      console.log(`  ${dim(`(could not launch ${cmd}: ${err.message})`)}`);
+      resolve();
+    });
   });
+}
+
+/**
+ * Is this site the one the agents' machine-global `wordpress` MCP entry
+ * actually points at? Duplicated rather than imported, like everything else in
+ * this frozen file. Returns null when it cannot tell (no readable config).
+ *
+ * Without this the menu launched an agent whose WordPress tools pointed at a
+ * DIFFERENT site — the agent would happily read and edit the wrong WordPress,
+ * which is worse than not being wired at all.
+ */
+function wiredHostFor(agentKey) {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const read = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  let url = null;
+  if (agentKey === 'claude') url = read(join(home, '.claude.json'))?.mcpServers?.wordpress?.env?.WP_API_URL;
+  else if (agentKey === 'cursor') url = read(join(home, '.cursor', 'mcp.json'))?.mcpServers?.wordpress?.env?.WP_API_URL;
+  else if (agentKey === 'opencode') url = read(join(home, '.config', 'opencode', 'opencode.json'))?.mcp?.wordpress?.environment?.WP_API_URL;
+  else return null; // codex config is TOML we do not parse
+  if (!url) return null;
+  try {
+    return new URL(String(url)).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 async function checkUpdate() {
@@ -384,7 +429,15 @@ for (;;) {
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
-    ...agents.map((a) => ({ value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}` })),
+    ...agents.map((a) => {
+      const wired = wiredHostFor(a);
+      const mismatch = wired && wired !== HOST.toLowerCase();
+      return {
+        value: `agent:${a}`,
+        label: `Open ${AGENT_LABELS[a]}`,
+        hint: mismatch ? `⚠ MCP points at ${wired}` : wired ? 'MCP points here' : undefined,
+      };
+    }),
     { value: 'shell', label: 'Open a terminal here' },
     ...(latestVersion ? [{ value: 'update', label: 'Update agentpress', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
@@ -403,6 +456,17 @@ for (;;) {
   } else if (choice === 'update') {
     console.log(`  Run: npx create-agentpress@${latestVersion} update   (from this directory)`);
   } else if (choice.startsWith('agent:')) {
-    await runInherit(choice.slice('agent:'.length));
+    const key = choice.slice('agent:'.length);
+    const wired = wiredHostFor(key);
+    if (wired && wired !== HOST.toLowerCase()) {
+      // Do not launch an agent whose WordPress tools address a different site
+      // without saying so — it would read and edit the wrong WordPress.
+      console.log(
+        `\n  ${dim('⚠')} ${AGENT_LABELS[key]}'s wordpress MCP server currently points at ${wired}, not ${HOST}.\n` +
+          `  ${dim('MCP wiring is machine-wide, so the most recently scaffolded site owns it.')}\n` +
+          `  ${dim('To point it back at this site, run:')} npx create-agentpress@latest rewire\n`,
+      );
+    }
+    await runInherit(AGENT_COMMANDS[key] || key);
   }
 }
