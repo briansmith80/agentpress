@@ -15,6 +15,11 @@
     "template",
     "SECURITY.md"
   ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check index.js && node --check src/engine.js && node --check template/scripts/agentpress.mjs",
+    "prepublishOnly": "npm test"
+  },
   "engines": {
     "node": ">=18"
   },

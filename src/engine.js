@@ -1100,7 +1100,7 @@ async function listCommand() {
  * env. That was not a cosmetic bug: destroy then saw no DB_NAME and skipped
  * dropping the database, and resume lost SITE_HOST.
  */
-function parseEnvFile(text) {
+export function parseEnvFile(text) {
   const out = {};
   for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
