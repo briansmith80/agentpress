@@ -28,9 +28,14 @@ test site and destroying that site then removes the entry entirely.
 ```bash
 node index.js aptestNNN --yes --premium=none
 curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/hello-world/   # 200
-curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/.env           # 404
+curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/.env           # 404 or 403
 cd C:/laragon/www/aptestNNN && node <repo>/index.js destroy --yes
 ```
+
+On `.env`, what matters is **not 200**. 404 is the usual answer (the file lives
+above the docroot, so it simply is not there); some Apache configurations deny
+dotfiles outright and answer 403, which is equally fine — verify by checking
+that `public/` contains no `.env` rather than by the status code alone.
 
 After `destroy`: project dir gone, no conf in `sites-enabled`, absent from
 `SHOW DATABASES`, absent from `~/.agentpress/environments.json`. A dangling
