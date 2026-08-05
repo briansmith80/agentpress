@@ -74,12 +74,12 @@ references are given so you don't have to take our word for it.
     alone does not re-expose anything — the mu-plugin still rejects every shape — but it
     removes the layer that stops those requests before PHP runs.
 
-  **History, stated plainly:** up to and including v1.2.0 the rewrite was the only layer, it
-  matched `REQUEST_URI ^/wp-json/mcp/` only, and it was therefore bypassable via
+  **History, stated plainly:** from v1.1.0 up to and including v1.3.0 the rewrite was the only
+  layer, it matched `REQUEST_URI ^/wp-json/mcp/` only, and it was therefore bypassable via
   `?rest_route=/mcp/…` and `/index.php/wp-json/mcp/…`; the `wp-abilities/…` namespace was not
-  covered at all. Both gaps were found by audit and fixed in v1.3.0.
+  covered at all. Both gaps were found by audit and fixed in v1.4.0.
 
-  Sites scaffolded before v1.3.0 have neither the mu-plugin nor the widened rewrite — run
+  Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
   `npx create-agentpress@latest update` from inside that site's folder to add both.
 - **Codex's MCP wiring still puts the application password on a command line.** Claude, Cursor
   and OpenCode configs are written directly as JSON, so the credential never reaches an argv.

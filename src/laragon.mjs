@@ -67,6 +67,22 @@ export async function mysqlUp() {
   return probeWithRetry(MYSQL_PORT);
 }
 
+/**
+ * Diagnostic only — deliberately NOT part of preflight(). A closed :443 is a
+ * perfectly normal state (SSL simply not enabled in Laragon) and http
+ * scaffolds fine without it, so gating on it would be wrong; and it would add
+ * ~1.2s of retry sleeps to every scaffold for nothing. doctor calls this
+ * directly, where that cost buys a real answer.
+ *
+ * ~1.2s, not the ~4.8s an earlier draft of this comment claimed: a closed
+ * loopback port returns ECONNREFUSED in single-digit ms, so the cost is the
+ * two 600ms sleeps between attempts and tcpProbe's 1000ms timeout is never
+ * reached. Measured, and consistent with probeWithRetry's own note above.
+ */
+export async function sslPortUp() {
+  return probeWithRetry(443);
+}
+
 // Cached while Apache is confirmed healthy, purely for the read-only `-t`
 // config-syntax diagnostic below — see the file header for why the tool
 // never spawns httpd.exe itself to "recover" it.

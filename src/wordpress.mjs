@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { runWp, spawnCapture } from './wp.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 import { psCapture } from './win.mjs';
+import { yellow, WARN } from './ansi.mjs';
 
 const WP_DOWNLOAD_URL = 'https://wordpress.org/latest.tar.gz';
 
@@ -290,7 +291,7 @@ export async function writeMcpLoopbackGuard(publicDir, { onStep, verify = true }
     // Loud, not a step line: this is the control everything else defers to, and
     // the same standard protectProjectSecrets holds itself to.
     console.log(
-      `\n⚠ SECURITY: could not write the agent-API loopback guard (${err.message}).\n` +
+      `\n${yellow(WARN)} SECURITY: could not write the agent-API loopback guard (${err.message}).\n` +
         "  Without it this site's abilities pack (shell-exec, PHP-eval, filesystem write) is\n" +
         "  reachable from every network this machine joins by anyone holding the site's\n" +
         `  application password. Create ${dest} by hand, or keep this site off untrusted networks.\n`,
@@ -328,7 +329,7 @@ export async function verifyMcpLoopbackGuard(publicDir, { onStep } = {}) {
   }
   if (/LOADED/.test(probe.stdout)) return true;
   console.log(
-    '\n⚠ SECURITY: the agent-API loopback guard was written but WordPress is not loading it\n' +
+    `\n${yellow(WARN)} SECURITY: the agent-API loopback guard was written but WordPress is not loading it\n` +
       `  (checked with wp eval in ${publicDir}). The abilities pack may be reachable from this\n` +
       "  machine's network. Check that must-use plugins are enabled and that wp-config.php does\n" +
       `  not move WP_CONTENT_DIR away from ${join(publicDir, 'wp-content')}.\n`,

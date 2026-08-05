@@ -10,7 +10,9 @@ Laragon-native port of [katalystwp](https://github.com/soflyy/katalystwp).
 One command gives you: a site at `http://<name>.test` with its own database and dedicated
 MySQL user, permalinks working, the [Agent Connector](https://github.com/soflyy/agent-connector-for-wp)
 MCP gateway installed, MCP wiring for any AI agent CLI on your machine (Claude Code, Cursor,
-Codex, OpenCode), and a one-click already-logged-in wp-admin link.
+Codex, OpenCode) — **including a real browser the agent can drive, so it can look at the page
+it just built instead of assuming the markup is right** — and a one-click already-logged-in
+wp-admin link.
 
 ## Getting started (fresh machine)
 
@@ -56,6 +58,21 @@ Without `setup`, everything still works through the classic Laragon-reload flow 
 slower and occasionally needs `resume` after Laragon's flaky reload (the failure message
 walks you through it).
 
+**https, and why a site can show `http://`**
+
+A scaffolded site's **WordPress Address** may read `http://<name>.test`. That is not hardcoded
+and not something to fix by hand: `wp-config.php` derives `WP_HOME`/`WP_SITEURL` per request
+from the connection the site was reached over, so once an https vhost exists, loading
+`https://<name>.test` makes WordPress emit https URLs by itself — no search-replace, no config
+edit. What `http://` actually tells you is that SSL was not live at scaffold time, because
+`setup` only adds the https half of the wildcard vhost when Laragon's certificate pair exists
+(a vhost pointing at a missing certificate file is a hard Apache startup failure, which would
+take every site on the machine down with it).
+
+To turn it on: enable SSL in Laragon's menu, re-run `setup`, then — if it says the running
+Apache predates the conf — do the one-time **Stop All → Start All**. `doctor` reports TCP :443
+and whether the certificate pair is present, so this is visible rather than guesswork.
+
 **First scaffold — what to expect**
 
 - Confirmation prompt, then a UAC prompt for the hosts entry — approve it.
@@ -92,6 +109,11 @@ Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install
 auto-detected), `AGENTPRESS_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
 `AGENTPRESS_MYSQL_PORT` (when MySQL isn't on 3306), `AGENTPRESS_PREMIUM_PLUGINS_REPO` (see
 below). Legacy `KATALYST_*` names from before the rename are still honored.
+
+Output appearance: `AGENTPRESS_NO_BANNER=1` hides the wordmark header, and the standard
+`NO_COLOR=1` / `FORCE_COLOR=1` turn colour off / on. Colour and the banner are suppressed
+automatically when output isn't a terminal, so piping or redirecting any command gives you
+clean plain text.
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
@@ -159,14 +181,31 @@ private too — it holds your license key.
 ```
 
 Each site gets its own MySQL database and dedicated user (never root), its own vhost
-(Laragon auto-detects `public/` as the document root), and — if any AI agent CLIs are
-detected on the machine — MCP wiring to the site's WordPress REST API and a stdio Playwright
-server, plus a one-click already-logged-in `wp-admin` link via the Agent Connector plugin
-(always installed).
+(Laragon auto-detects `public/` as the document root), a one-click already-logged-in
+`wp-admin` link via the Agent Connector plugin (always installed), and — if any AI agent CLIs
+are detected on the machine — MCP wiring for every one of them.
+
+## Two MCP servers, wired automatically (one of them a browser)
+
+Every scaffold configures **both** of these for every detected agent CLI (Claude Code, Cursor,
+Codex, OpenCode). There is no separate install step: both run over stdio via `npx`, at versions
+this tool pins deliberately.
+
+- **`wordpress`** — the site's own REST API, authenticated with a dedicated WordPress
+  application password. Read and write posts and pages, run site queries; with Oxygen installed,
+  the builder's own tools show up here too.
+- **`playwright`** — browser automation. The agent can load the scaffolded site in a real
+  browser, click through it, and screenshot it, so it can check its own work visually instead of
+  assuming the markup it wrote looks right.
+
+Confirm both after your first scaffold with `claude mcp list` (or your agent's equivalent —
+`codex mcp list`; Cursor and OpenCode list them in their own settings). Both should report
+**Connected**. Each one's first launch is slow while `npx` fetches the server package.
 
 **Note:** the MCP wiring is machine-global (one `wordpress` entry per agent CLI), so it always
 points at the **most recently scaffolded** site. Scaffolding a second site re-points it;
-destroying an old site leaves a newer site's wiring alone.
+destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever URL it
+is given, so it never needs re-pointing.)
 
 ## Architecture
 
@@ -229,3 +268,26 @@ asks for a UAC prompt.
   hooks didn't make it into this port.
 - **Agent CLIs are detected, never installed.** If a selected agent isn't found on PATH, the
   tool skips MCP wiring for it.
+
+## Known issues (upstream)
+
+Bugs in third-party software, not properties of this tool — a vendor fix ends them, so check
+your own version before assuming what's below still applies.
+
+- **Oxygen 6.2.0-beta.2: the builder's `html-to-page` MCP tool can't parse its input.** The
+  WordPress MCP server names `html-to-page` as the preferred way to build a page, so it's the
+  first thing an agent reaches for — and on this build it fails on even trivial input
+  (`<p>Hello world</p>`, and plain text with no tags at all). Workaround: build with `edit-post`
+  plus `insert-stylesheet`, which work fine. That isn't a hack around the tooling: the same
+  server documents those two as the route for fine-grained edits and for anything `html-to-page`
+  can't express, so it's a supported path, just a lower-level one.
+
+  You can land on a beta without opting in to one: every scaffold ends with
+  `wp plugin update --all` (see `src/plugins.mjs`) so plugins come out current, and that takes
+  whatever the vendor's licensed update feed is serving for the Oxygen family at that moment —
+  including a beta, if that's what it offers. Check what you actually have from the site's
+  folder (or in wp-admin ▸ Plugins):
+
+  ```bash
+  wp plugin list --name=oxygen
+  ```

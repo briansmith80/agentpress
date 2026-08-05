@@ -65,6 +65,13 @@ export async function mintAdminLoginUrl({ path, hostname, scheme = 'http' }) {
       const url = new URL(out);
       url.hostname = hostname;
       url.port = '';
+      // The scheme has to be forced too, not just the host. WP-CLI runs with no
+      // $_SERVER['HTTPS'], so wp-config.php's per-request WP_HOME resolves to
+      // http:// and the minted link comes back http even on an https site.
+      // Following that link then makes WordPress report http:// back to itself
+      // — which is exactly why a scaffolded https site showed "http://" as its
+      // WordPress Address in Settings → General.
+      url.protocol = `${scheme}:`;
       return url.toString();
     } catch {
       // fall through to the plain login form
