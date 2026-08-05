@@ -51,9 +51,12 @@ if (!existsSync(ENV_PATH)) {
   process.exit(1);
 }
 
+// Split on either line ending: a CRLF-normalised .env (a Notepad "save") made
+// every line fail this match — `.` never matches `\r`, and `$` is not in
+// multiline mode — leaving the menu with an empty env and no site host.
 function parseEnv(text) {
   const out = {};
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
     if (m) out[m[1]] = m[2];
   }

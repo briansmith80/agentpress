@@ -233,15 +233,105 @@ export async function findVhostForProject(projectDir) {
 }
 
 export async function hostsHasEntry(hostname) {
+  return (await hostsEntryAddresses(hostname)).length > 0;
+}
+
+/**
+ * The vhost that CLAIMS `hostname` (its `define SITE`), whatever project it
+ * points at — the counterpart to findVhostForProject, which searches by ROOT.
+ *
+ * Needed because a loopback hosts entry is no longer treated as a collision
+ * (see names.mjs): the entry used to be a blunt proxy for "this hostname is
+ * already in use", and dropping it would otherwise let a scaffold proceed to a
+ * hostname some other project's exact vhost already serves — where Apache's
+ * first-match order means the new site is silently shadowed, and the only
+ * symptom is a probe timeout with misleading advice. This tests the real
+ * condition instead of the proxy.
+ */
+export async function findVhostForHostname(hostname) {
+  const needle = hostname.toLowerCase();
+  let files;
   try {
-    const content = await readFile(HOSTS_PATH, 'utf8');
-    const needle = hostname.toLowerCase();
-    return content
-      .split('\n')
-      .some((line) => line.toLowerCase().split(/\s+/).includes(needle) && !line.trim().startsWith('#'));
+    files = await readdir(SITES_ENABLED_APACHE);
   } catch {
-    return false;
+    return null;
   }
+  for (const f of files) {
+    if (!f.toLowerCase().endsWith('.conf')) continue;
+    const full = join(SITES_ENABLED_APACHE, f);
+    let content;
+    try {
+      content = await readFile(full, 'utf8');
+    } catch {
+      continue;
+    }
+    // `define SITE` is Laragon's own format, but a hand-written conf declares
+    // its hostname with a bare ServerName — and that conf claims the hostname
+    // just as effectively, so matching only Laragon's format would miss exactly
+    // the confs a user wrote themselves. Wildcard ServerNames (the wildcard
+    // vhost's own `*.test`) are deliberately not matched: they claim everything
+    // and would block every scaffold.
+    const siteMatch = content.match(/define\s+SITE\s+"([^"]+)"/i);
+    const declared = siteMatch
+      ? [siteMatch[1]]
+      : [...content.matchAll(/^\s*ServerName\s+([^\s:]+)/gim)].map((mm) => mm[1]).filter((h) => !h.includes('*'));
+    if (!declared.some((h) => h.toLowerCase() === needle)) continue;
+    const rootMatch = content.match(/define\s+ROOT\s+"([^"]+)"/i);
+    return { file: full, filename: f, hostname: declared.find((h) => h.toLowerCase() === needle), root: rootMatch ? rootMatch[1] : null };
+  }
+  return null;
+}
+
+/**
+ * Which addresses hosts currently maps `hostname` to, from uncommented lines
+ * only (empty = no entry). Callers need the ADDRESS, not just presence: a
+ * `127.0.0.1` entry is exactly what a scaffold wants and can be adopted, while
+ * an entry pointing anywhere else (`0.0.0.0` from an ad-blocking hosts list, a
+ * LAN address) would make the new site unreachable and has to be reported.
+ *
+ * Trailing comments are stripped before tokenising — every entry this tool or
+ * Laragon writes carries one (`#agentpress`, `#laragon magic!`) — and the first
+ * token is skipped, since that field is the address, never a hostname.
+ */
+export async function hostsEntryAddresses(hostname) {
+  try {
+    return hostsContentEntryAddresses(await readFile(HOSTS_PATH, 'utf8'), hostname);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The single definition of "this hosts file maps that hostname", operating on
+ * already-read content so every caller shares one answer.
+ *
+ * There are three presence checks in this codebase (here, wildcard.mjs's
+ * pre/post-write gate, and the elevated PowerShell script), and they MUST agree:
+ * when they drifted, a hostname appearing only inside another line's trailing
+ * comment counted as present for one and absent for another, so the scaffold
+ * both skipped writing the entry and reported the site live.
+ */
+export function hostsContentEntryAddresses(content, hostname) {
+  const needle = String(hostname || '').toLowerCase();
+  const found = [];
+  if (!needle) return found;
+  for (const line of String(content).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    // Strip trailing comments — every entry this tool or Laragon writes carries
+    // one (`#agentpress`, `#laragon magic!`) — and skip token 0, which is the
+    // address field and can never be a hostname.
+    const tokens = trimmed.split('#')[0].trim().toLowerCase().split(/\s+/);
+    if (tokens.length < 2) continue;
+    if (tokens.slice(1).includes(needle)) found.push(tokens[0]);
+  }
+  return found;
+}
+
+/** 127.0.0.0/8 and IPv6 loopback, in the spellings a hosts file realistically carries. */
+export function isLoopbackAddress(address) {
+  const a = String(address || '').toLowerCase();
+  return a === '::1' || a === '0:0:0:0:0:0:0:1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
 }
 
 /**

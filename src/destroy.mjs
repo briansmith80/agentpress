@@ -13,9 +13,15 @@ import { runWp } from './wp.mjs';
 import { psRun } from './win.mjs';
 import { WWW_DIR } from './paths.mjs';
 
+/**
+ * Split on either line ending — see engine.js's copy. A CRLF-normalised .env
+ * made every line fail this match, and an EMPTY env here silently downgraded
+ * destroy to "no database recorded in .env": the DB and its user survived a
+ * teardown that reported success.
+ */
 function parseEnvFile(text) {
   const out = {};
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
     if (m) out[m[1]] = m[2];
   }

@@ -54,10 +54,33 @@ references are given so you don't have to take our word for it.
 
 - **Scaffolded sites carry the Agent Connector abilities pack** — shell-exec, PHP-eval and
   filesystem write, available to an authenticated administrator. That capability *is* the
-  product for an AI-agent dev site. It is contained rather than removed: each site's
-  `public/.htaccess` restricts the `/wp-json/mcp/` route to loopback, so those abilities are
-  reachable only from the machine the agents run on. Deleting those three lines re-exposes them
-  to every network the machine joins.
+  product for an AI-agent dev site. It is contained rather than removed: requests from a
+  non-loopback address are rejected with a 403 on **both** REST namespaces that reach those
+  abilities — `mcp/…` (the Agent Connector's MCP adapter) and `wp-abilities/…` (WordPress
+  core's own Abilities API, which every ability opts into via `show_in_rest`). Covering only
+  `mcp/` is the trap here: `POST /wp-json/wp-abilities/v1/abilities/…/shell-exec/run` reaches
+  shell-exec without touching an MCP route at all.
+
+  Two layers enforce it, and they are not equal:
+  - `public/wp-content/mu-plugins/agentpress-mcp-loopback-guard.php` is the control that
+    actually holds. It filters `rest_pre_dispatch` and tests **WordPress's own resolved
+    route**, so it cannot be walked around by re-spelling the URL. Deleting this file
+    re-exposes the abilities pack to every network the machine joins.
+  - the marked block in `public/.htaccess` blocks the known URL shapes at Apache, before PHP
+    loads. Defence in depth *only*, and we can say precisely why it is not sufficient: Apache
+    decodes the request **path** before those conditions run, but never the **query string**,
+    so `?rest_route=%2Fmcp%2Fx` matches nothing there while PHP still hands WordPress a
+    decoded `/mcp/x` and the route resolves normally (verified live). Removing this block
+    alone does not re-expose anything — the mu-plugin still rejects every shape — but it
+    removes the layer that stops those requests before PHP runs.
+
+  **History, stated plainly:** from v1.1.0 up to and including v1.3.0 the rewrite was the only
+  layer, it matched `REQUEST_URI ^/wp-json/mcp/` only, and it was therefore bypassable via
+  `?rest_route=/mcp/…` and `/index.php/wp-json/mcp/…`; the `wp-abilities/…` namespace was not
+  covered at all. Both gaps were found by audit and fixed in v1.4.0.
+
+  Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
+  `npx create-agentpress@latest update` from inside that site's folder to add both.
 - **Codex's MCP wiring still puts the application password on a command line.** Claude, Cursor
   and OpenCode configs are written directly as JSON, so the credential never reaches an argv.
   Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the

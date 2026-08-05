@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { HOSTS_PATH, SITES_ENABLED_APACHE, WWW_DIR } from './paths.mjs';
 import { psCapture } from './win.mjs';
-import { inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
+import { hostsContentEntryAddresses, inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
 
 export const WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-agentpress-wildcard.conf');
 const LEGACY_WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-katalyst-wildcard.conf'); // pre-rename installs
@@ -166,11 +166,16 @@ export async function wildcardActive({ tls = false } = {}) {
   }
 }
 
+/**
+ * Shared with findCollisions and (in spirit) the elevated script, so all three
+ * presence checks agree. The previous local copy tokenised the whole line
+ * including trailing comments, so a hostname mentioned in another line's
+ * comment ("# was blog.test, retired") read as already-present here while
+ * findCollisions read it as absent — ensureHostsEntry then skipped the write
+ * and reported "already present" for a hostname that resolved nowhere.
+ */
 function hostsHas(content, hostname) {
-  const needle = hostname.toLowerCase();
-  return content
-    .split('\n')
-    .some((line) => !line.trim().startsWith('#') && line.toLowerCase().split(/\s+/).includes(needle));
+  return hostsContentEntryAddresses(content, hostname).length > 0;
 }
 
 /**
@@ -186,11 +191,24 @@ export async function ensureHostsEntry(hostname) {
   if (!/^[a-z0-9.-]+$/i.test(hostname)) return { ok: false, reason: `refusing to write suspicious hostname "${hostname}"` };
 
   await snapshotHosts().catch(() => {});
+  // The presence re-check inside the elevated script must be TOKEN-EXACT, the
+  // same test hostsHas() does. It used to be `-notmatch [regex]::Escape($name)`,
+  // a substring match: with myblog.test already in hosts, scaffolding "blog"
+  // found "blog.test" inside "myblog.test", skipped the write, and the caller —
+  // which re-reads hosts and correctly finds no entry — then reported "the
+  // elevation prompt was declined", which was false and no retry could fix.
   const script = [
     "$hosts = Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts'",
-    `$name = '${hostname}'`,
-    '$content = Get-Content -Path $hosts -Raw -ErrorAction SilentlyContinue',
-    'if ($content -notmatch [regex]::Escape($name)) {',
+    `$name = '${hostname}'.ToLower()`,
+    '$present = $false',
+    'foreach ($line in @(Get-Content -Path $hosts -ErrorAction SilentlyContinue)) {',
+    '  $text = $line.Trim()',
+    "  if ($text -eq '' -or $text.StartsWith('#')) { continue }",
+    "  $tokens = @(($text -split '#')[0].ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
+    // Skip token 0: that field is the address, never a hostname.
+    '  if ($tokens.Count -ge 2 -and ($tokens[1..($tokens.Count - 1)] -contains $name)) { $present = $true }',
+    '}',
+    'if (-not $present) {',
     "  Add-Content -Path $hosts -Value (\"`r`n127.0.0.1`t\" + $name + \"`t#agentpress\") -NoNewline:$false",
     '}',
     'exit 0',
@@ -209,7 +227,10 @@ export async function ensureHostsEntry(hostname) {
       await flushDnsCache();
       return { ok: true, already: false };
     }
-    return { ok: false, reason: (result.stderr || 'the elevation prompt was declined or the write failed').trim().split('\n')[0] };
+    return {
+      ok: false,
+      reason: (result.stderr || 'the elevation prompt was declined, or the file is read-only / locked by another program').trim().split('\n')[0],
+    };
   } finally {
     await rm(tmp, { force: true }).catch(() => {});
   }
