@@ -1147,6 +1147,19 @@ async function rewireCommand() {
     bail(`${red(BAD)} No .env here — run rewire from inside a scaffolded site's directory.`);
     return;
   }
+  // Same gate `update` and `destroy` enforce. Without it, rewire would run in
+  // any folder holding a .env and a public\ — minting a credential and pointing
+  // every agent CLI at whatever that folder's SITE_HOST claimed. It failed
+  // safely (wp-cli refuses a non-WordPress path) but only after printing a
+  // confusing "check wp-admin" warning about a site that does not exist.
+  if (!(await isAgentPressSiteDir(cwd))) {
+    bail(
+      `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\agentpress.mjs — it does\n` +
+        '  not look like a site this tool created, so rewire will not touch it.\n' +
+        `  (Currently in: ${cwd})`,
+    );
+    return;
+  }
   if (!(await fileExists(join(cwd, 'public')))) {
     bail(`${red(BAD)} No public\\ folder here — this does not look like a scaffolded site.`);
     return;
@@ -1154,6 +1167,14 @@ async function rewireCommand() {
   const hostname = env.SITE_HOST;
   if (!hostname) {
     bail(`${red(BAD)} This site's .env has no SITE_HOST, so there is no endpoint to point agents at.`);
+    return;
+  }
+  // .env is not trusted input here — it can be hand-edited or arrive copied
+  // from someone else's project, and this value is interpolated into a URL that
+  // gets written into every agent's config. Validate, don't sanitise (the same
+  // stance the frozen site menu and ensureHostsEntry already take).
+  if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i.test(hostname)) {
+    bail(`${red(BAD)} Refusing to use SITE_HOST "${hostname}" from .env — that is not a valid hostname.`);
     return;
   }
 
@@ -1201,11 +1222,7 @@ async function updateProject({ yes }) {
   // A bare .env is far too common to be the only gate — `update --yes` in
   // any random Node project with a .env used to gut its package.json and
   // overwrite README/.gitignore. Require an actual katalyst marker.
-  const isAgentPressSite =
-    (await fileExists(join(cwd, 'sandbox.config.json'))) ||
-    (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
-    (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))); // pre-rename sites
-  if (!isAgentPressSite) {
+  if (!(await isAgentPressSiteDir(cwd))) {
     bail(
       `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\katalyst.mjs — it does not\n` +
         '  look like a agentpress site, so update will not touch it.',
@@ -1276,11 +1293,7 @@ async function destroyCommand({ yes }) {
   // database — must be at least as strict. Both checks are enforced even
   // under --yes, because this tool is routinely driven by agent CLIs that
   // pass --yes by default.
-  const isAgentPressSite =
-    (await fileExists(join(cwd, 'sandbox.config.json'))) ||
-    (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
-    (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))); // pre-rename sites
-  if (!isAgentPressSite) {
+  if (!(await isAgentPressSiteDir(cwd))) {
     bail(
       `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\agentpress.mjs — it does\n` +
         '  not look like a site this tool created, so destroy will not touch it.\n' +
@@ -1332,6 +1345,22 @@ async function destroyCommand({ yes }) {
       (result.hostname ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
+}
+
+/**
+ * Does this directory actually look like a site WE made? A bare `.env` is
+ * nowhere near enough — a typical Laragon www\ holds dozens of unrelated
+ * projects with one. Every command that acts on "the site I am standing in"
+ * must agree on this, so it lives in one place: `update` (which overwrites
+ * tooling files), `destroy` (which deletes a tree and drops a database) and
+ * `rewire` (which mints a credential and takes machine-global state).
+ */
+async function isAgentPressSiteDir(cwd) {
+  return (
+    (await fileExists(join(cwd, 'sandbox.config.json'))) ||
+    (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
+    (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))) // pre-rename sites
+  );
 }
 
 async function fileExists(p) {
