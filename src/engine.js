@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { banner, cyan, green, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
+import { banner, cyan, dim, green, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
 import { runDoctor } from './doctor.mjs';
 import { AGENTPRESS_HOME, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
