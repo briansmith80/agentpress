@@ -23,7 +23,12 @@ conversation:
 
 - WordPress version, PHP version, site host (`site-info`)
 - Oxygen version and active theme
-- How many abilities are registered
+- **How many tools the `wordpress` MCP server exposes to you** — i.e. the number
+  in your own tool list for that server, not a count from a REST endpoint or
+  `wp_get_abilities()`. Those give different answers (37 / 48 / 52 on one site),
+  because they count different things. The tool count is the one that matters:
+  it is what you can actually call, and `agentpress rewire` reports the same
+  number, so the page and the CLI agree.
 
 ## 3. Build the page
 
@@ -45,7 +50,9 @@ Load the site with Playwright and screenshot it. Then actually check the result:
 - Every row must show a real value. A `{{PLACEHOLDER}}` left on the page means
   you skipped a measurement.
 
-Take the screenshot but do not save it into the site; it is proof, not content.
+Playwright writes the screenshot to a file. It is proof, not content, so delete
+it once you have looked at it — a stray PNG in the project root is litter, and
+in the site folder it would be publicly served.
 
 ## 5. Report
 
@@ -83,7 +90,7 @@ and give the user the site URL.
 <div class="ap-row"><span class="ap-key">PHP</span><span class="ap-val">{{PHP_VERSION}}</span></div>
 <div class="ap-row"><span class="ap-key">Oxygen Builder</span><span class="ap-val">{{OXYGEN_VERSION}}</span></div>
 <div class="ap-row"><span class="ap-key">Theme</span><span class="ap-val">{{THEME}}</span></div>
-<div class="ap-row"><span class="ap-key">Abilities registered</span><span class="ap-val">{{ABILITIES}}</span></div>
+<div class="ap-row"><span class="ap-key">MCP tools available</span><span class="ap-val">{{MCP_TOOLS}}</span></div>
 <div class="ap-row"><span class="ap-key">Site</span><span class="ap-val">{{SITE_HOST}}</span></div>
 <p class="ap-exit">exit 0 — all checks passed</p>
 </section>
