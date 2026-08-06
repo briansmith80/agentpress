@@ -7,3 +7,6 @@ Thumbs.db
 .env
 *.zip
 .katalyst.lock
+
+# Playwright MCP scratch output
+.playwright-mcp/

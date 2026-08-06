@@ -1,7 +1,10 @@
 # Planning & TODO
 
 > **Active plan: "make every scaffolded site prove itself"** (below). Written 2026-08-06.
-> Nothing in it is built yet.
+>
+> **Progress:** Phase 1 (Oxygen patcher) and Phase 3 (`AGENTS.md` + `/verify`) are **built,
+> tested and committed — but NOT published and NOT yet run end to end by the operator.**
+> Phase 2 was **cancelled**: see "What changed while building" below. Nothing is on npm.
 >
 > Items 2–5 of the previous plan shipped in **v1.3.0**; they're summarised at the bottom with
 > the durable lessons only. The full 575-line text is preserved in git —
@@ -22,6 +25,30 @@ makes the next one worth doing.
 
 Sequenced deliberately: **Phase 1 is independently useful and ships alone.** It is the only
 part that is actively broken for every user today.
+
+## What changed while building (2026-08-06)
+
+Three corrections to the plan below, all of them simplifications. Recorded so the
+reasoning isn't lost:
+
+- **Phase 2 cancelled.** It proposed a CLI-built placeholder page *plus* an agent-built
+  verified one, then asked "how do we stop them drifting?" — a question that only existed
+  because of the second generator. The interesting rows are agent-only anyway, so the CLI's
+  page would have been the boring half of the same artifact, dragging in a shortcode, a
+  mu-plugin, an unverified "does Oxygen Text render shortcodes" dependency, a non-Oxygen
+  fallback, and a parity test. **One generator: the agent.** Cost: a site where no agent is
+  ever opened keeps WordPress's default homepage — i.e. exactly today's behaviour.
+- **Live-vs-snapshot became moot.** With one generator, `/verify` regenerates on demand, so
+  the page is a timestamped report that refreshes when re-run. No PHP shipped into sites.
+- **The procedure does NOT live in `AGENTS.md`.** `AGENTS.md` is read every session;
+  `/verify` runs occasionally. Putting a numbered procedure with an HTML payload in the
+  always-loaded file was wrong. `AGENTS.md` holds only what an agent gets wrong without it
+  (40 lines, test-enforced); the procedure is lazy-loaded and can be as long as it needs.
+
+Also decided: `AGENTS.md` only (no `CLAUDE.md` duplicate — Claude Code reads `AGENTS.md`,
+and it is the cross-agent convention), and `/verify` only (no speculative `/audit`,
+`/new-page`; the pattern is established and each future command costs one file when
+genuinely wanted).
 
 ## Decisions taken (2026-08-06)
 

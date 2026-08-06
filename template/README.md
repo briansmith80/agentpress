@@ -17,6 +17,15 @@ npm run wp -- <command...>   # WP-CLI, e.g. npm run wp -- plugin list
 WordPress core lives in `public/` (that's Laragon's document root for this project —
 everything else here is AgentPress's own tooling, not part of the site).
 
+## Working with an AI agent here
+
+Open this folder in Claude Code (or any agent that reads `AGENTS.md`) and it picks up how
+this site is put together, including a few Oxygen behaviours that otherwise fail silently.
+
+Run **`/verify`** to check the whole stack end to end — both MCP servers, Oxygen, and the
+Agent Connector abilities — and build a holding page recording what passed. Worth doing on
+day one, and again any time MCP starts returning 401.
+
 ## Files
 
 - `.env` — DB credentials, admin credentials, site hostname. Gitignored.
@@ -25,6 +34,9 @@ everything else here is AgentPress's own tooling, not part of the site).
 - `sandbox.config.json` — plugins/agents this site was scaffolded with.
 - `scripts/agentpress.mjs` — the menu above. Frozen at scaffold time; refreshed only by the
   `update` command below, which never touches your site, database, or `.env`.
+- `AGENTS.md` — what an AI agent needs to know about this site. Yours to edit.
+- `.claude/commands/verify.md` — the `/verify` procedure. Any agent can read it, not just
+  Claude Code.
 - `public/` — WordPress core + your content.
 
 ## Updating AgentPress's own tooling
@@ -38,11 +50,19 @@ npx create-agentpress@latest update
 (Using a git checkout of the tool instead? `git pull` there, then run
 `node <path-to-checkout>\index.js update` from here.)
 
-Refreshes `scripts/`, `wp-cli.yml`, `.gitignore`, this README, and `package.json`'s own
-scripts (any script you added under a different name is preserved, and so are any
-dependencies you added). Never touches `.env` or `sandbox.config.json`. The one thing it
-writes under `public/` is the agent-API loopback guard, which is a file AgentPress owns. If
-you hand-edited `.gitignore` or this README, re-apply those edits after updating.
+Refreshes `scripts/`, `wp-cli.yml`, `.gitignore`, `AGENTS.md`, `.claude/`, this README, and
+`package.json`'s own scripts (any script you added under a different name is preserved, and
+so are any dependencies you added). Never touches `.env` or `sandbox.config.json`. If you
+hand-edited `.gitignore`, `AGENTS.md` or this README, re-apply those edits after updating.
+
+Two things it writes under `public/`, and nothing else:
+
+- the agent-API loopback guard — a file AgentPress owns outright;
+- a one-line fix to Oxygen's `html-to-page`, which otherwise fails on every input on
+  PHP builds using libxml 2.10 or newer. This is a patch to a third-party plugin, so it
+  is applied only when the exact known-broken line is present, the original is kept
+  beside it as `html-to-page.php.agentpress-bak`, and the change is commented in place.
+  If Oxygen ships its own fix, AgentPress leaves the file alone.
 
 ## When the AI agents can't see this site
 

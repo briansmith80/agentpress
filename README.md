@@ -1,18 +1,24 @@
-  
+<img src="docs/wordmark.svg" alt="AgentPress" width="360">
 
-# AgentPress
+**AI-agent-ready WordPress sites on Windows, in one command.**
 
-Scaffold **AI-agent-ready WordPress sites** on [Laragon](https://laragon.org) (native
-Windows: Apache + MySQL + PHP + Node, no Docker) — instant zero-reload vhosts, https,
-premium plugin auto-install with licensing, and MCP wiring for AI agent CLIs. Started as a
-Laragon-native port of [katalystwp](https://github.com/soflyy/katalystwp).
+[![npm](https://img.shields.io/npm/v/create-agentpress?color=ff2d78&labelColor=15181d)](https://www.npmjs.com/package/create-agentpress)
+[![license](https://img.shields.io/badge/license-GPL--2.0--or--later-ff2d78?labelColor=15181d)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%20+%20Laragon-ff2d78?labelColor=15181d)](https://laragon.org)
 
-One command gives you: a site at `http://<name>.test` with its own database and dedicated
-MySQL user, permalinks working, the [Agent Connector](https://github.com/soflyy/agent-connector-for-wp)
-MCP gateway installed, MCP wiring for any AI agent CLI on your machine (Claude Code, Cursor,
-Codex, OpenCode) — **including a real browser the agent can drive, so it can look at the page
-it just built instead of assuming the markup is right** — and a one-click already-logged-in
-wp-admin link.
+```bash
+npx create-agentpress@latest my-site
+```
+
+That gives you a WordPress site at `https://my-site.test` with its own database and
+dedicated MySQL user, permalinks working, premium plugins installed and licensed — and
+**your AI agent already wired to it**, able to build pages through the
+[Agent Connector](https://github.com/soflyy/agent-connector-for-wp) and then open the site
+in a real browser to check what it built.
+
+No Docker, no containers, nothing to `npm install`. Native [Laragon](https://laragon.org)
+on Windows: Apache + MySQL + PHP + Node. Started as a Laragon-native port of
+[katalystwp](https://github.com/soflyy/katalystwp).
 
 ## Getting started (fresh machine)
 
@@ -176,6 +182,9 @@ private too — it holds your license key.
     .user.ini           per-site PHP limits (mod_fcgid ignores .htaccess php_value)
   scripts\
     agentpress.mjs       the per-site menu (npm run agentpress) — frozen, dependency-free
+  .claude\commands\
+    verify.md            the /verify procedure — readable by any agent, not just Claude Code
+  AGENTS.md              what an AI agent needs to know about this site
   .env                   DB + admin credentials + site hostname (gitignored)
   sandbox.config.json    plugins/agents this site was scaffolded with
   package.json  README.md  wp-cli.yml  .gitignore
@@ -202,6 +211,24 @@ this tool pins deliberately.
 Confirm both after your first scaffold with `claude mcp list` (or your agent's equivalent —
 `codex mcp list`; Cursor and OpenCode list them in their own settings). Both should report
 **Connected**. Each one's first launch is slow while `npx` fetches the server package.
+
+### `/verify` — make the site prove it
+
+Every scaffolded site gets an `AGENTS.md` and a `/verify` command. Open the folder in your
+agent and run it: it calls the WordPress MCP tools, drives Playwright to load the site, checks
+the Agent Connector abilities, and then builds a holding page recording exactly what passed
+and when.
+
+That is worth more than a green tick in a config listing, because **only the agent can test
+the agent's path**. `claude mcp list` says an entry exists; `/verify` says the credential still
+works, the endpoint answers, and the browser really opened the page. It is also the fastest
+way to diagnose the common failure below — if MCP has been repointed at another site, `/verify`
+stops immediately and tells you to run `rewire`.
+
+`AGENTS.md` is the other half, and it earns its place between verifications: it carries the
+handful of Oxygen behaviours that otherwise fail *silently* (bare CSS tag selectors are
+dropped, `@media` queries must match `get-breakpoints` verbatim, undefined classes vanish).
+Both files are plain markdown in the site, yours to edit.
 
 **Note:** the MCP wiring is machine-global (one `wordpress` entry per agent CLI), so it always
 points at the **most recently scaffolded** site. Scaffolding a second site re-points it;
@@ -290,19 +317,23 @@ asks for a UAC prompt.
 Bugs in third-party software, not properties of this tool — a vendor fix ends them, so check
 your own version before assuming what's below still applies.
 
-- **Oxygen 6.2.0-beta.2: the builder's `html-to-page` MCP tool can't parse its input.** The
-  WordPress MCP server names `html-to-page` as the preferred way to build a page, so it's the
-  first thing an agent reaches for — and on this build it fails on even trivial input
-  (`<p>Hello world</p>`, and plain text with no tags at all). Workaround: build with `edit-post`
-  plus `insert-stylesheet`, which work fine. That isn't a hack around the tooling: the same
-  server documents those two as the route for fine-grained edits and for anything `html-to-page`
-  can't express, so it's a supported path, just a lower-level one.
+- **Oxygen 6.2.0-beta.2: `html-to-page` cannot parse any input — AgentPress patches this for
+  you.** The builder wraps your HTML with a leading `<meta charset>` and parses it with
+  `LIBXML_HTML_NOIMPLIED`; on libxml 2.10 and newer that combination raises a spurious
+  "Memory allocation failed", so the parse returns nothing and *every* input fails, including
+  plain text with no tags. Since the WordPress MCP server names `html-to-page` as the
+  preferred way to build a page, it is the first thing an agent reaches for.
 
-  You can land on a beta without opting in to one: every scaffold ends with
-  `wp plugin update --all` (see `src/plugins.mjs`) so plugins come out current, and that takes
-  whatever the vendor's licensed update feed is serving for the Oxygen family at that moment —
-  including a beta, if that's what it offers. Check what you actually have from the site's
-  folder (or in wp-admin ▸ Plugins):
+  Each scaffold applies a one-line fix (an XML encoding declaration instead of the meta tag),
+  after the plugin update step so a vendor build cannot undo it. `update` applies it to
+  existing sites too. It only ever touches the exact known-broken line, keeps the original as
+  `html-to-page.php.agentpress-bak`, and leaves the file alone entirely once Oxygen ships
+  their own fix. To skip it, use `--premium=none` or remove Oxygen.
+
+  Worth knowing regardless: you can land on a beta without opting in to one. Every scaffold
+  ends with `wp plugin update --all` (see `src/plugins.mjs`), which takes whatever the
+  vendor's licensed update feed is serving for the Oxygen family at that moment. Check what
+  you actually have from the site's folder (or in wp-admin ▸ Plugins):
 
   ```bash
   wp plugin list --name=oxygen
