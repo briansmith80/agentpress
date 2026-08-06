@@ -46,8 +46,13 @@ conversation:
 
 ## 3. Build the page
 
-Create a page titled **Home**, pass the HTML below to `html-to-page`, and set it
-as the site's front page.
+**Reuse the existing page if there is one** — look for a page with the slug
+`home` and clear its Oxygen tree before rebuilding, rather than adding a second
+one. This command is meant to be re-run (after `rewire`, after a PHP change),
+and creating a fresh "Home" each time would leave a pile of near-identical
+drafts behind. Only create the page if none exists.
+
+Then pass the HTML below to `html-to-page` and set that page as the front page.
 
 Substitute every `{{PLACEHOLDER}}` with a value you actually measured. Use
 today's date for `{{DATE}}`. Keep the markup and classes exactly as written —
@@ -98,16 +103,16 @@ give the user the site URL.
 <h1 class="ap-head">$ site under construction</h1>
 <p class="ap-sub">WordPress + Oxygen + Agent Connector + Laragon — building now</p>
 <section class="ap-card">
-<p class="ap-cmd">$ ./check-status.sh</p>
-<div class="ap-row"><span class="ap-key">WordPress MCP</span><span class="ap-ok">● verified {{DATE}}</span></div>
-<div class="ap-row"><span class="ap-key">Playwright MCP</span><span class="ap-ok">● verified {{DATE}}</span></div>
+<p class="ap-cmd">$ /verify</p>
+<div class="ap-row"><span class="ap-key">WordPress MCP</span><span class="ap-ok">● verified</span></div>
+<div class="ap-row"><span class="ap-key">Playwright MCP</span><span class="ap-ok">● verified</span></div>
 <div class="ap-row"><span class="ap-key">WordPress</span><span class="ap-val">{{WP_VERSION}}</span></div>
 <div class="ap-row"><span class="ap-key">PHP</span><span class="ap-val">{{PHP_VERSION}}</span></div>
 <div class="ap-row"><span class="ap-key">Oxygen Builder</span><span class="ap-val">{{OXYGEN_VERSION}}</span></div>
 <div class="ap-row"><span class="ap-key">Theme</span><span class="ap-val">{{THEME}}</span></div>
 <div class="ap-row"><span class="ap-key">MCP tools available</span><span class="ap-val">{{MCP_TOOLS}}</span></div>
 <div class="ap-row"><span class="ap-key">Site</span><span class="ap-val">{{SITE_HOST}}</span></div>
-<p class="ap-exit">exit 0 — all checks passed</p>
+<p class="ap-exit">exit 0 — all checks passed · {{DATE}}</p>
 </section>
 </section>
 ```
