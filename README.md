@@ -10,7 +10,7 @@
 npx create-agentpress@latest my-site
 ```
 
-That gives you a WordPress site at `https://my-site.test` with its own database and
+That gives you a WordPress site at `my-site.test` with its own database and
 dedicated MySQL user, permalinks working, premium plugins installed and licensed — and
 **your AI agent already wired to it**, able to build pages through the
 [Agent Connector](https://github.com/soflyy/agent-connector-for-wp) and then open the site
@@ -95,7 +95,7 @@ with `git pull`.
 from a git checkout):
 
 ```bash
-… <name>              # scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
+… <name>              # scaffold a WordPress site at <name>.test (or your Laragon suffix)
 … setup                # one-time: enable instant scaffolds (no Laragon reloads)
 … resume <name>        # finish an interrupted scaffold
 … doctor               # check this machine's Laragon/PHP/MySQL/Node state
@@ -108,8 +108,9 @@ from a git checkout):
 … destroy              # permanently remove the site
 
 # flags
-… my-site --plugins=akismet,seo-by-rank-math
-… my-site --yes        # non-interactive (skips the confirmation prompt)
+… my-site --plugins=akismet,seo-by-rank-math   # extra wordpress.org plugins
+… my-site --premium=all|none|oxygen,…          # which premium plugins this site gets
+… my-site --yes        # non-interactive (skips the confirmation prompt; implies --premium=all)
 ```
 
 Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install folder if not
@@ -262,16 +263,20 @@ Source lives in `src/`, one module per concern:
 | `wordpress.mjs`                    | core download/extract (bypasses a broken`wp core download` on Windows), `wp-config.php`, permalinks  |
 | `plugins.mjs`                      | plugin install/activate, the Agent Connector pair, premium plugin sync/install                           |
 | `junctions.mjs`                    | the sibling-checkout → wp-content workflow, junction-safe directory removal                             |
-| `mcp.mjs` / `admin-login.mjs`    | MCP server config per agent, the one-click login mint                                                    |
+| `mcp.mjs` / `admin-login.mjs`    | MCP server config per agent, endpoint verification, the one-click login mint                             |
+| `wildcard.mjs`                     | instant mode — the one wildcard vhost, http + https, and the probes that prove it is live                |
+| `doctor.mjs` / `ansi.mjs`        | the environment report, and the colour/glyph/wordmark layer it prints through                            |
 | `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine                                             |
 | `destroy.mjs` / `quickapp.mjs`   | teardown, the Laragon Quick app registration                                                             |
 
-`template/` is the payload copied into every scaffolded project — most notably
-`template/scripts/agentpress.mjs`, which is **frozen at scaffold time** and dependency-free by
-design (no npm installs needed to run it). It necessarily duplicates a few small pieces from
-`src/` (the admin-login PHP + its `eval-file` invocation, the same reasoning the original
-project documented for its own three-copy pattern) — that duplication is intentional, not
-an oversight.
+`template/` is the payload copied into every scaffolded project: the per-site menu, `AGENTS.md`,
+and the `/verify` command. `template/scripts/agentpress.mjs` is **frozen at scaffold time** and
+both dependency-free *and* import-free by design — `src/` does not exist beside a scaffolded
+site, so it cannot import from it. It therefore carries deliberate duplicated copies of a few
+small pieces (the admin-login PHP and its `eval-file` invocation, the colour gate, the wordmark
+art), the same reasoning the original project documented for its own three-copy pattern. That
+duplication is intentional; `test/parity.test.mjs` and `test/agent-files.test.mjs` are what stop
+the copies drifting.
 
 ## Uninstalling the tool
 
