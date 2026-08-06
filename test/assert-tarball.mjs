@@ -23,6 +23,12 @@ const REQUIRED = [
   'template/scripts/agentpress.mjs',
   'template/sandbox.config.json',
   'template/wp-cli.yml',
+  'template/AGENTS.md',
+  // A dot-DIRECTORY inside an allowlisted one. npm has a history of dropping
+  // these, and the failure is silent in the worst way: /verify would simply not
+  // exist for anyone who installed from npm, while working perfectly from a
+  // git checkout — so it would never fail for whoever is developing it.
+  'template/.claude/commands/verify.md',
 ];
 
 // Anything that would be an embarrassment or a leak in a published package.

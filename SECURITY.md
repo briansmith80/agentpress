@@ -39,6 +39,7 @@ references are given so you don't have to take our word for it.
 | Downloads and installs code | `src/wordpress.mjs`, `src/plugins.mjs` | WordPress core and plugins — the tool's entire purpose. |
 | Discovers MySQL root credentials | `src/mysql.mjs` | Tries empty then `"root"` (Laragon's defaults) to create a **per-site database and dedicated user**. Root is never written into any scaffolded site. Overridable with `AGENTPRESS_MYSQL_ROOT_PASSWORD`. |
 | Writes into agent CLI configs | `src/mcp.mjs` | Registers the site as an MCP server for Claude Code / Cursor / Codex / OpenCode, which is the feature. |
+| **Edits a third-party plugin's PHP** | `src/plugins.mjs` (`patchOxygenHtmlToPage`) | The only place this tool modifies code it did not write. Oxygen's `html-to-page` fails on **every** input on libxml ≥ 2.10 (a `<meta charset>` prefix with `LIBXML_HTML_NOIMPLIED` raises a spurious "Memory allocation failed"), and it is the builder's documented primary tool. One line is replaced with an XML encoding declaration. It matches the **exact** known-broken string or refuses aloud, checks the libxml version first, keeps the original as `html-to-page.php.agentpress-bak`, comments the change in the file, never fails a scaffold, and stops applying itself the moment Oxygen ships a fix. Skip it with `--premium=none`. |
 
 ## Where secrets live
 
