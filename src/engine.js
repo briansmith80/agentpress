@@ -27,7 +27,7 @@ import { installWordPress, writeMcpLoopbackGuard } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
-import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, premiumPluginAvailability, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
+import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, patchOxygenHtmlToPage, premiumPluginAvailability, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
 import { detectAgents } from './agents.mjs';
 import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS } from './mcp.mjs';
@@ -875,6 +875,9 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   const premiumPlugins = await installPremiumPlugins({ path: publicDir, selection: premiumSelection, onStep });
   await applyLicenses({ path: publicDir, slugs: premiumPlugins, onStep });
   await updateAllPlugins({ path: publicDir, onStep });
+  // AFTER the update, never before: that step pulls the vendor's current build
+  // and would undo the patch. See plugins.mjs for what this is and why.
+  await patchOxygenHtmlToPage({ path: publicDir, onStep });
 
   const mcp = await wireMcpForSite({ publicDir, hostname, adminUser, onStep });
   const { configuredAgents } = mcp;
@@ -1281,6 +1284,12 @@ async function updateProject({ yes }) {
   if (await fileExists(join(cwd, 'public'))) {
     const wrote = await writeMcpLoopbackGuard(join(cwd, 'public'), { onStep: (msg) => console.log(`  ${msg}`) });
     if (wrote) console.log('  … MCP loopback guard in place');
+    // A SECOND exception, and unlike the guard above this one edits a file
+    // AgentPress does not own — see plugins.mjs for the justification. Backfill
+    // matters here for the same reason it did for the guard: without it, every
+    // site scaffolded before this shipped keeps a builder tool that fails on
+    // every input, with no route to a fix short of re-scaffolding.
+    await patchOxygenHtmlToPage({ path: join(cwd, 'public'), onStep: (msg) => console.log(`  ${msg}`) });
   }
   await recordEnvironment({ dir: cwd, updatedAt: new Date().toISOString() });
   console.log(`${green(OK)} Updated to v${ENGINE_VERSION}.`);

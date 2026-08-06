@@ -2,9 +2,9 @@
 // policy from the Docker original — this layer never touched Docker
 // directly (it always went through `wp` in the workspace container), so it
 // carries over unchanged except for dropping the exec prefix.
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { runWp, spawnCapture } from './wp.mjs';
+import { resolvePhpExe, runWp, spawnCapture } from './wp.mjs';
 import { resolveOnPath } from './win.mjs';
 import { CONFIG_PATH, PREMIUM_PLUGINS_DIR } from './paths.mjs';
 import { loadConfig } from './config.mjs';
@@ -364,5 +364,105 @@ export async function installAgentConnector({ path, onStep }) {
   ]) {
     const result = await runWp(['option', 'update', option, value], { path });
     if (result.code !== 0) fail(`wp option update ${option}`, result);
+  }
+}
+
+// --- vendor patch: Oxygen html-to-page on libxml >= 2.10 ---------------------
+//
+// THE ONE PLACE THIS TOOL EDITS SOMEONE ELSE'S CODE. Held to a higher bar than
+// our own files, because the user did not write it and cannot be expected to
+// expect it: every branch below either patches an exactly-known string or
+// refuses and says why. It never fuzzy-matches and never fails a scaffold.
+//
+// The bug: Oxygen's `parse_fragment()` wraps input as
+//   '<meta charset="utf-8"><div id="__bdmcp_root__">' . $html . '</div>'
+// and calls loadHTML with LIBXML_HTML_NODEFDTD | LIBXML_HTML_NOIMPLIED. A
+// leading <meta charset> combined with NOIMPLIED trips a spurious "Memory
+// allocation failed" in libxml >= 2.10, so the root node is never built and
+// EVERY input fails — including bare text with no tags. html-to-page is the
+// documented preferred way to build Oxygen pages, so unpatched it is 100%
+// broken on any modern PHP.
+//
+// Measured here (PHP 8.4.14 / libxml 2.11.9), three wrappers x five inputs:
+//   <meta charset>          -> fails on all five
+//   <?xml encoding="utf-8"?> -> works on all five, UTF-8 preserved
+//   no prefix at all        -> parses, but silently mangles UTF-8 (cafe -> cafÃ©)
+// The third is why this is not just "delete the meta tag": that swaps a loud
+// failure for quiet corruption. The <meta charset> carried the encoding; the
+// XML declaration is what still does while keeping NOIMPLIED semantics.
+const OXYGEN_HTML_TO_PAGE_REL = join('wp-content', 'plugins', 'oxygen', 'plugin', 'mcp', 'design', 'html-to-page.php');
+const BROKEN_WRAPPER = `'<meta charset="utf-8"><div id="__bdmcp_root__">'`;
+const FIXED_WRAPPER = `'<?xml encoding="utf-8"?><div id="__bdmcp_root__">'`;
+const PATCH_NOTE = [
+  '// PATCHED BY AGENTPRESS: a leading <meta charset> combined with',
+  '// LIBXML_HTML_NOIMPLIED trips a spurious "Memory allocation failed" in',
+  '// libxml >= 2.10, so loadHTML never builds the __bdmcp_root__ node and every',
+  '// parse "fails". An XML encoding declaration sets UTF-8 instead: it keeps',
+  '// NOIMPLIED semantics and works across libxml versions. Original saved',
+  '// alongside as html-to-page.php.agentpress-bak.',
+].join('\n');
+
+/** 21109 -> "2.11.9". LIBXML_VERSION packs major*10000 + minor*100 + patch. */
+function formatLibxml(v) {
+  return `${Math.floor(v / 10000)}.${Math.floor((v % 10000) / 100)}.${v % 100}`;
+}
+
+/** LIBXML_VERSION as an int (21100 = 2.11.0), or null if PHP can't be asked. */
+async function libxmlVersion() {
+  try {
+    const php = await resolvePhpExe();
+    const { code, stdout } = await spawnCapture(php, ['-r', 'echo LIBXML_VERSION;']);
+    if (code !== 0) return null;
+    const n = Number.parseInt(stdout.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * MUST run AFTER updateAllPlugins(): that step re-fetches the vendor build from
+ * Oxygen's licensed update channel, which would silently undo an earlier patch.
+ * Best-effort throughout — a scaffold is not worth failing over a builder tool,
+ * and every skip path reports itself rather than passing quietly.
+ */
+export async function patchOxygenHtmlToPage({ path, onStep }) {
+  const file = join(path, OXYGEN_HTML_TO_PAGE_REL);
+
+  let source;
+  try {
+    source = await readFile(file, 'utf8');
+  } catch {
+    return { status: 'absent' }; // no Oxygen on this site — nothing to say
+  }
+
+  if (source.includes(FIXED_WRAPPER)) return { status: 'already-patched' };
+
+  // Not the string we know: the vendor changed this file. Refuse and SAY SO —
+  // guessing at a rewrite of someone else's code is how you corrupt an install.
+  if (!source.includes(BROKEN_WRAPPER)) {
+    onStep?.('(Oxygen html-to-page looks different from the build we know — leaving it alone; see PLANNING/TODO.md)');
+    return { status: 'unrecognised' };
+  }
+
+  // Below 2.10 the vendor code is correct, so there is nothing to fix. Unknown
+  // (null) is treated as "don't touch" for the same reason.
+  const libxml = await libxmlVersion();
+  if (libxml === null || libxml < 21000) {
+    return { status: 'not-affected', libxml };
+  }
+
+  try {
+    await writeFile(`${file}.agentpress-bak`, source, 'utf8');
+    const patched = source.replace(BROKEN_WRAPPER, `${FIXED_WRAPPER}`).replace(
+      /^(\s*)\$wrapped = /m,
+      (m, indent) => `${PATCH_NOTE.split('\n').map((l) => indent + l).join('\n')}\n${indent}$wrapped = `,
+    );
+    await writeFile(file, patched, 'utf8');
+    onStep?.(`patched Oxygen html-to-page for libxml ${formatLibxml(libxml)} (upstream bug — it fails on all input unpatched)`);
+    return { status: 'patched', libxml };
+  } catch (err) {
+    onStep?.(`(could not patch Oxygen html-to-page — not fatal: ${err.message})`);
+    return { status: 'failed', error: err.message };
   }
 }
