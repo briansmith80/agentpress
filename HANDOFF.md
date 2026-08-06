@@ -1,218 +1,172 @@
 ---
-session_date: 2026-08-06T06:33:38Z
+session_date: 2026-08-06T13:35:00Z
 author: claude-code
 operator: briansmith80
 repo: briansmith80/agentpress
 branch: main
 base: main
 status: done
-handoff_reason: end-of-day
+handoff_reason: release-complete
 ---
 
-# Handoff: v1.4.0 + v1.5.0 shipped — agent-API containment, MCP hardening, and the first automated tests
+# Handoff: v1.6.0 shipped — Oxygen `html-to-page` fixed, and sites that verify themselves
 
 > **Maintainer session notes — not user documentation.** If you just cloned this repo, start
 > at [README.md](README.md); for how to work in it, read [CLAUDE.md](CLAUDE.md); to release,
 > follow [RELEASING.md](RELEASING.md). Nothing below is needed to *use* the tool.
 >
-> Earlier handoffs are archived under `.handoffs/`. The previous one (2026-07-30) was badly
-> stale — it predated the rename to AgentPress, the npm publish, and everything from v1.1.0
-> onward. Treat anything in the archive as history, not current state.
+> Earlier handoffs are archived under `.handoffs/`.
 
 ## TL;DR
-> Two releases shipped today and both are live on npm: **1.4.0** closed a remotely-exploitable
-> hole (the Agent Connector abilities pack — shell-exec, PHP-eval, filesystem write — was
-> reachable from any network the laptop joined), and **1.5.0** fixed the MCP wiring subsystem,
-> added a `rewire` command, and introduced this project's **first automated tests + CI**.
-> Everything is merged, pushed, tagged, released, and verified. Nothing is in flight.
-> The most useful next action is housekeeping, not code: the two merged branches can be
-> deleted, and `PLANNING/TODO.md`'s Oxygen `html-to-page` breakage is the largest known
-> unfixed issue.
+> **v1.6.0 is live on npm and GitHub, verified both ways.** Two things shipped: the Oxygen
+> `html-to-page` breakage — broken on *every* input for *every* Oxygen site — is now patched
+> on install, and every scaffolded site gets an `AGENTS.md` plus a `/verify` command that
+> exercises the whole stack and builds a holding page recording what passed. Nothing is in
+> flight. The most useful next action is filing the Oxygen bug upstream, which is written and
+> never sent.
 
 ## Objective / Goal
-> Make AgentPress safe and pleasant for people other than its author, without over-engineering
-> it and without trying to fix upstream projects' code. Concretely this session: close the
-> security hole found by audit, make the MCP wiring (the tool's differentiator) actually
-> trustworthy, and stop the publish-fix-publish churn by making changes verifiable in seconds
-> instead of via a multi-agent review. **Definition of done for this session: met.**
+> Close the largest known user-facing breakage (Oxygen `html-to-page`) and make a scaffolded
+> site able to prove its own stack works, rather than the user having to infer it from
+> `claude mcp list`. **Definition of done: met, and verified by running it.**
 
 ## Current Status
-> **Live and verified on npm (`create-agentpress`): 1.5.0.** Versions published: 1.0.0, 1.0.1,
-> 1.2.0, 1.3.0, 1.4.0, 1.5.0. (1.1.0 is a permanent gap — see Gotchas.)
+> **Live and verified: `create-agentpress@1.6.0`.** Both release checks done — `npm view`
+> reports 1.6.0, *and* the published tarball was downloaded and grepped: `template/AGENTS.md`,
+> `template/.claude/commands/verify.md`, the patcher and the libxml fix string are all in the
+> payload. GitHub release `v1.6.0` → `199f370`, which is `HEAD`.
 >
 > **Verified by running it, not by inspection:**
-> - Full scaffold → destroy cycle run four times today; the final one against the 1.5.0
->   release candidate. Permalinks 200, `.env` not served, MCP wired *and verified*, exactly one
->   application password, teardown leaving zero residue (no dir, vhost, schema, DB user or
->   registry entry).
-> - The containment fix probed from the machine's **LAN address**: all seven attack shapes
->   return 403, loopback still returns 401/400, ordinary content and other REST namespaces
->   still serve. The same site reverted to v1.3.0's protection returned 401/400 — i.e. the
->   exposure was real, not theoretical.
-> - `rewire` re-points wiring onto an existing site and reports `verified, 37 tools`, leaving
->   `~/.claude.json` byte-identical apart from `mcpServers`.
-> - 37 tests pass in ~10s. CI on `windows-latest` went green on its first run (38s).
+> - `html-to-page` A/B on a real site: reverted to the vendor original all three inputs fail
+>   with `breakdance_html_to_page_parse_failed`; patched, all three pass.
+> - The operator ran `/verify` in a fresh Claude Code session end to end — WordPress MCP,
+>   Playwright MCP, Oxygen and abilities all PASS, holding page built.
+> - A full fresh scaffold (`aptest160`) landed both agent files with placeholders resolved,
+>   printed the new `/verify` pointer, and destroyed with zero residue.
+> - 49 tests (was 37). Tarball assertion covers the new dot-directory.
 >
-> **Assumed, not verified:** Cursor/Codex/OpenCode wiring paths (only Claude Code is installed
-> on this machine). Cursor detection is *probably* stale — see Blockers.
+> **Assumed, not verified:** Cursor/Codex/OpenCode paths, as always — only Claude Code is
+> installed here.
 
 ## What Changed This Session
-> **v1.4.0 — security**
-> - Closed a bypassable containment control. The v1.2.0 guard matched `REQUEST_URI ^/wp-json/mcp/`
->   only, so `?rest_route=/mcp/…` and `/index.php/wp-json/mcp/…` walked past it, and WordPress
->   core's own `wp-abilities/v1` namespace (which every ability opts into via `show_in_rest`)
->   was never covered at all. Replaced with a mu-plugin filtering `rest_pre_dispatch` on WP's
->   **resolved route** (immune to URL shape, guards both namespaces, runs at `PHP_INT_MAX`),
->   plus a widened `.htaccess` block as defence in depth. `update` now backfills both layers.
-> - Nine bugs from the same audit: a CRLF `.env` yielded an EMPTY env so `destroy` silently
->   skipped the database drop; a loopback hosts entry blocked re-scaffolding a destroyed name
->   forever; the elevated hosts write used a substring check and then blamed the user's UAC;
->   `resume` silently widened the premium selection; `CREATE USER IF NOT EXISTS` kept a stale
->   password; plus four smaller ones.
->
-> **v1.5.0 — MCP subsystem + tests**
-> - Application passwords were **never actually revoked** (a name was passed where wp-cli wants
->   a UUID), so re-mints accumulated live admin-equivalent credentials and `destroy` revoked
->   nothing while saying it had.
-> - Added `rewire`: re-points the machine-global MCP wiring at the site you run it in. The
->   documented newest-scaffold-wins trade-off previously had **no recovery path**.
-> - Wiring is now verified against the live endpoint (a real MCP handshake) instead of asserted.
-> - Cursor/OpenCode config writes no longer replace a user's whole config when it can't be parsed.
-> - Stopped leaving `~/.claude.json.agentpress-bak` behind (a plaintext copy of the entire Claude
->   config plus the previous site's never-revoked password).
-> - Added 37 tests, CI, `RELEASING.md`, and `prepublishOnly: npm test`.
+> - **Oxygen `html-to-page` patcher** (`patchOxygenHtmlToPage` in `src/plugins.mjs`). Runs
+>   *after* `updateAllPlugins()` because that step re-fetches the vendor build and would undo
+>   it; backfilled by `update`. The first time this tool edits code it did not write, so the
+>   guards matter more than the patch — see Gotchas.
+> - **`AGENTS.md` + `/verify`** scaffolded into every site (`template/`). The split is
+>   deliberate: `AGENTS.md` is read every session so it is capped at 45 lines by a test;
+>   `/verify` carries the procedure and the page markup and is loaded only when invoked.
+> - **`/verify` discoverability**: scaffold summary, site menu, and after `rewire` — each
+>   conditional, because suggesting a check that tests the MCP path when nothing is wired
+>   sends the user at something designed to fail.
+> - **`rewire` now says to restart an open agent session** — it mints a new application
+>   password, so a running MCP server keeps the old one and 401s while `rewire` prints
+>   "verified".
+> - **README** rebuilt around the wordmark + install command; `tools/wordmark.mjs` generates
+>   both SVGs from `src/ansi.mjs`; SECURITY.md discloses the vendor patch.
 
 ## Key Decisions & Rationale
-> - **The mu-plugin is the load-bearing control; `.htaccess` is defence in depth.** Established
->   empirically: Apache decodes the request **path** before `RewriteCond` runs but **not** the
->   query string, so `?rest_route=%2Fmcp%2Fx` reaches WordPress decoded. URL-text matching can
->   never be complete; testing WP's resolved route can.
-> - **`update` may write into `public/` — exactly one exception.** It was "never touch public/",
->   but that would have left every pre-1.4.0 site permanently exposed with no fix short of
->   re-scaffolding. Only the guard files (ours outright) are written.
-> - **Keep MCP wiring machine-global; add `rewire` instead of per-project scoping.** Per-project
->   `.mcp.json` was rejected as an architecture change for a problem a recovery command solves.
-> - **Do not chase other projects' code.** Codex masks env values in `mcp get`, so its wiring
->   target genuinely cannot be read back — `doctor` now says so rather than guessing. Cursor's
->   binary name is unverified, so the detection name was left alone rather than guessed at.
-> - **Batch fixes, publish once.** Adopted mid-session after the operator pointed out we were
->   publishing repeatedly. Reason each round found more: the audit sliced a *different area*
->   each time, working through one backlog — not new decay.
-> - **Tests over more review.** Two adversarial reviews each found high-severity bugs in my own
->   fixes. Tests are the durable answer; a review is not repeatable.
-> - **Rejected as over-engineering:** per-site PHP switching, push/pull to hosting, multisite,
->   provenance markers on MCP entries, fsync.
+> - **One page generator, not two.** An earlier plan had the CLI build a placeholder page and
+>   the agent build a verified one, then asked how to stop them drifting — a problem created
+>   entirely by the second generator. Cutting it also removed a shortcode, a mu-plugin, an
+>   unverified "does Oxygen Text render shortcodes" dependency and a parity test. Cost: a site
+>   where no agent is ever opened keeps WordPress's default homepage, i.e. today's behaviour.
+> - **Only the agent can test the agent's path.** The CLI cannot verify MCP wiring (it *is*
+>   the agent's config) and cannot reach Playwright at all. This is why `/verify` is a command
+>   in the site rather than an `agentpress verify` subcommand.
+> - **A test, not a demo.** `/verify` carries the exact markup so the same page comes out every
+>   run with only the data differing. Let the agent design it freely and it stops being a
+>   regression check.
+> - **"MCP tools available", not "abilities registered".** The abilities count has four
+>   different answers depending on how you ask (37 tools / 41 / 48 REST / 52 in PHP), so it
+>   cannot signal breakage. The tool count is what the agent can actually call, and `rewire`
+>   prints the same number.
+> - **Rejected:** a paste-able prompt with no files (unrepeatable, and the long HTML makes it
+>   unwieldy); `CLAUDE.md` as well as `AGENTS.md` (duplicate); speculative `/audit`,
+>   `/new-page` commands.
 
 ## Files Touched
-| Path (repo-relative) | Change | Why it matters |
+| Path | Change | Why it matters |
 |------|--------|----------------|
-| `src/mcp.mjs` | MODIFIED (heavily) | The whole MCP subsystem: `revokeAppPasswords` (UUID lookup), `verifyMcpEndpoint` (real handshake, settles on every terminal event), `updateJsonConfig` (safe config writes), `readWiredHostnames`. Start here for anything MCP. |
-| `src/wordpress.mjs` | MODIFIED | The containment control: `MCP_GUARD_PHP` (the mu-plugin), `HTACCESS_GUARD_BLOCK`, `writeMcpLoopbackGuard`, `spliceHtaccessGuard`. Read the comments before editing — they record what was probed live. |
-| `src/engine.js` | MODIFIED | `rewireCommand`, `wireMcpForSite` + `reportMcpOutcome` (shared by scaffold and rewire), `isAgentPressSiteDir` (the marker gate all three in-site commands share), pending-selection persistence. |
-| `src/laragon.mjs` | MODIFIED | `hostsContentEntryAddresses` — the ONE definition of "is this hostname in hosts"; three parsers used to disagree. Plus `findVhostForHostname`, `isLoopbackAddress`. |
-| `src/destroy.mjs` | MODIFIED | Uses the fixed revocation and now reports a failure to revoke in the summary + exit code. |
-| `src/doctor.mjs` | MODIFIED | New "MCP target" row: which site actually owns the wiring. |
-| `src/names.mjs`, `src/mysql.mjs`, `src/wildcard.mjs` | MODIFIED | Collision `kinds`, `ALTER USER`, token-exact elevated hosts script. |
-| `template/scripts/agentpress.mjs` | MODIFIED | Frozen per-site menu: `wiredHostFor` (3-state), the wrong-site warning + keypress, `AGENT_COMMANDS`. **Must stay import-free** — `test/parity.test.mjs` enforces that. |
-| `test/*.test.mjs`, `test/assert-tarball.mjs` | NEW | 37 tests + the published-payload assertion. |
-| `.github/workflows/ci.yml` | NEW | Windows CI: syntax, tests, CLI smoke, tarball assertion. |
-| `RELEASING.md` | NEW | The release order and the verify-after-publish lesson, written down at last. |
-| `SECURITY.md` | MODIFIED | Discloses both defects by version, with remediation. |
+| `src/plugins.mjs` | `patchOxygenHtmlToPage` + `libxmlVersion` | The vendor patch and every guard on it. Read the block comment before touching. |
+| `src/engine.js` | patcher call sites, `/verify` pointers, `rewire` restart hint | Patcher runs after `updateAllPlugins` (scaffold) and in `updateCommand` (backfill). |
+| `template/AGENTS.md` | NEW | Always-loaded agent context. **45-line cap enforced by a test** — move things into a command rather than raising it. |
+| `template/.claude/commands/verify.md` | NEW | The procedure + the page markup. Lazy-loaded, so length is cheap here. |
+| `tools/wordmark.mjs` | NEW | Regenerates both SVGs from `src/ansi.mjs`. Not shipped in the tarball. |
+| `test/vendor-patch.test.mjs`, `test/agent-files.test.mjs` | NEW | 12 tests, mostly pinning *refusals*. |
+| `test/assert-tarball.mjs` | MODIFIED | Now requires the two new template files. |
+| `SECURITY.md`, `README.md`, `template/README.md` | MODIFIED | Vendor patch disclosed; `/verify` documented. |
 
 ## Commands & Environment to Reproduce
-> Requires Windows, Laragon (Apache **not** Nginx, plus MySQL) running, and Node ≥ 18
-> (developed against 22.14). No npm dependencies — nothing to `npm install`.
->
 > ```bash
-> git clone https://github.com/briansmith80/agentpress.git   # anywhere EXCEPT Laragon's www\
-> cd agentpress
-> npm test                    # 37 tests, ~10s, needs no Laragon
-> node index.js doctor        # env check, must exit 0
-> node index.js <name>        # scaffold
+> npm test                    # 49 tests, ~10s, no Laragon needed
+> npm run check
+> node test/assert-tarball.mjs
+> node index.js doctor        # exit 0; AGENTPRESS_LARAGON_ROOT=C:/nope … → exit 1
 > ```
->
-> Optional env vars, **names only** (see README): `AGENTPRESS_LARAGON_ROOT`,
-> `AGENTPRESS_MYSQL_ROOT_PASSWORD`, `AGENTPRESS_MYSQL_PORT`, `AGENTPRESS_PREMIUM_PLUGINS_REPO`,
-> `AGENTPRESS_OXYGEN_LICENSE`. Legacy `KATALYST_*` spellings still honoured. Per-site secrets
-> live only in each site's gitignored `.env`; the Oxygen licence lives in `~/.agentpress/config.json`.
-> Setting `AGENTPRESS_LARAGON_ROOT` in CI skips a multi-second PowerShell probe.
 
 ## How to Verify / Test
-> 1. `npm test` → 37 passing. This is the fast gate and it needs no Laragon.
-> 2. `node index.js doctor` → exit 0; `AGENTPRESS_LARAGON_ROOT=C:/nope node index.js doctor` → exit 1.
-> 3. `node test/assert-tarball.mjs` → asserts the *published* payload shape.
-> 4. **The containment fix** (needs a scaffolded site and the machine's LAN IP):
->    `curl -sk -o /dev/null -w "%{http_code}" --resolve "<site>.test:443:<LAN-IP>" https://<site>.test/wp-json/wp-abilities/v1/abilities/agent-connector-for-wp/shell-exec/run -X POST -d '{}'`
->    → **403**. The same path via `127.0.0.1` → **400/401** (reachable locally). Done = both.
-> 5. Full scaffold recipe and the residue checklist: `RELEASING.md` step 2.
+> 1. The four commands above — the fast gate.
+> 2. **`/verify` in a scaffolded site** is now the end-to-end check. `update` first if the
+>    site predates 1.6.0.
+> 3. The Oxygen patch, on a site with Oxygen:
+>    `grep "xml encoding" public/wp-content/plugins/oxygen/plugin/mcp/design/html-to-page.php`
+> 4. Full scaffold recipe and residue checklist: `RELEASING.md` step 2.
 
 ## Open Questions / Blockers
-> - **[BLOCKER — known-broken upstream]** Oxygen's `html-to-page` MCP tool fails on *every*
->   input on 6.2.0-beta.2 (libxml ≥ 2.10 vs the builder's own `parse_fragment`). Ships from the
->   cached premium zip, so every scaffold installs it. Workaround: `edit-post` +
->   `insert-stylesheet`. Diagnosis and candidate fixes are in `PLANNING/TODO.md`. **Needs a
->   scope decision, not a patch.**
-> - **[QUESTION] Cursor CLI detection is probably stale.** `src/agents.mjs` probes for
->   `cursor-agent`; an audit claims the shipped Windows binary is now `agent`. Unverified — no
->   Cursor on this machine. Deliberately not changed on a guess. Needs someone with Cursor to
->   run `Get-Command` and report.
-> - **[RISK] Only Claude Code is exercised.** Cursor, Codex and OpenCode wiring is written but
->   never run end to end. Codex's teardown guard is additionally known-weak: `codex mcp get`
->   masks env values, so the ownership check can't match.
-> - **[RISK] npm auth expires silently** and reports publish failures as `404 Not Found`, not
->   401. `npm whoami` before publishing. This is what made 1.1.0 vanish.
-> - **[RISK] Machine-global MCP wiring.** Scaffolding a test site repoints your live wiring and
->   destroying it removes the entry. Snapshot `~/.claude.json`'s `mcpServers` before test
->   scaffolds; `rewire` restores it afterwards.
+> - **[ACTION, unsent] The Oxygen bug has still not been reported upstream.** File at
+>   `soflyy/agent-connector-for-wp` (Issues enabled; five live Oxygen 6.2 MCP bugs already
+>   there) — *not* `oxygen-bugs-and-features`, which is Oxygen Classic only. Lead with the
+>   libxml version: their CI likely runs < 2.10, which is probably why it shipped. Draft and
+>   full diagnosis in `PLANNING/TODO.md`. Posts publicly under the operator's identity, so it
+>   is deliberately a manual step.
+> - **[INACCURACY, in git history]** The `199f370` release commit message credits 1.6.0 with
+>   the admin-link scheme fix, the `safeHost` port fix and the `'C:\Windows'` fix. **All three
+>   shipped in v1.3.0** (`726f22e`). The GitHub release notes are correct; the commit message
+>   is not, and was left rather than rewriting pushed history.
+> - **[QUESTION] Cursor CLI detection is probably stale** — `src/agents.mjs` probes
+>   `cursor-agent`; an audit claims the shipped Windows binary is now `agent`. Unverified.
+> - **[CHORE] `git remote` still points at the old repo name** (`katalyst-laragon`) and relies
+>   on GitHub's redirect: `git remote set-url origin https://github.com/briansmith80/agentpress.git`
+> - **[CHORE] Mixed line endings.** `src/` is LF, `README.md`/`template/` are CRLF; every
+>   commit prints warnings. A `.gitattributes` would end it.
 
 ## Next Steps (ordered, actionable)
-> 1. [ ] Delete the two merged branches: `git branch -d mcp-hardening security-1.4.0`
->    (both are fully merged into `main`; kept only as this session's safety net).
-> 2. [ ] Decide what to do about Oxygen `html-to-page` (see `PLANNING/TODO.md`). It is the
->    largest known user-facing breakage and it is upstream, so the options are: pin an older
->    zip, patch the zip on install, or document and wait.
-> 3. [ ] Confirm or fix the Cursor CLI binary name, then wire it properly (`src/agents.mjs`
->    `AGENT_COMMANDS`, and the frozen menu's copy — `test/parity.test.mjs` will fail if they drift).
-> 4. [ ] Optional, from the original 62-finding audit and still unfixed: progress output during
->    the multi-minute download steps (a stuck run and a slow run look identical); an
->    `info`/`open` command for day-2 use; a `snapshot`/`rollback` pair (cheap via `wp db export`,
->    and a genuine differentiator for agent work); scaffolding a `CLAUDE.md`/`AGENTS.md` into
->    each site; `WP_DEBUG` on by default.
-> 5. [ ] Lower priority: generated passwords carry ~41 bits of entropy from a 32-byte source
->    (`src/secrets.mjs` truncates); the scaffold summary prints the admin password to stdout
->    even when an agent is capturing it; `doctor` has no Windows Firewall check.
+> 1. [ ] File the Oxygen bug upstream (see Blockers — the only outstanding item from this work).
+> 2. [ ] Confirm or fix the Cursor CLI binary name, then wire it (`src/agents.mjs`
+>    `AGENT_COMMANDS`, plus the frozen menu's copy — `test/parity.test.mjs` catches drift).
+> 3. [ ] Add `.gitattributes`; set the git remote to the current repo name.
+> 4. [ ] Still unfixed from the original audit: progress output during the multi-minute
+>    download steps (a stuck run and a slow run look identical); an `info`/`open` command; a
+>    `snapshot`/`rollback` pair via `wp db export`; `WP_DEBUG` on by default;
+>    `src/secrets.mjs` truncating to ~41 bits of entropy; the scaffold summary printing the
+>    admin password to stdout even when an agent is capturing it.
 
 ## Git State
-> - Branch: `main` (pushed: yes; up to date with `origin/main`: yes)
-> - Last commit at handoff time: `bbff6e8 merge: MCP hardening, a rewire command, and the first automated tests (v1.5.0)`
-> - Tags: `v1.4.0` → `32ad11e`, `v1.5.0` → `bbff6e8`. GitHub releases exist for both.
-> - Uncommitted: NONE (this handoff is the only change)
-> - Merged-but-undeleted branches: `mcp-hardening`, `security-1.4.0`
-> - To get current state: `git fetch && git switch main && git pull`
+> - Branch `main`, pushed, level with `origin/main`. Last commit `199f370`.
+> - Tags: `v1.6.0` → `199f370`. GitHub release published and marked latest.
+> - Uncommitted: this handoff only.
+> - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, **1.6.0**. (1.1.0 is a permanent gap.)
 
 ## Context & Gotchas
-> - **`update` does NOT touch MCP wiring or credentials.** It looks like the obvious fix for a
->   site whose agents can't see it; it isn't. `rewire` is. This bit us live this session.
-> - **npm reports a publish auth failure as `404 Not Found`.** `npm whoami` must print
->   `briansmith80`. 1.1.0 was believed published and never landed because of this.
-> - **`node --test test/` does not work here**; use the glob form (`npm test` already does).
-> - **`node --check` cannot see an undefined identifier.** A missing `dim` import survived every
->   local test because the branch only runs when *no* agent CLI is installed. The CLI smoke test
->   in CI exists for this class.
-> - **The frozen menu (`template/scripts/agentpress.mjs`) cannot import from `src/`** — `src/`
->   doesn't exist beside a scaffolded site. It carries deliberate duplicated copies; `test/parity.test.mjs`
->   is what stops them drifting. Existing sites only get changes when `update` is run in them.
-> - **Testing `verifyMcpEndpoint` needs adversarial servers, not a happy path.** Its first version
->   settled only on `res 'end'`, so a response truncated *after* headers hung forever — and with
->   nothing holding the event loop open, a scaffold could exit(0) mid-run while reporting success.
-> - **`/.env` returning 403 instead of 404 is fine on this machine** — Apache denies dotfiles
->   globally; an unrelated non-AgentPress site does the same. What matters is "not 200".
-> - **Do not spawn a competing Apache.** Tried and reverted long ago: it restores the port with a
->   *stale config*, serving every existing site while silently 404ing the new one.
-> - **Windows `spawn` cannot launch `.cmd`/`.ps1` shims with `shell:false`** (`claude`, `codex`,
->   `gh`, `wp.bat`). Route through `psRun`/`psCapture`. This shipped silently twice.
-> - **`spawnCapture`/`psCapture` never throw — always check `.code`.** Assumed success is the root
->   cause of the worst silent failures in this project's history, including the app-password one
->   fixed today.
+> - **The vendor patch is the one place this tool edits code it did not write.** Every branch
+>   either matches an exactly-known string or refuses aloud. Do not make it fuzzy-match. Five
+>   tests pin the *refusals*, which matter more than the patch.
+> - **`npm whoami` was E401 immediately before this release.** The operator re-authenticated.
+>   Check it *before* publishing — npm reports a publish auth failure as `404 Not Found`, and
+>   this is exactly how v1.1.0 vanished.
+> - **`node --check` cannot see an undefined identifier, and neither can a module-load test.**
+>   `AGENT_LABELS` was used in `engine.js` without importing it; both passed. An unimported
+>   name inside a function body only throws when that function runs — and that one runs at the
+>   end of every successful scaffold. Only a real scaffold caught it.
+> - **Block art rendered as *text* is not portable.** The holding-page wordmark ran together in
+>   the browser even with `white-space:pre`, a genuinely monospaced font, and all five lines at
+>   the right lengths — `U+2588`'s drawn width does not match the character advance in every
+>   font. It is an SVG now. The CLI banner is fine; terminals are a fixed grid.
+> - **`--premium=none` sites expose only THREE MCP tools** (the generic adapter ones) — no
+>   `get-instructions`, no `html-to-page`. `/verify` and `AGENTS.md` both branch on this.
+>   Found by scaffolding one; it would have failed at step 1 for those users.
+> - **`update` writes under `public/` in exactly two places**: the loopback guard (ours) and
+>   the Oxygen patch (not ours). Anything else under `public/` is off limits.
 > - **Secrets**: no generated password, application password, licence key or admin-login token
->   from this session appears in this file or in git. Admin login links are single-use, ~300s TTL.
+>   from this session appears in this file or in git.
