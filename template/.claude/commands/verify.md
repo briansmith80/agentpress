@@ -9,12 +9,26 @@ the page is the evidence that the stack works.
 
 ## 1. Prove the WordPress MCP connection
 
-Call `get-instructions`, then `get-breakpoints`, then `site-info`.
+Look at your own tool list for the `wordpress` server, then call the cheapest
+read tool it offers — `site-info` if Oxygen is installed, otherwise
+`mcp-adapter-discover-abilities`.
 
-If any of these fail — especially with a 401 — the MCP wiring is stale. This
-happens when another site was scaffolded after this one, because wiring is
+If that fails — especially with a 401 — the MCP wiring is stale. This happens
+when another site was scaffolded after this one, because wiring is
 machine-global. Stop and tell the user to run `agentpress rewire` from this
-folder. Do not attempt to work around it with wp-cli.
+folder, then restart their session so the new password is picked up. Do not
+attempt to work around it with wp-cli.
+
+**Then decide which version of this check you are running.** If the tool list
+has no `oxygen-*` tools, this site was scaffolded without Oxygen
+(`--premium=none`). That is a supported setup, not a fault. Verify the WordPress
+MCP and Playwright legs only, skip steps 3 and the Oxygen line in step 5, say
+plainly that Oxygen was not installed, and stop there — there is no
+`html-to-page`, so the holding page cannot be built and you should not fake one.
+
+With Oxygen present, call `get-instructions` and then `get-breakpoints` before
+building anything; the server requires the first and the second governs
+responsive rules.
 
 ## 2. Collect the real values
 
@@ -57,8 +71,9 @@ in the site folder it would be publicly served.
 ## 5. Report
 
 One line each, PASS or FAIL: WordPress MCP · Playwright MCP · Oxygen
-html-to-page · Agent Connector abilities. If everything passed, say so plainly
-and give the user the site URL.
+html-to-page · Agent Connector abilities. Mark the Oxygen line SKIPPED, not
+PASS, when Oxygen is not installed. If everything passed, say so plainly and
+give the user the site URL.
 
 ---
 

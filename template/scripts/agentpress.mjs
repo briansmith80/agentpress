@@ -517,6 +517,12 @@ for (;;) {
           `  ${dim('Launching anyway — the agent will have no WordPress tools for THIS site.')}\n`,
       );
       await pressAnyKey();
+    } else if (wired) {
+      // Only when the wiring actually points here — /verify tests the MCP path,
+      // so offering it while pointed elsewhere would send the user at a check
+      // that is designed to fail. Printed rather than prompted: the agent's own
+      // startup repaints the terminal, so this is a hint, not an instruction.
+      console.log(`\n  ${dim('Tip: run')} ${pink('/verify')} ${dim('inside the agent to test MCP, Playwright and Oxygen end to end.')}\n`);
     }
     await runInherit(AGENT_COMMANDS[key] || key);
   }

@@ -1,13 +1,16 @@
 # __PROJECT_NAME__ — agent notes
 
-AgentPress-scaffolded WordPress + Oxygen site, served by Laragon at
+AgentPress-scaffolded WordPress site, served by Laragon at
 __SITE_SCHEME__://__SITE_HOST__. WordPress lives in `public/`.
 
-Two MCP servers are wired: **wordpress** (this site's REST API — build and edit
-pages with the Oxygen tools) and **playwright** (a real browser — load what you
-built and look at it instead of assuming the markup is right).
+Two MCP servers are wired: **wordpress** (this site's REST API) and
+**playwright** (a real browser — load what you built and look at it instead of
+assuming the markup is right).
 
-## Building pages
+## Building pages with Oxygen
+
+**Only if your tool list has `oxygen-*` tools.** A `--premium=none` site has
+just three generic adapter tools; use the WordPress REST API there instead.
 
 Call `get-instructions` first; the server requires it. Author semantic HTML with
 a `<style>` block and pass it to `html-to-page`. Use `edit-post` and the

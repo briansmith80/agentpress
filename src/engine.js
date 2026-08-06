@@ -29,7 +29,7 @@ import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
 import { applyLicenses, installAgentConnector, installPlugins, installPremiumPlugins, patchOxygenHtmlToPage, premiumPluginAvailability, syncPremiumPluginsFromGitHub, updateAllPlugins } from './plugins.mjs';
 import { loadConfig, saveConfig } from './config.mjs';
-import { detectAgents } from './agents.mjs';
+import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
@@ -929,7 +929,17 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       `  User   ${adminUser}\n` +
       `  Pass   ${adminPassword}\n\n` +
       `  cd ${projectDir}\n` +
-      '  npm run agentpress   # open the menu\n',
+      '  npm run agentpress   # open the menu\n' +
+      // Only when something is actually wired: /verify tests the MCP path, so
+      // suggesting it with no agent configured would send the user at a check
+      // that cannot pass. This is the one moment they are looking at the
+      // output, so it is where the feature has to be mentioned — the README is
+      // not where anyone looks after a successful scaffold.
+      (mcp.configuredAgents?.length
+        ? `\n  Then open this folder in ${AGENT_LABELS[mcp.configuredAgents[0]] || 'your agent'} and run ${cyan('/verify')} —\n` +
+          '  it exercises both MCP servers and Oxygen end to end, and builds the site a\n' +
+          '  holding page recording what passed.\n'
+        : ''),
   );
 }
 
@@ -1207,7 +1217,8 @@ async function rewireCommand() {
   if (result.configuredAgents?.length) {
     console.log(
       `${cyan(STEP)} If an agent session is already open, restart it (or reconnect its MCP\n` +
-        '  servers) — it is still holding the previous application password.',
+        '  servers) — it is still holding the previous application password.\n' +
+        `  Then run ${cyan('/verify')} in the agent to confirm the wiring end to end.`,
     );
   }
 
