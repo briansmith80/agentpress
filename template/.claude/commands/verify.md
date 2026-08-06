@@ -39,9 +39,11 @@ run, with only the data differing.
 
 Load the site with Playwright and screenshot it. Then actually check the result:
 
-- The wordmark must render as **five separate lines**. If it collapsed into one,
-  the whitespace was lost — fix it and re-check.
+- The wordmark must read clearly as **AGENTPRESS**, in pink, with the letters
+  separated. If the SVG is missing or distorted, say so — do not accept it.
 - The status card must be readable, dark, and not overflowing its container.
+- Every row must show a real value. A `{{PLACEHOLDER}}` left on the page means
+  you skipped a measurement.
 
 Take the screenshot but do not save it into the site; it is proof, not content.
 
@@ -58,7 +60,7 @@ and give the user the site URL.
 ```html
 <style>
 .ap-page{background:#0b0d11;min-height:100vh;padding:64px 24px;display:flex;flex-direction:column;align-items:center;gap:26px;font-family:'JetBrains Mono',monospace}
-.ap-mark{color:#ff2d78;font-size:13px;line-height:1.2;white-space:pre;margin:0}
+.ap-mark{width:100%;max-width:420px;height:auto;display:block}
 .ap-head{color:#d8dbe2;font-size:26px;margin:0;font-weight:400}
 .ap-sub{color:#8890a0;font-size:15px;margin:0}
 .ap-card{background:#12151b;border:1px solid #262b34;border-radius:10px;padding:26px 30px;width:100%;max-width:560px;display:flex;flex-direction:column;gap:13px}
@@ -70,11 +72,7 @@ and give the user the site URL.
 .ap-exit{color:#5b6270;font-size:13px;margin:6px 0 0 0}
 </style>
 <section class="ap-page">
-<div class="ap-mark"> ██   ██  ████ █  █ ████ ███  ███  ████  ███  ███
-█  █ █    █    ██ █  █   █  █ █  █ █    █    █
-████ █ ██ ███  █ ██  █   ███  ███  ███   ██   ██
-█  █ █  █ █    █  █  █   █    █ █  █       █    █
-█  █  ██  ████ █  █  █   █    █  █ ████ ███  ███</div>
+<svg class="ap-mark" viewBox="0 0 490 68" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AgentPress"><path d="M10 0h20v12h-20zM60 0h20v12h-20zM100 0h40v12h-40zM150 0h10v12h-10zM180 0h10v12h-10zM200 0h40v12h-40zM250 0h30v12h-30zM300 0h30v12h-30zM350 0h40v12h-40zM410 0h30v12h-30zM460 0h30v12h-30zM0 14h10v12h-10zM30 14h10v12h-10zM50 14h10v12h-10zM100 14h10v12h-10zM150 14h20v12h-20zM180 14h10v12h-10zM210 14h10v12h-10zM250 14h10v12h-10zM280 14h10v12h-10zM300 14h10v12h-10zM330 14h10v12h-10zM350 14h10v12h-10zM400 14h10v12h-10zM450 14h10v12h-10zM0 28h40v12h-40zM50 28h10v12h-10zM70 28h20v12h-20zM100 28h30v12h-30zM150 28h10v12h-10zM170 28h20v12h-20zM210 28h10v12h-10zM250 28h30v12h-30zM300 28h30v12h-30zM350 28h30v12h-30zM410 28h20v12h-20zM460 28h20v12h-20zM0 42h10v12h-10zM30 42h10v12h-10zM50 42h10v12h-10zM80 42h10v12h-10zM100 42h10v12h-10zM150 42h10v12h-10zM180 42h10v12h-10zM210 42h10v12h-10zM250 42h10v12h-10zM300 42h10v12h-10zM320 42h10v12h-10zM350 42h10v12h-10zM430 42h10v12h-10zM480 42h10v12h-10zM0 56h10v12h-10zM30 56h10v12h-10zM60 56h20v12h-20zM100 56h40v12h-40zM150 56h10v12h-10zM180 56h10v12h-10zM210 56h10v12h-10zM250 56h10v12h-10zM300 56h10v12h-10zM330 56h10v12h-10zM350 56h40v12h-40zM400 56h30v12h-30zM450 56h30v12h-30z" fill="#ff2d78"/></svg>
 <h1 class="ap-head">$ site under construction</h1>
 <p class="ap-sub">WordPress + Oxygen + Agent Connector + Laragon — building now</p>
 <section class="ap-card">

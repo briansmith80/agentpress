@@ -1198,6 +1198,18 @@ async function rewireCommand() {
   });
   console.log('');
   for (const line of reportMcpOutcome(result)) console.log(line);
+  // Rewire mints a NEW application password, which invalidates the old one. An
+  // agent session that was already open still holds the previous credential in
+  // its running MCP server process and will keep answering 401 — while this
+  // command has just printed "verified". Confirmed live: the new credential
+  // authenticates fine over HTTP at the same moment the open session 401s.
+  // Without this line the user is told it worked and then watches it not work.
+  if (result.configuredAgents?.length) {
+    console.log(
+      `${cyan(STEP)} If an agent session is already open, restart it (or reconnect its MCP\n` +
+        '  servers) — it is still holding the previous application password.',
+    );
+  }
 
   // ONLY record when something actually landed. Writing the empty result was a
   // real bug: on every failure path (mint failed, no agent CLI on PATH, every

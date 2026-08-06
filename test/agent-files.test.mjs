@@ -67,27 +67,42 @@ test('verify.md keeps its {{PLACEHOLDER}} tokens — the agent fills those, not 
   assert.equal(out.match(/__[A-Z_]+__/g), null, 'no stray template tokens');
 });
 
-test('the holding page wordmark matches the CLI banner and survives templating', async () => {
-  // Same art in a third place now (src/ansi.mjs, the frozen menu, and here).
-  // The page is a regression test, so a drifted wordmark is a real defect.
+test('the holding page wordmark is an SVG, not font-dependent text', async () => {
+  // Learned by looking at it: block art rendered as TEXT depends on the
+  // viewer's monospace font drawing U+2588 at exactly the character advance.
+  // With white-space:pre applied, a genuinely monospaced font, and all five
+  // lines at the right lengths, the letters STILL ran together. An SVG has no
+  // font dependency, so the page looks the same everywhere.
   const dest = await render();
   const verify = await readFile(join(dest, '.claude', 'commands', 'verify.md'), 'utf8');
+
+  assert.ok(verify.includes('<svg'), 'wordmark should be an SVG');
+  assert.equal(/█/.test(verify), false, 'block-character wordmark reintroduced — it will not render reliably');
+});
+
+test('the SVG wordmark still spells the same art as the CLI banner', async () => {
+  // Rebuild the glyph grid from the path geometry and compare to the source
+  // art, so the page and the terminal can never show different wordmarks.
+  const CELL = 10;
+  const ROW = 14;
+  const verify = await read('template/.claude/commands/verify.md');
   const ansi = await read('src/ansi.mjs');
 
-  // Extract exactly, never trim: the first art line begins with a significant
-  // space, and trimming it away would let a real one-column drift pass.
-  const fromCli = ansi
-    .split('\n')
-    .filter((l) => l.includes('█'))
-    .map((l) => l.match(/'(.*)'/)[1]);
+  const art = ansi.split('\n').filter((l) => l.includes('█')).map((l) => l.match(/'(.*)'/)[1]);
+  const d = verify.match(/<path d="([^"]+)"/)?.[1];
+  assert.ok(d, 'no path data found in the wordmark SVG');
 
-  const fromPage = verify
-    .split('\n')
-    .filter((l) => l.includes('█'))
-    .map((l) => l.replace(/^<div class="ap-mark">/, '').replace(/<\/div>$/, ''));
+  const cols = Math.max(...art.map((l) => l.length));
+  const grid = Array.from({ length: art.length }, () => Array(cols).fill(' '));
+  for (const [, x, y, w] of d.matchAll(/M(\d+) (\d+)h(\d+)v\d+h-\d+z/g)) {
+    const row = +y / ROW;
+    const col = +x / CELL;
+    for (let i = 0; i < +w / CELL; i++) grid[row][col + i] = '█';
+  }
 
-  assert.equal(fromPage.length, 5, `wordmark must be 5 lines, got ${fromPage.length}`);
-  assert.deepEqual(fromPage, fromCli, 'holding-page wordmark has drifted from src/ansi.mjs');
+  const rebuilt = grid.map((r) => r.join('').replace(/\s+$/, ''));
+  const source = art.map((l) => l.replace(/\s+$/, ''));
+  assert.deepEqual(rebuilt, source, 'the SVG wordmark has drifted from src/ansi.mjs');
 });
 
 test('the page never claims success unconditionally', async () => {

@@ -36,5 +36,7 @@ wp-admin needs no password — the menu mints a one-time link, single-use and
   anything served or committed.
 - MCP wiring is machine-global: scaffolding another site repoints it away from
   this one, and `agentpress rewire` here points it back. **401s mean this.**
+  Rewire mints a new password, so an already-open session keeps 401ing until it
+  is restarted — tell the user that rather than retrying the call.
 - To check the whole stack, run `/verify`, or follow
   `.claude/commands/verify.md` — any agent can read it.
