@@ -246,6 +246,14 @@ export const MCP_GUARD_RELATIVE_PATH = join('wp-content', 'mu-plugins', 'agentpr
 const HTACCESS_GUARD_BEGIN = '# BEGIN AgentPress';
 const HTACCESS_GUARD_END = '# END AgentPress';
 
+/**
+ * The tell that a site still has the Application Password passthrough. Exported
+ * because `doctor` greps every site for it and the rewire diagnosis checks the
+ * one site it is standing in — both must look for the same string this block
+ * writes, or a rename here turns those checks into silent false negatives.
+ */
+export const HTACCESS_AUTH_MARKER = 'E=HTTP_AUTHORIZATION:';
+
 const HTACCESS_GUARD_BLOCK = `${HTACCESS_GUARD_BEGIN}
 # The agent API (MCP + WordPress core's Abilities REST namespace) is
 # LOOPBACK-ONLY. The Agent Connector's abilities pack grants shell-exec,
@@ -266,6 +274,24 @@ RewriteCond %{REQUEST_URI} ^/(index\\.php/)?wp-json/(mcp|wp-abilities)(/|$) [NC,
 RewriteCond %{QUERY_STRING} (^|&)rest_route=/?(mcp|wp-abilities)(/|&|$) [NC]
 RewriteCond %{REMOTE_ADDR} !^(127\\.[0-9.]+|::1|::ffff:127\\.[0-9.]+)$
 RewriteRule .* - [F,L]
+
+# Application Password passthrough. Without it, Apache's mod_fcgid (a
+# CGI/FastCGI SAPI) strips the Authorization header before PHP ever sees it and
+# EVERY application password fails with a bare 401 "rest_forbidden" /
+# "rest_not_logged_in" — a well-known gotcha under any CGI/FastCGI PHP SAPI
+# (mod_fcgid, PHP-FPM, ...), not specific to Laragon. Re-exposing it as
+# HTTP_AUTHORIZATION is what WordPress core's own auth code looks for as a
+# fallback when PHP_AUTH_USER isn't set.
+#
+# It lives in OUR block rather than WordPress's, and the reason is scaffold
+# order, not survival. WP-CLI cannot write .htaccess at all (got_mod_rewrite()
+# is false off-Apache, see installWordPress), so this hand-written file is the
+# ONLY copy of this rule a freshly scaffolded site ever has. Core emits its own
+# identical rule as line 3 of its generated block, but not until something
+# triggers a hard rewrite flush through a real Apache request, which may be
+# never. Keeping our copy in the region we own leaves WordPress's block stock.
+RewriteCond %{HTTP:Authorization} ^(.*)
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 </IfModule>
 ${HTACCESS_GUARD_END}`;
 
@@ -338,6 +364,58 @@ export async function verifyMcpLoopbackGuard(publicDir, { onStep } = {}) {
 }
 
 /**
+ * Re-splices the AgentPress block into an existing site's .htaccess and reports
+ * whether that changed anything, so `rewire` can repair a site that cannot
+ * authenticate before it mints a credential that site would only reject.
+ *
+ * Cheap and idempotent — spliceHtaccessGuard writes only on a genuine
+ * difference — so callers can run it unconditionally rather than trying to
+ * decide in advance whether a site needs it.
+ */
+export async function ensureHtaccessGuardBlock(publicDir) {
+  const htaccessPath = join(publicDir, '.htaccess');
+  let before = null;
+  try {
+    before = await readFile(htaccessPath, 'utf8');
+  } catch {
+    // absent: splice creates it, and "changed" is the honest answer
+  }
+  await spliceHtaccessGuard(htaccessPath);
+  let after = null;
+  try {
+    after = await readFile(htaccessPath, 'utf8');
+  } catch {
+    return { changed: false };
+  }
+  return { changed: before !== after, restoredAuth: before !== null && !before.includes(HTACCESS_AUTH_MARKER) && after.includes(HTACCESS_AUTH_MARKER) };
+}
+
+/**
+ * Our block must never contain the TEXT of WordPress's own markers, not even
+ * inside a comment. Live-verified the hard way while writing v1.7.0: a comment
+ * line here reading `above "# BEGIN WordPress"` corrupted the file on the next
+ * flush, because core's insert_with_markers() detects its markers with
+ * str_contains() on each LINE, not an equality test or an anchored match. It
+ * accepted our prose line as the opening marker, treated everything after it as
+ * its own block, and replaced the lot — swallowing the real marker and half our
+ * comment. Nothing in the code looked wrong; only a real flush showed it.
+ *
+ * Checked at write time and fails SAFE (leaves the file untouched and says so)
+ * rather than asserting at import, because the failure mode being prevented is
+ * a corrupted .htaccess on a user's live site.
+ */
+function assertNoWordPressMarker(block) {
+  // Assembled at runtime so this guard does not contain the very string it bans.
+  const wpMarker = `# ${'BEGIN'} WordPress`;
+  if (block.includes(wpMarker) || block.includes(`# ${'END'} WordPress`)) {
+    throw new Error(
+      "the AgentPress .htaccess block contains WordPress's own marker text, which would make " +
+        'WordPress overwrite part of this file on its next rewrite flush. Rephrase the comment.',
+    );
+  }
+}
+
+/**
  * Replaces our marked block in place, prepends it when absent, and creates the
  * file if there is none.
  *
@@ -349,6 +427,7 @@ export async function verifyMcpLoopbackGuard(publicDir, { onStep } = {}) {
  * must propagate so the caller reports it instead of clobbering.
  */
 async function spliceHtaccessGuard(htaccessPath) {
+  assertNoWordPressMarker(HTACCESS_GUARD_BLOCK);
   let current = '';
   try {
     current = await readFile(htaccessPath, 'utf8');
@@ -368,6 +447,79 @@ async function spliceHtaccessGuard(htaccessPath) {
     next = `${HTACCESS_GUARD_BLOCK}\n`;
   }
   if (next !== current) await writeFile(htaccessPath, next, 'utf8');
+}
+
+/**
+ * Why did an application password just get a 401? Answers the question the user
+ * is actually standing in front of, instead of the generic "restart your agent
+ * session" that used to print here regardless.
+ *
+ * That generic advice is right for exactly one cause (a session still holding
+ * the pre-rewire password) and actively misleading for every other, because the
+ * 401 being reported came from THIS process's own loopback probe using a
+ * credential minted seconds earlier — no agent session involved.
+ *
+ * Prompted by a field report where the cause could not be determined from the
+ * output AT ALL: the only actionable line on screen told the user to restart
+ * their agent, which was irrelevant to every candidate cause. That is the gap
+ * this closes — not any one of the causes below, but the silence about which.
+ *
+ * Best-effort and silent when it finds nothing: returning no hint is better than
+ * inventing one, and the caller still prints the raw failure either way.
+ */
+export async function diagnoseAppPasswordAuth({ publicDir }) {
+  const hints = [];
+
+  let htaccess = null;
+  try {
+    htaccess = await readFile(join(publicDir, '.htaccess'), 'utf8');
+  } catch {
+    // absent or unreadable — say nothing rather than guess
+  }
+  if (htaccess !== null && !htaccess.includes(HTACCESS_AUTH_MARKER)) {
+    // Note this is a genuinely odd state, worth saying plainly rather than
+    // guessing a cause: both AgentPress and WordPress core write this rule, so
+    // for it to be absent from BOTH blocks something else has rewritten the
+    // file — a security or caching plugin managing its own .htaccess, or a
+    // hand-edit. Naming a culprit we have not verified would be worse than
+    // naming the symptom and the repair.
+    hints.push(
+      'public/.htaccess has no Authorization passthrough in it at all, so Apache is\n' +
+        '    stripping the credential before PHP sees it and every application password on\n' +
+        '    this site will 401. Something other than AgentPress or WordPress core has\n' +
+        '    rewritten this file.\n' +
+        '    Fix: run `rewire` again to restore the block, then find what rewrote it.',
+    );
+  }
+
+  // Under WP-CLI is_ssl() is false, so wp_is_application_passwords_supported()
+  // reduces to the environment-type test — which is precisely the thing worth
+  // measuring, since MCP talks plain http. The _available() wrapper also runs
+  // the filter, so a security plugin switching app passwords off shows up here
+  // as available=0 with a perfectly normal environment type.
+  const probe = await runWp(['eval', 'echo wp_get_environment_type() . "|" . ( wp_is_application_passwords_available() ? "1" : "0" );'], {
+    path: publicDir,
+  });
+  if (probe.code === 0) {
+    const [envType, available] = probe.stdout.trim().split('|');
+    if (envType && envType !== 'local') {
+      hints.push(
+        `public/wp-config.php is missing define('WP_ENVIRONMENT_TYPE', 'local') — it\n` +
+          `    reports "${envType}". WordPress refuses application passwords over plain http\n` +
+          '    unless the environment is local, and MCP talks http.\n' +
+          "    Fix: add define('WP_ENVIRONMENT_TYPE', 'local'); to public/wp-config.php.",
+      );
+    } else if (available === '0') {
+      hints.push(
+        'WordPress reports application passwords as unavailable on this site even though\n' +
+          '    the environment is local, so a plugin is filtering them off\n' +
+          '    (wp_is_application_passwords_available).\n' +
+          '    Fix: find and deactivate that plugin — usually a security or hardening one.',
+      );
+    }
+  }
+
+  return hints;
 }
 
 function fail(step, result) {
@@ -452,6 +604,14 @@ export async function installWordPress({
   if (result.code !== 0) fail('wp rewrite flush', result);
   // One definition of the guard block, shared with the backfill path — a
   // second inline copy here is how the two drift apart.
+  //
+  // The WordPress block below is STOCK, deliberately. Up to v1.6.0 it also
+  // carried an Authorization passthrough; that now lives in the AgentPress
+  // block instead. Two reasons, both checked against core rather than assumed:
+  // WordPress owns everything between its own markers and rewrites it wholesale
+  // on any hard flush, and core's generated rules already include an identical
+  // passthrough (class-wp-rewrite.php, mod_rewrite_rules()), so a copy placed
+  // here was both at risk and redundant. Do not add directives to this block.
   await writeFile(
     join(publicDir, '.htaccess'),
     `${HTACCESS_GUARD_BLOCK}
@@ -459,15 +619,6 @@ export async function installWordPress({
 # BEGIN WordPress
 <IfModule mod_rewrite.c>
 RewriteEngine On
-# Confirmed live: without this, Application Passwords fail outright with a
-# bare 401 "rest_forbidden"/"rest_not_logged_in" — Apache's mod_fcgid (a
-# CGI/FastCGI SAPI) strips the Authorization header before PHP ever sees it,
-# a well-known gotcha for WP Application Passwords under any CGI/FastCGI
-# PHP SAPI (mod_fcgid, PHP-FPM, ...), not specific to Laragon. Re-exposing
-# it as HTTP_AUTHORIZATION is what WordPress core's own auth code looks for
-# as a fallback when PHP_AUTH_USER isn't set.
-RewriteCond %{HTTP:Authorization} ^(.*)
-RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 RewriteBase /
 RewriteRule ^index\\.php$ - [L]
 RewriteCond %{REQUEST_FILENAME} !-f
