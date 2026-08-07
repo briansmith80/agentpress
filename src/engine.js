@@ -23,7 +23,7 @@ import {
 import { renameWithRetry, rmWithRetry } from './fsutil.mjs';
 import { sleep } from './win.mjs';
 import { MYSQL_PORT, provisionDatabase, resolveRootCredential, sanitizeDbIdentifier } from './mysql.mjs';
-import { installWordPress, writeMcpLoopbackGuard } from './wordpress.mjs';
+import { diagnoseAppPasswordAuth, ensureHtaccessGuardBlock, installWordPress, writeMcpLoopbackGuard } from './wordpress.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
@@ -819,6 +819,12 @@ async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {
     onStep('checking the MCP endpoint answers…');
     verification = await verifyMcpEndpoint(creds);
     onStep(verification.ok ? `MCP endpoint answered (${verification.tools} tools)` : `⚠ the MCP endpoint did not answer: ${verification.detail}`);
+    // A rejected credential is the one failure with a knowable cause, and the
+    // probe that just failed used a password minted seconds ago — so "restart
+    // your agent session" cannot be the explanation. Ask the site why.
+    if (!verification.ok && /HTTP 40[13]/.test(verification.detail || '')) {
+      verification.hints = await diagnoseAppPasswordAuth({ publicDir });
+    }
   }
   return { detectedKeys, configuredAgents, failedAgents, verification };
 }
@@ -833,6 +839,17 @@ function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verifi
   if (configuredAgents.length) {
     const health = verification ? (verification.ok ? `verified, ${verification.tools} tools` : `NOT verified: ${verification.detail}`) : 'not checked';
     lines.push(`${verification && !verification.ok ? yellow(WARN) : green(OK)} MCP wired for: ${configuredAgents.join(', ')} (${health})`);
+  }
+  // The cause goes directly under the failure it explains, not in a footnote:
+  // the whole problem with the old output was that the only actionable line on
+  // screen ("restart your agent session") was the wrong one.
+  //
+  // Each hint carries its OWN fix. The first draft of this printed one shared
+  // footer saying "repair with `update`", which is untrue for two of the three
+  // causes — `update` touches neither wp-config.php nor a third-party plugin —
+  // and would have reproduced the exact wrong-advice problem one layer down.
+  for (const hint of verification?.hints || []) {
+    lines.push(`  ${cyan(STEP)} ${hint}`);
   }
   for (const f of failedAgents) {
     lines.push(`${yellow(WARN)} MCP wiring ${f.key === 'all' ? 'failed' : `failed for ${f.key}`}: ${f.reason}`);
@@ -1200,8 +1217,22 @@ async function rewireCommand() {
   }
 
   const adminUser = env.WP_ADMIN_USER || 'admin';
+  const publicDir = join(cwd, 'public');
+  // Repair BEFORE minting, not after diagnosing. A site whose .htaccess has
+  // lost the Authorization passthrough cannot authenticate any credential this
+  // command creates, so wiring first would guarantee the 401 it then has to
+  // explain — which is the loop a user hit in the field, re-running rewire and
+  // restarting their agent against a site that could never have answered.
+  // Idempotent and near-free on a healthy site.
+  const repair = await ensureHtaccessGuardBlock(publicDir);
+  if (repair.restoredAuth) {
+    console.log(
+      `${cyan(STEP)} Restored the Application Password passthrough in public/.htaccess —\n` +
+        '  without it Apache strips the credential and every application password 401s.',
+    );
+  }
   const result = await wireMcpForSite({
-    publicDir: join(cwd, 'public'),
+    publicDir,
     hostname,
     adminUser,
     onStep: (m) => console.log(`  … ${m}`),
@@ -1214,7 +1245,13 @@ async function rewireCommand() {
   // command has just printed "verified". Confirmed live: the new credential
   // authenticates fine over HTTP at the same moment the open session 401s.
   // Without this line the user is told it worked and then watches it not work.
-  if (result.configuredAgents?.length) {
+  // Only when the endpoint actually answered. Printing this after a FAILED
+  // verification was the original sin of this output: it is the correct advice
+  // for exactly one cause (a session holding the pre-rewire password) and it
+  // was shown for all of them, so a user whose site could not authenticate at
+  // all was told to keep restarting their agent. On failure the hints above
+  // have already said what is really wrong.
+  if (result.configuredAgents?.length && result.verification?.ok !== false) {
     console.log(
       `${cyan(STEP)} If an agent session is already open, restart it (or reconnect its MCP\n` +
         '  servers) — it is still holding the previous application password.\n' +

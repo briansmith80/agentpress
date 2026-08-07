@@ -20,6 +20,7 @@ import { psCapture } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { readWiredHostnames } from './mcp.mjs';
 import { sslCertPresent, wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
+import { HTACCESS_AUTH_MARKER } from './wordpress.mjs';
 import { bold, dim, green, mark, red, tint } from './ansi.mjs';
 import { join } from 'node:path';
 
@@ -94,6 +95,38 @@ async function existingSiteNames() {
   } catch {
     return [];
   }
+}
+
+/**
+ * Which AgentPress sites have no Application Password passthrough in their
+ * .htaccess. Silent damage worth a machine-wide sweep: the site keeps serving
+ * perfectly and only MCP auth dies, so nobody discovers it until an agent 401s,
+ * at which point the symptom looks nothing like its cause.
+ *
+ * Matches the RULE, not our wording, so a site whose file WordPress has since
+ * regenerated still passes — core emits an identical passthrough in its own
+ * generated block, and flagging that would be a false positive on a healthy
+ * site. What this actually catches is a file some third party rewrote without
+ * one.
+ *
+ * Identified by our own marker, never by "is a folder in www\" — this machine
+ * has ~100 folders there and most were never scaffolded by this tool. A site
+ * with no AgentPress block is not a broken AgentPress site, it is not one of
+ * ours, and counting it would manufacture a warning nobody can clear.
+ */
+async function sitesMissingAuthPassthrough(names) {
+  const missing = [];
+  for (const name of names) {
+    let content;
+    try {
+      content = await readFile(join(WWW_DIR, name, 'public', '.htaccess'), 'utf8');
+    } catch {
+      continue;
+    }
+    if (!content.includes('# BEGIN AgentPress')) continue;
+    if (!content.includes(HTACCESS_AUTH_MARKER)) missing.push(name);
+  }
+  return missing;
 }
 
 export async function runDoctor({ cli = 'node index.js' } = {}) {
@@ -285,6 +318,19 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
 
   const sites = await existingSiteNames();
   row('Existing sites in www\\', `${sites.length} folders`, 'info');
+
+  // Reported only when there is something to do. A clean machine printing
+  // "0 sites affected" is noise, and a machine with no AgentPress sites at all
+  // would be asserting something about a population of zero.
+  const staleAuth = await sitesMissingAuthPassthrough(sites);
+  if (staleAuth.length) {
+    row(
+      '  MCP auth passthrough',
+      `MISSING in ${staleAuth.join(', ')} — nothing re-exposes the Authorization header there, so ` +
+        `application passwords on those sites 401. Run \`${cli} update\` in each (then \`${cli} rewire\` if it is your MCP target).`,
+      'warn',
+    );
+  }
 
   const agents = await detectAgents();
   const anyAgent = Object.values(agents).some(Boolean);
