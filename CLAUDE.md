@@ -52,11 +52,19 @@ with `npm pack --dry-run`.
 
 ---
 
-## Live testing is the test suite
+## Live testing is the real test suite
 
-There is **no automated test suite**. Every shipped behaviour in this codebase was proven by
-running it against real Laragon, and most real bugs were found that way rather than by
-inspection. Budget for it.
+There **is** a fast unit suite now — `npm test`, ~54 cases under `test/`, no Laragon or
+network needed, and `prepublishOnly` runs it. Run it on every change. It does **not**
+replace the live run: it covers pure functions, string invariants and filesystem work, and
+by construction cannot see anything that only appears once Apache, PHP and WordPress are
+composed together.
+
+Most real bugs in this project were found by running it against real Laragon, not by
+inspection and not by the unit suite. v1.7.0 is the standing example: a change that passed
+review and every unit test corrupted `.htaccess` on the first real rewrite flush, because
+WordPress matches its markers with `str_contains()` per line and a *comment* in our block
+quoted one. Budget for the live run.
 
 **Throwaway scaffold recipe:**
 

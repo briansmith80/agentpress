@@ -254,7 +254,10 @@ const HTACCESS_GUARD_END = '# END AgentPress';
  */
 export const HTACCESS_AUTH_MARKER = 'E=HTTP_AUTHORIZATION:';
 
-const HTACCESS_GUARD_BLOCK = `${HTACCESS_GUARD_BEGIN}
+// Exported so the test suite can pin the two invariants this block must hold:
+// it ships the Authorization rule, and it never contains WordPress's own marker
+// text (see assertNoWordPressMarker for what happens when it does).
+export const HTACCESS_GUARD_BLOCK = `${HTACCESS_GUARD_BEGIN}
 # The agent API (MCP + WordPress core's Abilities REST namespace) is
 # LOOPBACK-ONLY. The Agent Connector's abilities pack grants shell-exec,
 # php-eval and filesystem write to an authenticated admin — that is the point
