@@ -54,11 +54,10 @@ handoff_reason: release-complete
 > the payload across `src/engine.js`, `src/wordpress.mjs` and `src/doctor.mjs`. GitHub release
 > `v1.7.0` → `12be5b1`, published and marked latest.
 >
-> **`main` is 1.7.1 and intentionally ahead of npm.** After publishing, `HTACCESS_GUARD_BLOCK`
-> was exported so the new tests can pin its invariants. That is a real change to a shipped
-> file, so leaving `package.json` at 1.7.0 would have made `main` a version number that no
-> longer matches its contents — the exact trap `RELEASING.md` warns about. Publishing 1.7.1 is
-> **optional**: no user-facing behaviour differs from 1.7.0.
+> **`main` is 1.7.1, ahead of npm, and now worth publishing.** It started as a test-only
+> delta (`HTACCESS_GUARD_BLOCK` exported so the new tests could pin its invariants). It then
+> picked up two real `/verify` fixes reported from the field — see below — so 1.7.1 is no
+> longer optional in the way this handoff first recorded it. **Not yet published.**
 
 ## What Changed This Session
 > - **`diagnoseAppPasswordAuth`** (`src/wordpress.mjs`). On a 401/403 from the endpoint probe,
@@ -79,6 +78,28 @@ handoff_reason: release-complete
 > - **`test/htaccess.test.mjs`** — 5 new tests (49 → 54).
 > - **CLAUDE.md corrected**: it claimed "there is **no automated test suite**", which has been
 >   false since 1.6.0 and cost real time this session.
+
+## Then: two `/verify` bugs, both from one field run (unreleased, on `main`)
+> An operator ran `/verify` in a scaffolded Oxygen site and reported two things. Both were
+> real, and one of my two initial readings of them was wrong.
+>
+> - **`/verify` asked for a slug-based page lookup the MCP surface cannot do.** Step 3 said
+>   "look for a page with the slug `home`". `search-posts` has no slug filter (titles and
+>   content only) and `create-post`'s entire schema is `title`, `status`, `content`,
+>   `post_type`, `parent_id`. The agent invented the `slug` parameter it had been asked for
+>   and the call was rejected. Step 3 now names both limits outright.
+> - **Playwright wrote into the site folder.** Wired with no flags, `@playwright/mcp` puts
+>   screenshots and page snapshots in `.playwright-mcp/` under the agent's cwd. Now wired with
+>   `--output-dir` at an absolute temp path.
+> - **Correction to the report:** it was described as landing in "the served site folder". At
+>   the project root it is not served — the docroot is `public/`, which `curl …/.env` → 404
+>   already proves. It is served only if the agent was started inside `public/`. Litter in the
+>   normal layout, exposure only in that one.
+> - **`--output-dir` is half a fix, and only running it showed that.** Driving the server over
+>   stdio: the flag governs the DEFAULT filename, but an explicit *relative* `filename`
+>   resolves against the agent's cwd and escapes the output dir completely. So step 4 also
+>   tells agents not to name the screenshot, and one test pins the flag and the instruction
+>   together — deleting either alone silently restores the bug.
 
 ## Key Decisions & Rationale
 > - **Diagnose, do not guess.** The deliverable was never a `.htaccess` fix; it is that the
@@ -138,7 +159,13 @@ handoff_reason: release-complete
 > - **[ACTION, unsent] The Oxygen bug has still not been reported upstream.** Unchanged from
 >   the last two handoffs. File at `soflyy/agent-connector-for-wp`; draft and full diagnosis in
 >   `PLANNING/TODO.md`. Posts publicly under the operator's identity, so it stays manual.
-> - **[DECISION, open] Publish 1.7.1?** Test-only delta. Fine to fold into the next release.
+> - **[ACTION] Publish 1.7.1.** No longer optional: it carries two `/verify` fixes for bugs
+>   reported from a real run. Needs a real terminal (2FA). Note `npm` reports a publish auth
+>   failure as `404`, which happened again on the 1.7.0 publish — check `npm whoami` first.
+> - **[NOTE] The new Playwright wiring needs `rewire`, not `update`.** `update` refreshes the
+>   `/verify` instructions but not the machine-global MCP config, so existing sites keep
+>   writing `.playwright-mcp/` into the project until someone runs `rewire` in them. This is
+>   why `.playwright-mcp/` is in the template gitignore as well as being fixed at the source.
 > - **[QUESTION] Cursor CLI detection is probably stale** — `src/agents.mjs` probes
 >   `cursor-agent`; an audit claims the shipped Windows binary is now `agent`. Unverified.
 > - **[CHORE] `git remote` still points at the old repo name** (`katalyst-laragon`) and relies
@@ -146,11 +173,12 @@ handoff_reason: release-complete
 > - **[CHORE] Mixed line endings.** A `.gitattributes` would end the per-commit warnings.
 
 ## Next Steps (ordered, actionable)
-> 1. [ ] Ask the friend to `npm i -g create-agentpress@latest`, run `agentpress update` then
+> 1. [ ] Publish 1.7.1 (see Blockers), then re-run the two release checks: `npm view`, and
+>    grep the downloaded tarball for `--output-dir` and `no \`slug\` parameter`.
+> 2. [ ] Ask the friend to `npm i -g create-agentpress@latest`, run `agentpress update` then
 >    `agentpress rewire` in `smit-oxy`, and report what the diagnosis says. That closes the
 >    loop and tells us whether the three causes are the right three.
-> 2. [ ] File the Oxygen bug upstream (see Blockers).
-> 3. [ ] Decide on publishing 1.7.1.
+> 3. [ ] File the Oxygen bug upstream (see Blockers).
 > 4. [ ] Confirm or fix the Cursor CLI binary name (`src/agents.mjs` + the frozen menu's copy;
 >    `test/parity.test.mjs` catches drift).
 > 5. [ ] Add `.gitattributes`; set the git remote to the current repo name.
