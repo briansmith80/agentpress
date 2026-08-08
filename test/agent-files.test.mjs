@@ -105,6 +105,31 @@ test('the SVG wordmark still spells the same art as the CLI banner', async () =>
   assert.deepEqual(rebuilt, source, 'the SVG wordmark has drifted from src/ansi.mjs');
 });
 
+test('verify.md tells agents not to name the screenshot, which --output-dir alone does not cover', async () => {
+  // These two are one control in two files. `--output-dir` in src/mcp.mjs only
+  // governs the DEFAULT filename: verified live by driving the server over
+  // stdio, an explicit relative `filename` resolves against the agent's cwd and
+  // escapes the output dir, dropping the PNG into the user's site folder. So
+  // the flag without this instruction is half a fix, and either one deleted on
+  // its own silently restores the bug.
+  const out = await read('template/.claude/commands/verify.md');
+  assert.match(out, /do\s+not\s+pass\s+a\s+`filename`/i, 'missing the instruction that keeps screenshots out of the project');
+
+  const mcp = await read('src/mcp.mjs');
+  assert.match(mcp, /'--output-dir'/, 'Playwright is no longer wired with an output directory');
+});
+
+test('verify.md drives the page tools with parameters they actually have', async () => {
+  // create-post has no `slug` and search-posts cannot filter by one. Asking for
+  // a slug-based lookup made an agent invent the parameter, and the call was
+  // rejected — reported from the field after a real /verify run.
+  // \s+ rather than a literal space throughout: this is wrapped prose, and a
+  // test that fails when a paragraph is re-flowed teaches people to delete it.
+  const out = await read('template/.claude/commands/verify.md');
+  assert.match(out, /no\s+`slug`\s+parameter/i, 'must state that create-post takes no slug');
+  assert.match(out, /cannot\s+filter\s+by\s+slug/i, 'must state that search-posts cannot look up by slug');
+});
+
 test('the page never claims success unconditionally', async () => {
   // The status card is evidence. A template that always renders "all checks
   // passed" would make it decoration, so the instructions must say otherwise.

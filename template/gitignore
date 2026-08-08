@@ -12,3 +12,7 @@
 /public/wp-content/plugins/breakdance*/
 *.log
 node_modules/
+# Playwright MCP screenshots and page snapshots. Sites wired by v1.7.1+ send
+# these to a temp directory instead, but a site wired before that keeps writing
+# them here until `agentpress rewire` is run in it.
+.playwright-mcp/

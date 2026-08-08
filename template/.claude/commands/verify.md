@@ -46,13 +46,25 @@ conversation:
 
 ## 3. Build the page
 
-**Reuse the existing page if there is one** — look for a page with the slug
-`home` and clear its Oxygen tree before rebuilding, rather than adding a second
-one. This command is meant to be re-run (after `rewire`, after a PHP change),
-and creating a fresh "Home" each time would leave a pile of near-identical
-drafts behind. Only create the page if none exists.
+**Reuse the existing page if there is one.** This command is meant to be re-run
+(after `rewire`, after a PHP change), and creating a fresh "Home" each time
+would leave a pile of near-identical drafts behind.
 
-Then pass the HTML below to `html-to-page` and set that page as the front page.
+Find it with `search-posts` using `query: "Home"` and `post_type: "page"`, then
+match on the returned title. **`search-posts` cannot filter by slug** — it
+searches titles and content only — so do not try to look one up that way. If a
+match exists, clear its Oxygen tree and rebuild into it rather than adding a
+second page.
+
+Only if none exists, create one with `create-post`. **Its entire schema is
+`title`, `status`, `content`, `post_type` and `parent_id` — there is no `slug`
+parameter.** Pass `title: "Home"`, `status: "publish"`, `post_type: "page"` and
+let WordPress derive the slug. Passing a `slug` is rejected, which is exactly
+what an earlier version of these instructions caused by asking you to work in
+terms of slugs.
+
+Then pass the HTML below to `html-to-page` and set that page as the front page
+with `set-home-page`.
 
 Substitute every `{{PLACEHOLDER}}` with a value you actually measured. Use
 today's date for `{{DATE}}`. Keep the markup and classes exactly as written —
@@ -69,9 +81,18 @@ Load the site with Playwright and screenshot it. Then actually check the result:
 - Every row must show a real value. A `{{PLACEHOLDER}}` left on the page means
   you skipped a measurement.
 
-Playwright writes the screenshot to a file. It is proof, not content, so delete
-it once you have looked at it — a stray PNG in the project root is litter, and
-in the site folder it would be publicly served.
+**Do not pass a `filename` to `browser_take_screenshot`.** Let it name the file
+itself. AgentPress wires Playwright with `--output-dir` pointing outside this
+project, and the default name honours that, so the screenshot and any page
+snapshot land in a temp directory with nothing to clean up. A relative
+`filename` is resolved against the agent's working directory instead and
+bypasses `--output-dir` entirely — verified live — which drops the file into
+this project, or into the served site folder if you were started inside
+`public/`.
+
+If you find a `.playwright-mcp/` directory in the project, this site was wired
+before v1.7.1: delete it, and tell the user to run `agentpress rewire` here so
+it stops happening.
 
 ## 5. Report
 

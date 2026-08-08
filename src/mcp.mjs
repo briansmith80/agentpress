@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runWp } from './wp.mjs';
 import { psRun } from './win.mjs';
@@ -22,7 +22,35 @@ const LARAGON_CRT = join(LARAGON_ROOT, 'etc', 'ssl', 'laragon.crt');
 // every EXISTING site on every machine with zero local change. Bump
 // deliberately, test, then re-scaffold or re-wire.
 const WP_MCP_PROXY = ['npx', '-y', '@automattic/mcp-wordpress-remote@0.4.0'];
-const PLAYWRIGHT_MCP = ['npx', '-y', '@playwright/mcp@0.0.78'];
+/**
+ * `--output-dir` is not cosmetic. Without it @playwright/mcp writes every
+ * screenshot and page snapshot into `.playwright-mcp/` under whatever directory
+ * the agent was started in, i.e. straight into the user's site folder — and it
+ * writes a snapshot `.yml` alongside the PNG, so an agent told to "delete the
+ * screenshot" leaves half of it behind. Reported from the field after a
+ * `/verify` run.
+ *
+ * When the agent starts at the project root that is only litter: the docroot is
+ * `public/`, so the root is not served (the same property `curl …/.env` → 404
+ * proves). When it starts INSIDE `public/` the files are publicly served.
+ * Sending the output outside the site covers both, and retires the manual
+ * cleanup step `/verify` used to carry.
+ *
+ * Absolute and resolved here rather than left relative: this string is baked
+ * into a machine-global agent config, so it must not depend on the agent's cwd
+ * — which is the entire bug. Spaces are safe (psRun single-quotes every token,
+ * the JSON writers pass argv arrays); a temp path cannot contain the double
+ * quote psRun refuses.
+ *
+ * HALF A FIX ON ITS OWN, verified by driving the server over stdio rather than
+ * trusting `--help`: the flag governs only the DEFAULT filename. An explicit
+ * relative `filename` argument is resolved against the agent's cwd and escapes
+ * the output dir completely. `/verify` therefore also tells agents not to pass
+ * one; changing this flag without keeping that instruction in step 4 re-opens
+ * the bug for any agent that names its screenshot.
+ */
+const PLAYWRIGHT_OUTPUT_DIR = join(tmpdir(), 'agentpress-playwright');
+const PLAYWRIGHT_MCP = ['npx', '-y', '@playwright/mcp@0.0.78', '--output-dir', PLAYWRIGHT_OUTPUT_DIR];
 
 /**
  * Revokes every application password we created, by NAME — never `--all`,
