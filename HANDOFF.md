@@ -9,7 +9,7 @@ status: done
 handoff_reason: release-complete
 ---
 
-# Handoff: v1.7.0 shipped, MCP 401s now say what is actually wrong
+# Handoff: v1.7.0 and v1.7.1 shipped — MCP 401s now say what is wrong, and `/verify` works
 
 > **Maintainer session notes, not user documentation.** If you just cloned this repo, start
 > at [README.md](README.md); for how to work in it, read [CLAUDE.md](CLAUDE.md); to release,
@@ -23,10 +23,15 @@ handoff_reason: release-complete
 > advice that is correct for one cause and misleading for every other. AgentPress now asks
 > the site why the credential was rejected and prints the cause with its own fix.
 >
+> **v1.7.1 followed**, fixing two `/verify` bugs reported from a real run: instructions that
+> asked the Oxygen page tools for a `slug` neither of them has, and Playwright writing
+> screenshots into the site folder. Both live on npm and GitHub, verified both ways. Nothing
+> is in flight.
+>
 > **Read the correction below before acting on anything about `.htaccess`.** The session
 > started from a confident diagnosis that turned out to be wrong, and the live test is what
-> caught it. `main` is at **1.7.1** (unpublished, test-only delta) so it never claims to be
-> the published 1.7.0.
+> caught it. The same thing happened twice more: the `--output-dir` fix was half a fix, and
+> the marker-collision bug. In all three cases running it is what found it.
 
 ## The correction, because it will otherwise be re-derived
 > **Claim made early in the session:** WordPress wipes the Authorization passthrough from
@@ -80,7 +85,7 @@ handoff_reason: release-complete
 > - **CLAUDE.md corrected**: it claimed "there is **no automated test suite**", which has been
 >   false since 1.6.0 and cost real time this session.
 
-## Then: two `/verify` bugs, both from one field run (unreleased, on `main`)
+## Then: two `/verify` bugs, both from one field run (shipped in 1.7.1)
 > An operator ran `/verify` in a scaffolded Oxygen site and reported two things. Both were
 > real, and one of my two initial readings of them was wrong.
 >
