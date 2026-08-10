@@ -88,8 +88,24 @@ function fail(step, result) {
   throw new Error(`${step} failed (exit ${result.code}):\n${(result.stderr || result.stdout).trim()}`);
 }
 
-/** `plugins` entries: a bare wordpress.org slug string, or `{ source, activate = true, version }` where `source` is a slug or a URL/path to a .zip. */
+/**
+ * `plugins` entries: a bare wordpress.org slug string, or `{ source, activate = true, version }`
+ * where `source` is a slug or a URL/path to a .zip.
+ *
+ * NON-FATAL per plugin, matching what installPremiumPlugins already does. These are
+ * the user's own `--plugins=` requests, and this is the FIRST step of finishExtras,
+ * so a single mistyped slug used to throw and cost the whole rest of the scaffold:
+ * the Agent Connector, the loopback guard, MCP wiring, the templates, the registry
+ * entry and the admin login link — on a site whose database and WordPress were
+ * already installed and fine.
+ *
+ * Returns `{ installed, failed }`. The caller MUST surface `failed` in the summary:
+ * turning a loud failure into a quiet one would be a worse trade than the original
+ * bug. installAgentConnector keeps using fail(), because nothing works without it.
+ */
 export async function installPlugins({ path, plugins = [], activate = [], onStep }) {
+  const installed = [];
+  const failed = [];
   for (const entry of plugins) {
     const spec = typeof entry === 'string' ? { source: entry, activate: true } : entry;
     const { source, version, activate: shouldActivate = true } = spec;
@@ -101,13 +117,34 @@ export async function installPlugins({ path, plugins = [], activate = [], onStep
     if (version) args.push(`--version=${version}`);
     if (shouldActivate) args.push('--activate');
     const result = await runWp(args, { path });
-    if (result.code !== 0) fail(`wp plugin install ${source}`, result);
+    if (result.code !== 0) {
+      // FIRST line, not last. WP-CLI reports a bad slug as
+      //   Warning: <slug>: Plugin not found.
+      //   Warning: The '<slug>' plugin could not be found.
+      //   Error: No plugins installed.
+      // so the last line is the least informative one it prints.
+      const reason = (result.stderr || result.stdout).trim().split('\n').map((l) => l.trim()).filter(Boolean)[0] || `exit ${result.code}`;
+      onStep?.(`  (could not install "${source}": ${reason} — carrying on)`);
+      failed.push({ source, reason });
+      continue;
+    }
+    installed.push(source);
   }
   for (const slug of activate) {
     onStep?.(`activating ${slug}…`);
     const result = await runWp(['plugin', 'activate', slug], { path });
-    if (result.code !== 0) fail(`wp plugin activate ${slug}`, result);
+    if (result.code !== 0) {
+      // FIRST line, not last. WP-CLI reports a bad slug as
+      //   Warning: <slug>: Plugin not found.
+      //   Warning: The '<slug>' plugin could not be found.
+      //   Error: No plugins installed.
+      // so the last line is the least informative one it prints.
+      const reason = (result.stderr || result.stdout).trim().split('\n').map((l) => l.trim()).filter(Boolean)[0] || `exit ${result.code}`;
+      onStep?.(`  (could not activate "${slug}": ${reason} — carrying on)`);
+      failed.push({ source: slug, reason });
+    }
   }
+  return { installed, failed };
 }
 
 async function isPluginActive(path, slug) {
