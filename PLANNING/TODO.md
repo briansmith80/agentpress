@@ -2,9 +2,20 @@
 
 > **Active plan: "make every scaffolded site prove itself"** (below). Written 2026-08-06.
 >
-> **Progress:** Phase 1 (Oxygen patcher) and Phase 3 (`AGENTS.md` + `/verify`) are **built,
-> tested and committed — but NOT published and NOT yet run end to end by the operator.**
-> Phase 2 was **cancelled**: see "What changed while building" below. Nothing is on npm.
+> **Progress (updated 2026-08-10): this plan is DONE and shipped.** Phase 1 (Oxygen patcher)
+> and Phase 3 (`AGENTS.md` + `/verify`) went out in **v1.6.0**, and both have since been
+> exercised against real sites — `/verify` was run end to end by the operator, and a field run
+> on an Oxygen site produced the two `/verify` fixes released in **v1.7.1**. Phase 2 was
+> **cancelled**: see "What changed while building" below.
+>
+> **Still open from Phase 1:** the `AGENTPRESS_NO_VENDOR_PATCH` opt-out that this plan calls
+> for at line 123. It was never implemented, and it is also not documented anywhere, so no
+> user has been promised it — the gap is internal to this plan, not a false claim on a user
+> surface. Verified 2026-08-10: the string appears in no source file, no help text and no
+> README. Do not mark it shipped.
+>
+> The current work is the **1.8.0 safety and clarity pass** from the 2026-08-10 audit, tracked
+> in [HANDOFF.md](../HANDOFF.md) rather than here.
 >
 > Items 2–5 of the previous plan shipped in **v1.3.0**; they're summarised at the bottom with
 > the durable lessons only. The full 575-line text is preserved in git —

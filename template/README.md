@@ -22,8 +22,9 @@ everything else here is AgentPress's own tooling, not part of the site).
 Open this folder in Claude Code (or any agent that reads `AGENTS.md`) and it picks up how
 this site is put together, including a few Oxygen behaviours that otherwise fail silently.
 
-Run **`/verify`** to check the whole stack end to end — both MCP servers, Oxygen, and the
-Agent Connector abilities — and build a holding page recording what passed. Worth doing on
+Run **`/verify`** to check the whole stack end to end: both MCP servers, the Agent Connector
+abilities, and Oxygen if this site has it. With Oxygen it also builds a holding page recording
+what passed; without it, that step is skipped and reported rather than faked. Worth doing on
 day one, and again any time MCP starts returning 401.
 
 ## Files

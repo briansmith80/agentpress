@@ -292,7 +292,18 @@ export async function applyLicenses({ path, slugs = [], onStep }) {
     key = config.licenses?.oxygen || null;
   }
   if (!key) {
-    onStep?.(`(no Oxygen license key configured — add {"licenses":{"oxygen":"<key>"}} to ${CONFIG_PATH} to auto-activate, or enter it once in wp-admin)`);
+    // Leads with `setup`, which prompts for the key and stores it, rather than
+    // with hand-editing JSON. Sending a user to paste a licence key into a config
+    // file by hand is both the least reliable route and the one most likely to end
+    // up in the wrong file; the prompt exists precisely so they never have to.
+    // No CLI constant in this module (it lives in engine.js), and hardcoding an
+    // invocation is exactly the mistake this release is fixing elsewhere — so
+    // name the command, not the way to launch it.
+    onStep?.(
+      '(no Oxygen license key configured — the `setup` command prompts for it and stores it,' +
+        ` or set AGENTPRESS_OXYGEN_LICENSE, or add {"licenses":{"oxygen":"<key>"}} to ${CONFIG_PATH}.` +
+        ' Without it Oxygen installs unlicensed, and can be activated later in wp-admin.)',
+    );
     return;
   }
   onStep?.('activating the Oxygen license…');

@@ -76,9 +76,17 @@ export async function forgetEnvironment(dir) {
   }
 }
 
-export function formatEnvironmentsTable(environments) {
+/**
+ * `cli` is passed in rather than derived, mirroring `runDoctor({ cli })`: the
+ * empty state used to hardcode "node index.js <name> (from the agentpress
+ * checkout)", which is how a MAINTAINER runs it. Every documented route is
+ * `npx create-agentpress@latest`, so the one message a brand-new user sees told
+ * them to work from a checkout they have never made. Defaulted so existing
+ * callers and tests keep working.
+ */
+export function formatEnvironmentsTable(environments, { cli = 'npx create-agentpress@latest' } = {}) {
   if (environments.length === 0) {
-    return 'No environments yet. Create one with: node index.js <name> (from the agentpress checkout)';
+    return `No environments yet. Create one with:  ${cli} <name>`;
   }
   // Defensive fallbacks — a nameless entry (older format, hand-edited file)
   // used to crash the exact command whose prune self-heals the registry.

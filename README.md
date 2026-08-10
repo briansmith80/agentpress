@@ -4,7 +4,7 @@
 
 [![npm](https://img.shields.io/npm/v/create-agentpress?color=ff2d78&labelColor=15181d)](https://www.npmjs.com/package/create-agentpress)
 [![license](https://img.shields.io/badge/license-GPL--2.0--or--later-ff2d78?labelColor=15181d)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-Windows%20+%20Laragon-ff2d78?labelColor=15181d)](https://laragon.org)
+[![platform](<https://img.shields.io/badge/platform-Windows%20+%20Laragon-ff2d78?labelColor=15181d>)](https://laragon.org)
 
 ```bash
 npx create-agentpress@latest my-site
@@ -84,10 +84,23 @@ and whether the certificate pair is present, so this is visible rather than gues
 - Confirmation prompt, then a UAC prompt for the hosts entry — approve it.
 - The first run downloads WP-CLI and WordPress core, so expect a few minutes.
 
-**Updating the tool**
+**Updating**
 
-The npx form always runs `@latest` — there is nothing to update. A git checkout updates
-with `git pull`.
+Three things move independently, so it is worth knowing which is which:
+
+| What | How | When you need it |
+|------|-----|------------------|
+| **The tool** | `npx …@latest` already runs the newest version. After `npm i -g create-agentpress`, update with `npm i -g create-agentpress@latest`. | Always, to get new behaviour |
+| **A site's own files** (`AGENTS.md`, `/verify`, `scripts/`, `.gitignore`) | `npx create-agentpress@latest update`, from inside that site's folder | Per site, and only for sites you still work in |
+| **The machine-wide MCP wiring** | `npx create-agentpress@latest rewire`, from inside any site's folder | Once, when a release changes how agents are wired |
+
+Newly scaffolded sites always get everything current. Existing sites keep the copies they
+were built with until you run `update` in them, which is deliberate: it overwrites files you
+may have edited, so it asks first.
+
+`rewire`'s main job is pointing your agents at *this* site, since that wiring is
+machine-global and the newest scaffold wins. Getting the latest wiring is a side effect, so
+running it once in whichever site you want as your MCP target covers both.
 
 ## Usage
 
@@ -216,9 +229,12 @@ Confirm both after your first scaffold with `claude mcp list` (or your agent's e
 ### `/verify` — make the site prove it
 
 Every scaffolded site gets an `AGENTS.md` and a `/verify` command. Open the folder in your
-agent and run it: it calls the WordPress MCP tools, drives Playwright to load the site, checks
-the Agent Connector abilities, and then builds a holding page recording exactly what passed
-and when.
+agent and run it: it calls the WordPress MCP tools, drives Playwright to load the site, and
+checks the Agent Connector abilities.
+
+On a site with Oxygen it also builds a holding page recording exactly what passed and when.
+Without Oxygen there is no `html-to-page` to build it with, so `/verify` reports the MCP legs
+and says plainly that the page was skipped rather than faking one.
 
 That is worth more than a green tick in a config listing, because **only the agent can test
 the agent's path**. `claude mcp list` says an entry exists; `/verify` says the credential still
@@ -264,7 +280,7 @@ Source lives in `src/`, one module per concern:
 | `plugins.mjs`                      | plugin install/activate, the Agent Connector pair, premium plugin sync/install                           |
 | `junctions.mjs`                    | the sibling-checkout → wp-content workflow, junction-safe directory removal                             |
 | `mcp.mjs` / `admin-login.mjs`    | MCP server config per agent, endpoint verification, the one-click login mint                             |
-| `wildcard.mjs`                     | instant mode — the one wildcard vhost, http + https, and the probes that prove it is live                |
+| `wildcard.mjs`                     | instant mode — the one wildcard vhost, http + https, and the probes that prove it is live               |
 | `doctor.mjs` / `ansi.mjs`        | the environment report, and the colour/glyph/wordmark layer it prints through                            |
 | `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine                                             |
 | `destroy.mjs` / `quickapp.mjs`   | teardown, the Laragon Quick app registration                                                             |

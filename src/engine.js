@@ -999,10 +999,16 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       // that cannot pass. This is the one moment they are looking at the
       // output, so it is where the feature has to be mentioned — the README is
       // not where anyone looks after a successful scaffold.
+      // The holding page is built by Oxygen's html-to-page, so promising it on a
+      // site scaffolded without Oxygen (the default for anyone with no licensed
+      // zips) promises something verify.md then correctly refuses to do — it says
+      // so explicitly, and tells the agent not to fake one. Four surfaces made
+      // that promise unconditionally.
       (mcp.configuredAgents?.length
         ? `\n  Then open this folder in ${AGENT_LABELS[mcp.configuredAgents[0]] || 'your agent'} and run ${cyan('/verify')} —\n` +
-          '  it exercises both MCP servers and Oxygen end to end, and builds the site a\n' +
-          '  holding page recording what passed.\n'
+          (premiumPlugins.includes('oxygen')
+            ? '  it exercises both MCP servers and Oxygen end to end, and builds the site a\n  holding page recording what passed.\n'
+            : '  it exercises both MCP servers end to end. (No holding page: that is built with\n  Oxygen, which this site was scaffolded without.)\n')
         : ''),
   );
 }
@@ -1183,7 +1189,7 @@ async function resumeCommand(name, { flags = {} } = {}) {
 }
 
 async function listCommand() {
-  console.log(formatEnvironmentsTable(await listEnvironments()));
+  console.log(formatEnvironmentsTable(await listEnvironments(), { cli: CLI }));
 }
 
 /**
@@ -1237,7 +1243,7 @@ async function rewireCommand() {
   try {
     env = parseEnvFile(await readFile(join(cwd, '.env'), 'utf8'));
   } catch {
-    bail(`${red(BAD)} No .env here — run rewire from inside a scaffolded site's directory.`);
+    bail(notASiteDirMessage('rewire', cwd));
     return;
   }
   // Same gate `update` and `destroy` enforce. Without it, rewire would run in
@@ -1353,17 +1359,14 @@ async function updateProject({ yes }) {
   try {
     envContent = await readFile(join(cwd, '.env'), 'utf8');
   } catch {
-    bail(`${red(BAD)} No .env here — run update from a agentpress site directory.`);
+    bail(notASiteDirMessage('update', cwd));
     return;
   }
   // A bare .env is far too common to be the only gate — `update --yes` in
   // any random Node project with a .env used to gut its package.json and
-  // overwrite README/.gitignore. Require an actual katalyst marker.
+  // overwrite README/.gitignore. Require an actual AgentPress marker.
   if (!(await isAgentPressSiteDir(cwd))) {
-    bail(
-      `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\katalyst.mjs — it does not\n` +
-        '  look like a agentpress site, so update will not touch it.',
-    );
+    bail(notASiteDirMessage('update', cwd));
     return;
   }
   const env = parseEnvFile(envContent);
@@ -1378,10 +1381,14 @@ async function updateProject({ yes }) {
   };
 
   console.log(
-    "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, package.json's known\n" +
-      'scripts, and the MCP loopback guard mu-plugin. Your .env, sandbox.config.json, and any\n' +
-      'custom package.json scripts are preserved. If you hand-edited any refreshed file, those\n' +
-      'edits will be overwritten — take a backup first (a git commit, or a copy of the folder).',
+    // AGENTS.md and .claude/ were missing from this list while being overwritten
+    // by the same copyTemplates call. They are the two files a user is most likely
+    // to have customised, since they are the agent's instructions for the site.
+    "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, AGENTS.md, .claude/,\n" +
+      "package.json's known scripts, the MCP loopback guard mu-plugin, and the Oxygen\n" +
+      'html-to-page patch. Your .env, sandbox.config.json, and any custom package.json\n' +
+      'scripts are preserved. If you hand-edited any refreshed file, those edits will be\n' +
+      'overwritten — take a backup first (a git commit, or a copy of the folder).',
   );
   if (!yes) {
     if (!process.stdin.isTTY) {
@@ -1426,7 +1433,7 @@ async function updateProject({ yes }) {
 async function destroyCommand({ yes }) {
   const cwd = process.cwd();
   if (!(await fileExists(join(cwd, '.env')))) {
-    bail(`${red(BAD)} No .env here — run destroy from a agentpress site directory.`);
+    bail(notASiteDirMessage('destroy', cwd));
     return;
   }
   // A bare .env is nowhere near enough to authorize an rm -rf: a typical
@@ -1512,6 +1519,23 @@ async function isAgentPressSiteDir(cwd) {
     (await fileExists(join(cwd, 'sandbox.config.json'))) ||
     (await fileExists(join(cwd, 'scripts', 'agentpress.mjs'))) ||
     (await fileExists(join(cwd, 'scripts', 'katalyst.mjs'))) // pre-rename sites
+  );
+}
+
+/**
+ * The single refusal for "this is not an AgentPress site folder". Three copies of
+ * this existed and all three disagreed: two said "a agentpress site directory",
+ * one named `scripts\katalyst.mjs` — the pre-rename filename that no site
+ * scaffolded since v1.2.0 has — and none of them said which folder the user was
+ * actually standing in, or how to find their sites. `isAgentPressSiteDir` still
+ * accepts the old name, so only the message was wrong.
+ */
+function notASiteDirMessage(command, cwd) {
+  return (
+    `${red(BAD)} \`${command}\` runs from inside a scaffolded site's folder, and this is not one.\n` +
+    '  It looks for .env, plus sandbox.config.json or scripts/agentpress.mjs.\n' +
+    `  Currently in:  ${cwd}\n` +
+    `  Your sites:    ${CLI} list`
   );
 }
 
@@ -1726,8 +1750,13 @@ function printUsage() {
   console.log(`
 create-agentpress v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
 
+First time here? Three commands, in this order:
+  1. doctor     confirm this machine is ready (changes nothing)
+  2. setup      once per machine — see the note below
+  3. <name>     scaffold your first site
+
   ${CLI} doctor              Check this machine's Laragon/PHP/MySQL/Node state
-  ${CLI} setup               One-time: enable instant scaffolds (no Laragon reloads)
+  ${CLI} setup               Once per machine (see below)
   ${CLI} <name>              Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
   ${CLI} resume <name>       Finish an interrupted scaffold
   ${CLI} list                List scaffolded sites
@@ -1738,12 +1767,19 @@ From inside a scaffolded site's directory:
   ${CLI} update      Refresh AgentPress's own tooling files
   ${CLI} rewire      Point the AI agents' MCP connection back at THIS site
   ${CLI} destroy     Permanently remove that site
+  npm run agentpress            The site's own menu: admin login link, status, logs
+  /verify        (in an agent)  Exercise both MCP servers and Oxygen end to end
+
+\`setup\` does two things. It installs one wildcard vhost, so scaffolding a site never
+needs a Laragon reload; and it optionally registers your own licensed premium plugin
+zips (Oxygen and friends). The premium half is skippable — everything works without it.
 
 Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
        Values attach with =, not a space: --premium=none, never --premium none.
        --adopt       resume: proceed on a folder with no AgentPress marker (it will be overwritten)
        --force-name  scaffold a site whose name looks like a mistyped command
 Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL_PORT  AGENTPRESS_PREMIUM_PLUGINS_REPO
+       AGENTPRESS_OXYGEN_LICENSE (Oxygen key; \`setup\` can store it for you instead)
        AGENTPRESS_NO_BANNER (hide the wordmark)  NO_COLOR / FORCE_COLOR (colour off / on)
 `);
 }

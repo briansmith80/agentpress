@@ -15,9 +15,10 @@ read tool it offers — `site-info` if Oxygen is installed, otherwise
 
 If that fails — especially with a 401 — the MCP wiring is stale. This happens
 when another site was scaffolded after this one, because wiring is
-machine-global. Stop and tell the user to run `agentpress rewire` from this
-folder, then restart their session so the new password is picked up. Do not
-attempt to work around it with wp-cli.
+machine-global. Stop and tell the user to run
+`npx create-agentpress@latest rewire` from this folder, then restart their
+session so the new password is picked up. Do not attempt to work around it with
+wp-cli.
 
 **Then decide which version of this check you are running.** If the tool list
 has no `oxygen-*` tools, this site was scaffolded without Oxygen
@@ -41,8 +42,8 @@ conversation:
   in your own tool list for that server, not a count from a REST endpoint or
   `wp_get_abilities()`. Those give different answers (37 / 48 / 52 on one site),
   because they count different things. The tool count is the one that matters:
-  it is what you can actually call, and `agentpress rewire` reports the same
-  number, so the page and the CLI agree.
+  it is what you can actually call, and `npx create-agentpress@latest rewire`
+  reports the same number, so the page and the CLI agree.
 
 ## 3. Build the page
 
@@ -91,8 +92,8 @@ this project, or into the served site folder if you were started inside
 `public/`.
 
 If you find a `.playwright-mcp/` directory in the project, this site was wired
-before v1.7.1: delete it, and tell the user to run `agentpress rewire` here so
-it stops happening.
+before v1.7.1: delete it, and tell the user to run
+`npx create-agentpress@latest rewire` here so it stops happening.
 
 ## 5. Report
 
