@@ -102,39 +102,55 @@ html-to-page · Agent Connector abilities. Mark the Oxygen line SKIPPED, not
 PASS, when Oxygen is not installed. If everything passed, say so plainly and
 give the user the site URL.
 
+Then tell them what this left behind, **every run, even when nothing was
+created**:
+
+> This registered 11 global CSS classes named `agentpress-verify-*`. They are
+> site-wide, not page-scoped: they stay if you delete this page, and pages you
+> build later can reuse them. A re-run reports `created_selectors: 0` because
+> they already exist, not because nothing was added. To remove them, delete them
+> in Oxygen's selector list, where there is a revision history.
+
+**Do not delete Oxygen selectors yourself, and do not offer to.** Elements bind
+to selectors by id, so deleting one strips `class=""` from every page that uses
+it — the page is not merely unstyled, its classes are gone from the DOM. And
+re-importing the same CSS does not repair it: the new selector gets a new id that
+the existing elements do not reference, so the page stays broken while looking
+fixed. The only safe undo is the builder's own UI.
+
 ---
 
 ## The page
 
 ```html
 <style>
-.ap-page{background:#0b0d11;min-height:100vh;padding:64px 24px;display:flex;flex-direction:column;align-items:center;gap:26px;font-family:'JetBrains Mono',monospace}
-.ap-mark{width:100%;max-width:420px;height:auto;display:block}
-.ap-head{color:#d8dbe2;font-size:26px;margin:0;font-weight:400}
-.ap-sub{color:#8890a0;font-size:15px;margin:0}
-.ap-card{background:#12151b;border:1px solid #262b34;border-radius:10px;padding:26px 30px;width:100%;max-width:560px;display:flex;flex-direction:column;gap:13px}
-.ap-cmd{color:#ff2d78;font-size:15px;margin:0 0 6px 0}
-.ap-row{display:flex;justify-content:space-between;gap:20px;border-bottom:1px dashed #262b34;padding-bottom:11px}
-.ap-key{color:#8890a0;font-size:14px}
-.ap-val{color:#d8dbe2;font-size:14px}
-.ap-ok{color:#4fbf6d;font-size:14px}
-.ap-exit{color:#5b6270;font-size:13px;margin:6px 0 0 0}
+.agentpress-verify-page{background:#0b0d11;min-height:100vh;padding:64px 24px;display:flex;flex-direction:column;align-items:center;gap:26px;font-family:'JetBrains Mono',monospace}
+.agentpress-verify-mark{width:100%;max-width:420px;height:auto;display:block}
+.agentpress-verify-head{color:#d8dbe2;font-size:26px;margin:0;font-weight:400}
+.agentpress-verify-sub{color:#8890a0;font-size:15px;margin:0}
+.agentpress-verify-card{background:#12151b;border:1px solid #262b34;border-radius:10px;padding:26px 30px;width:100%;max-width:560px;display:flex;flex-direction:column;gap:13px}
+.agentpress-verify-cmd{color:#ff2d78;font-size:15px;margin:0 0 6px 0}
+.agentpress-verify-row{display:flex;justify-content:space-between;gap:20px;border-bottom:1px dashed #262b34;padding-bottom:11px}
+.agentpress-verify-key{color:#8890a0;font-size:14px}
+.agentpress-verify-val{color:#d8dbe2;font-size:14px}
+.agentpress-verify-ok{color:#4fbf6d;font-size:14px}
+.agentpress-verify-exit{color:#5b6270;font-size:13px;margin:6px 0 0 0}
 </style>
-<section class="ap-page">
-<svg class="ap-mark" viewBox="0 0 490 68" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AgentPress"><path d="M10 0h20v12h-20zM60 0h20v12h-20zM100 0h40v12h-40zM150 0h10v12h-10zM180 0h10v12h-10zM200 0h40v12h-40zM250 0h30v12h-30zM300 0h30v12h-30zM350 0h40v12h-40zM410 0h30v12h-30zM460 0h30v12h-30zM0 14h10v12h-10zM30 14h10v12h-10zM50 14h10v12h-10zM100 14h10v12h-10zM150 14h20v12h-20zM180 14h10v12h-10zM210 14h10v12h-10zM250 14h10v12h-10zM280 14h10v12h-10zM300 14h10v12h-10zM330 14h10v12h-10zM350 14h10v12h-10zM400 14h10v12h-10zM450 14h10v12h-10zM0 28h40v12h-40zM50 28h10v12h-10zM70 28h20v12h-20zM100 28h30v12h-30zM150 28h10v12h-10zM170 28h20v12h-20zM210 28h10v12h-10zM250 28h30v12h-30zM300 28h30v12h-30zM350 28h30v12h-30zM410 28h20v12h-20zM460 28h20v12h-20zM0 42h10v12h-10zM30 42h10v12h-10zM50 42h10v12h-10zM80 42h10v12h-10zM100 42h10v12h-10zM150 42h10v12h-10zM180 42h10v12h-10zM210 42h10v12h-10zM250 42h10v12h-10zM300 42h10v12h-10zM320 42h10v12h-10zM350 42h10v12h-10zM430 42h10v12h-10zM480 42h10v12h-10zM0 56h10v12h-10zM30 56h10v12h-10zM60 56h20v12h-20zM100 56h40v12h-40zM150 56h10v12h-10zM180 56h10v12h-10zM210 56h10v12h-10zM250 56h10v12h-10zM300 56h10v12h-10zM330 56h10v12h-10zM350 56h40v12h-40zM400 56h30v12h-30zM450 56h30v12h-30z" fill="#ff2d78"/></svg>
-<h1 class="ap-head">$ site under construction</h1>
-<p class="ap-sub">WordPress + Oxygen + Agent Connector + Laragon — building now</p>
-<section class="ap-card">
-<p class="ap-cmd">$ /verify</p>
-<div class="ap-row"><span class="ap-key">WordPress MCP</span><span class="ap-ok">● verified</span></div>
-<div class="ap-row"><span class="ap-key">Playwright MCP</span><span class="ap-ok">● verified</span></div>
-<div class="ap-row"><span class="ap-key">WordPress</span><span class="ap-val">{{WP_VERSION}}</span></div>
-<div class="ap-row"><span class="ap-key">PHP</span><span class="ap-val">{{PHP_VERSION}}</span></div>
-<div class="ap-row"><span class="ap-key">Oxygen Builder</span><span class="ap-val">{{OXYGEN_VERSION}}</span></div>
-<div class="ap-row"><span class="ap-key">Theme</span><span class="ap-val">{{THEME}}</span></div>
-<div class="ap-row"><span class="ap-key">MCP tools available</span><span class="ap-val">{{MCP_TOOLS}}</span></div>
-<div class="ap-row"><span class="ap-key">Site</span><span class="ap-val">{{SITE_HOST}}</span></div>
-<p class="ap-exit">exit 0 — all checks passed · {{DATE}}</p>
+<section class="agentpress-verify-page">
+<svg class="agentpress-verify-mark" viewBox="0 0 490 68" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AgentPress"><path d="M10 0h20v12h-20zM60 0h20v12h-20zM100 0h40v12h-40zM150 0h10v12h-10zM180 0h10v12h-10zM200 0h40v12h-40zM250 0h30v12h-30zM300 0h30v12h-30zM350 0h40v12h-40zM410 0h30v12h-30zM460 0h30v12h-30zM0 14h10v12h-10zM30 14h10v12h-10zM50 14h10v12h-10zM100 14h10v12h-10zM150 14h20v12h-20zM180 14h10v12h-10zM210 14h10v12h-10zM250 14h10v12h-10zM280 14h10v12h-10zM300 14h10v12h-10zM330 14h10v12h-10zM350 14h10v12h-10zM400 14h10v12h-10zM450 14h10v12h-10zM0 28h40v12h-40zM50 28h10v12h-10zM70 28h20v12h-20zM100 28h30v12h-30zM150 28h10v12h-10zM170 28h20v12h-20zM210 28h10v12h-10zM250 28h30v12h-30zM300 28h30v12h-30zM350 28h30v12h-30zM410 28h20v12h-20zM460 28h20v12h-20zM0 42h10v12h-10zM30 42h10v12h-10zM50 42h10v12h-10zM80 42h10v12h-10zM100 42h10v12h-10zM150 42h10v12h-10zM180 42h10v12h-10zM210 42h10v12h-10zM250 42h10v12h-10zM300 42h10v12h-10zM320 42h10v12h-10zM350 42h10v12h-10zM430 42h10v12h-10zM480 42h10v12h-10zM0 56h10v12h-10zM30 56h10v12h-10zM60 56h20v12h-20zM100 56h40v12h-40zM150 56h10v12h-10zM180 56h10v12h-10zM210 56h10v12h-10zM250 56h10v12h-10zM300 56h10v12h-10zM330 56h10v12h-10zM350 56h40v12h-40zM400 56h30v12h-30zM450 56h30v12h-30z" fill="#ff2d78"/></svg>
+<h1 class="agentpress-verify-head">$ site under construction</h1>
+<p class="agentpress-verify-sub">WordPress + Oxygen + Agent Connector + Laragon — building now</p>
+<section class="agentpress-verify-card">
+<p class="agentpress-verify-cmd">$ /verify</p>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">WordPress MCP</span><span class="agentpress-verify-ok">● verified</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">Playwright MCP</span><span class="agentpress-verify-ok">● verified</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">WordPress</span><span class="agentpress-verify-val">{{WP_VERSION}}</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">PHP</span><span class="agentpress-verify-val">{{PHP_VERSION}}</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">Oxygen Builder</span><span class="agentpress-verify-val">{{OXYGEN_VERSION}}</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">Theme</span><span class="agentpress-verify-val">{{THEME}}</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">MCP tools available</span><span class="agentpress-verify-val">{{MCP_TOOLS}}</span></div>
+<div class="agentpress-verify-row"><span class="agentpress-verify-key">Site</span><span class="agentpress-verify-val">{{SITE_HOST}}</span></div>
+<p class="agentpress-verify-exit">exit 0 — all checks passed · {{DATE}}</p>
 </section>
 </section>
 ```

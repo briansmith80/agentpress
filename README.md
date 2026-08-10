@@ -244,7 +244,17 @@ stops immediately and tells you to run `rewire`.
 
 `AGENTS.md` is the other half, and it earns its place between verifications: it carries the
 handful of Oxygen behaviours that otherwise fail *silently* (bare CSS tag selectors are
-dropped, `@media` queries must match `get-breakpoints` verbatim, undefined classes vanish).
+dropped, `@media` queries must match `get-breakpoints` verbatim, and a class is kept only if
+your `<style>` defines it *or* it is already registered on the site).
+
+It also carries the one that surprises people most: a `<style>` block passed to
+`html-to-page` is **not page-scoped**. Every class in it becomes a global, site-wide Oxygen
+selector that outlives the page it came from, so `/verify`'s holding page leaves 11
+`agentpress-verify-*` classes behind and later pages can reuse them. Removing them is a
+deliberate act in Oxygen's selector list, not something an agent should tidy up: elements
+bind to selectors by id, so deleting one strips the class from every page using it, and
+re-importing the CSS mints a new id rather than repairing the old reference.
+
 Both files are plain markdown in the site, yours to edit.
 
 **Note:** the MCP wiring is machine-global (one `wordpress` entry per agent CLI), so it always

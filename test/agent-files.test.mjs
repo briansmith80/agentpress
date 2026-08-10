@@ -144,6 +144,59 @@ test('verify.md tells agents not to name the screenshot, which --output-dir alon
   assert.match(mcp, /'--output-dir'/, 'Playwright is no longer wired with an output directory');
 });
 
+test('the holding page uses a collision-proof class prefix, never a short one', async () => {
+  // The whole fix is this prefix, and the natural regression is someone shortening
+  // it back for readability. Oxygen DERIVES a 2-4 character prefix from the site
+  // name and recommends it to every agent (breakdance_mcp_derive_css_prefix takes
+  // the initials of up to four words), and `ap` is not in its reserved list — so on
+  // a site called "Acme Plumbing" the old `ap-*` names were the USER's namespace.
+  // An import replaces a same-named selector's properties outright, so the holding
+  // page would have silently restyled their design system.
+  const out = await read('template/.claude/commands/verify.md');
+  // `\r?\n`, because this file is checked out CRLF on Windows. A bare `\n` here
+  // matched nothing and the assertion below would have passed vacuously — the same
+  // line-ending trap that once made destroy skip its database drop (see parseEnvFile).
+  const block = out.match(/```html\r?\n([\s\S]*?)```/)?.[1];
+  assert.ok(block, 'the holding-page block must be findable');
+
+  const defined = [...block.matchAll(/^\.([a-z0-9-]+)\s*\{/gm)].map((m) => m[1]);
+  const used = [...block.matchAll(/class="([a-z0-9 -]+)"/g)].flatMap((m) => m[1].trim().split(/\s+/));
+  assert.ok(defined.length >= 10, 'expected the page to define its classes');
+  for (const name of [...defined, ...used]) {
+    assert.match(name, /^agentpress-verify-[a-z]+$/, `"${name}" must carry the long prefix`);
+  }
+  assert.doesNotMatch(block, /\bap-[a-z]/, 'no bare ap- names anywhere in the block');
+});
+
+test('verify.md discloses the site-wide registration, including that 0 means "already there"', async () => {
+  // Two halves of one control, per the pattern above: without the created_selectors
+  // note the disclosure goes silent from run two onward, which is exactly how this
+  // stayed invisible until a user went looking.
+  const out = await read('template/.claude/commands/verify.md');
+  assert.match(out, /global[\s\S]{0,60}classes/i, 'must say the classes are global');
+  assert.match(out, /created_selectors:\s*0/, 'must explain that 0 does not mean nothing was added');
+});
+
+test('verify.md refuses to delete Oxygen selectors, and says why re-importing will not fix it', async () => {
+  // The only rail. An agent that has just been told a leave-behind exists is the
+  // agent most likely to remove it helpfully, and the damage is not recoverable by
+  // re-adding the CSS: create_id() mints a fresh uuid, so the elements still point
+  // at the old one and the page stays broken while appearing fixed.
+  const out = await read('template/.claude/commands/verify.md');
+  assert.match(out, /do\s+not\s+delete\s+oxygen\s+selectors/i);
+  assert.match(out, /new\s+id/i, 'must close the "I will just re-import the CSS" loophole');
+});
+
+test('the agent-facing docs no longer claim undefined classes are simply dropped', async () => {
+  // They are dropped only when the class exists NOWHERE. A class already registered
+  // on the site resolves and styles the element with no <style> block at all —
+  // confirmed live on a real site, and the reason the old wording misled people.
+  const agents = await read('template/AGENTS.md');
+  assert.match(agents, /global,?\s+site-wide/i, 'AGENTS.md must state the global scope');
+  assert.doesNotMatch(agents, /not\s+defined\s+in\s+the\s+`?<style>`?\s+block\s+are\s+dropped/i);
+  assert.doesNotMatch(await read('README.md'), /undefined\s+classes\s+vanish/i);
+});
+
 test('verify.md drives the page tools with parameters they actually have', async () => {
   // create-post has no `slug` and search-posts cannot filter by one. Asking for
   // a slug-based lookup made an agent invent the parameter, and the call was
