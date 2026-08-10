@@ -13,7 +13,7 @@
 // loses 9 columns of alignment. `row()` is the only place that does either.
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { LARAGON_ROOT, HOSTS_PATH, WWW_DIR, PREMIUM_PLUGINS_DIR } from './paths.mjs';
-import { WP_CLI_PHAR, phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
+import { WP_CLI_PHAR, compareVersionsDesc, phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
 import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight, sslPortUp } from './laragon.mjs';
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
 import { psCapture, resolveOnPath } from './win.mjs';
@@ -21,7 +21,7 @@ import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { readWiredHostnames } from './mcp.mjs';
 import { sslCertPresent, wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
 import { HTACCESS_AUTH_MARKER } from './wordpress.mjs';
-import { bold, dim, green, mark, red, tint } from './ansi.mjs';
+import { bold, dim, envOn, green, mark, red, tint } from './ansi.mjs';
 import { join } from 'node:path';
 
 async function exists(p) {
@@ -135,7 +135,27 @@ async function sitesMissingAuthPassthrough(names) {
   return missing;
 }
 
-export async function runDoctor({ cli = 'node index.js' } = {}) {
+/**
+ * Is a newer create-agentpress published? Best-effort and short-fused on purpose:
+ * `doctor` is very often run offline, or mid-breakage, and a version check must
+ * never be the thing that makes it slow or that fails a healthy machine. Returns
+ * null for "did not find out", which the caller renders differently from "current".
+ *
+ * envOn, not bare truthiness, so AGENTPRESS_NO_UPDATE_CHECK=0 means off.
+ */
+async function latestPublishedVersion() {
+  if (envOn('AGENTPRESS_NO_UPDATE_CHECK')) return null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/create-agentpress/latest', { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.version === 'string' ? data.version : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function runDoctor({ cli = 'node index.js', version = null } = {}) {
   const lines = [];
   const blockers = [];
   // Pad the RAW label, then colour — the escapes in a coloured string count
@@ -152,6 +172,30 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
   };
 
   lines.push('Laragon / environment check\n');
+
+  // First row, because "am I running the current tool?" changes how you read every
+  // row below it. Information only — never a blocker, and silent about the network
+  // when it could not reach npm, since being offline is not a fault.
+  if (version) {
+    const latest = await latestPublishedVersion();
+    // compareVersionsDesc sorts descending, so < 0 means its first argument is the
+    // newer one. Three outcomes, kept distinct because "(current)" for a build that
+    // is actually AHEAD of npm would be a small lie told to whoever is most likely
+    // to be reading — someone running from a checkout.
+    const delta = latest ? compareVersionsDesc(latest, version) : null;
+    let value = `v${version}`;
+    let status = 'ok';
+    if (delta !== null && delta < 0) {
+      value = `v${version} — v${latest} is available. Update with:  npm i -g create-agentpress@latest`;
+      status = 'warn';
+    } else if (delta !== null && delta > 0) {
+      value = `v${version} (ahead of npm, which has v${latest} — a local checkout or an unpublished build)`;
+      status = 'info';
+    } else if (delta === 0) {
+      value = `v${version} (current)`;
+    }
+    row('create-agentpress', value, status);
+  }
 
   if (await exists(LARAGON_ROOT)) {
     row('Laragon root', LARAGON_ROOT, 'ok');

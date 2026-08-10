@@ -24,6 +24,7 @@ import { renameWithRetry, rmWithRetry } from './fsutil.mjs';
 import { sleep } from './win.mjs';
 import { MYSQL_PORT, provisionDatabase, resolveRootCredential, sanitizeDbIdentifier } from './mysql.mjs';
 import { diagnoseAppPasswordAuth, ensureHtaccessGuardBlock, installWordPress, writeMcpLoopbackGuard } from './wordpress.mjs';
+import { compareVersionsDesc } from './wp.mjs';
 import { generatePassword } from './secrets.mjs';
 import { copyTemplates, mergePackageJson } from './templates.mjs';
 import { formatEnvironmentsTable, forgetEnvironment, listEnvironments, recordEnvironment } from './registry.mjs';
@@ -1057,6 +1058,10 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
     hostname,
     port: null,
     agents: configuredAgents,
+    // Recorded so `list` can answer "which of my sites are behind?" without opening
+    // each site's sandbox.config.json. recordEnvironment shallow-merges, so adding a
+    // field is backward-compatible with registries written by older versions.
+    version: ENGINE_VERSION,
     createdAt: new Date().toISOString(),
   });
 
@@ -1294,7 +1299,19 @@ async function resumeCommand(name, { flags = {} } = {}) {
 }
 
 async function listCommand() {
-  console.log(formatEnvironmentsTable(await listEnvironments(), { cli: CLI }));
+  // The MCP target is read back rather than assumed, same as doctor does: the entry
+  // is machine-global and whichever site was wired last owns it.
+  const wired = await readWiredHostnames();
+  const targets = [...new Set(Object.values(wired).filter(Boolean))];
+  console.log(
+    formatEnvironmentsTable(await listEnvironments(), {
+      cli: CLI,
+      current: ENGINE_VERSION,
+      // Only when the readable configs agree. Two different targets means the
+      // machine is genuinely inconsistent, and marking one of them would be a guess.
+      mcpTarget: targets.length === 1 ? targets[0] : null,
+    }),
+  );
 }
 
 /**
@@ -1465,21 +1482,53 @@ async function rewireCommand() {
   await recordEnvironment({ dir: cwd, agents: result.configuredAgents, updatedAt: new Date().toISOString() });
 }
 
-async function updateProject({ yes }) {
-  const cwd = process.cwd();
+/**
+ * Refreshes one site's tooling files. Takes the directory as a parameter rather
+ * than reading process.cwd() itself, which is what makes `update --all` possible
+ * without a chdir. `announce` is false for the bulk path, where one shared
+ * consent prompt has already been given and repeating the wall of text per site
+ * would bury the per-site results.
+ *
+ * Returns true when the site was updated, false when it was skipped or refused,
+ * so the bulk caller can report per-site outcomes instead of dying on the first
+ * problem.
+ */
+async function updateProject({ yes, dir = process.cwd(), announce = true }) {
+  const cwd = dir;
   let envContent;
   try {
     envContent = await readFile(join(cwd, '.env'), 'utf8');
   } catch {
     bail(notASiteDirMessage('update', cwd));
-    return;
+    return false;
   }
   // A bare .env is far too common to be the only gate — `update --yes` in
   // any random Node project with a .env used to gut its package.json and
   // overwrite README/.gitignore. Require an actual AgentPress marker.
   if (!(await isAgentPressSiteDir(cwd))) {
     bail(notASiteDirMessage('update', cwd));
-    return;
+    return false;
+  }
+  // An OLDER CLI silently downgraded a site's tooling and reported success, which
+  // is the one direction of this command nobody expects. sandbox.config.json is
+  // never overwritten by copyTemplates, so its recorded version survives to be
+  // compared. compareVersionsDesc returns < 0 when its first argument is newer.
+  const sandboxPath = join(cwd, 'sandbox.config.json');
+  let sandbox = null;
+  try {
+    sandbox = JSON.parse(await readFile(sandboxPath, 'utf8'));
+  } catch {
+    // a very old site, or hand-edited — nothing to compare against
+  }
+  const siteVersion = sandbox?.updatedWithVersion || sandbox?.scaffolderVersion || null;
+  if (siteVersion && compareVersionsDesc(siteVersion, ENGINE_VERSION) < 0) {
+    bail(
+      `${red(BAD)} This site was last touched by AgentPress v${siteVersion}, which is NEWER than the\n` +
+        `  v${ENGINE_VERSION} you are running. Updating would replace its tooling with older files.\n` +
+        `  Update the tool first:  npm i -g create-agentpress@latest\n` +
+        '  (or re-run through `npx create-agentpress@latest update`, which always fetches the newest.)',
+    );
+    return false;
   }
   const env = parseEnvFile(envContent);
   const vars = {
@@ -1492,27 +1541,29 @@ async function updateProject({ yes }) {
     WP_BAT_ESCAPED,
   };
 
-  console.log(
-    // AGENTS.md and .claude/ were missing from this list while being overwritten
-    // by the same copyTemplates call. They are the two files a user is most likely
-    // to have customised, since they are the agent's instructions for the site.
-    "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, AGENTS.md, .claude/,\n" +
-      "package.json's known scripts, the MCP loopback guard mu-plugin, and the Oxygen\n" +
-      'html-to-page patch. Your .env, sandbox.config.json, and any custom package.json\n' +
-      'scripts are preserved. If you hand-edited any refreshed file, those edits will be\n' +
-      'overwritten — take a backup first (a git commit, or a copy of the folder).',
-  );
+  if (announce) {
+    console.log(
+      // AGENTS.md and .claude/ were missing from this list while being overwritten
+      // by the same copyTemplates call. They are the two files a user is most likely
+      // to have customised, since they are the agent's instructions for the site.
+      "This refreshes scripts/, wp-cli.yml, .gitignore, README.md, AGENTS.md, .claude/,\n" +
+        "package.json's known scripts, the MCP loopback guard mu-plugin, and the Oxygen\n" +
+        'html-to-page patch. Your .env, sandbox.config.json, and any custom package.json\n' +
+        'scripts are preserved. If you hand-edited any refreshed file, those edits will be\n' +
+        'overwritten — take a backup first (a git commit, or a copy of the folder).',
+    );
+  }
   if (!yes) {
     if (!process.stdin.isTTY) {
       bail(`${red(BAD)} Not updating: confirm with --yes when running non-interactively.`);
-      return;
+      return false;
     }
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     const answer = await rl.question('? I understand — update now [y/N]: ');
     rl.close();
     if (!/^y(es)?$/i.test(answer.trim())) {
       console.log('Cancelled.');
-      return;
+      return false;
     }
   }
 
@@ -1533,8 +1584,74 @@ async function updateProject({ yes }) {
     // every input, with no route to a fix short of re-scaffolding.
     await patchOxygenHtmlToPage({ path: join(cwd, 'public'), onStep: (msg) => console.log(`  ${msg}`) });
   }
-  await recordEnvironment({ dir: cwd, updatedAt: new Date().toISOString() });
+  // Record WHICH version did this, in the one file update never overwrites. Without
+  // it `list` cannot answer "which of my sites are behind?", and the downgrade guard
+  // above has nothing to compare against.
+  if (sandbox) {
+    sandbox.updatedWithVersion = ENGINE_VERSION;
+    await writeFile(sandboxPath, `${JSON.stringify(sandbox, null, 2)}\n`, 'utf8').catch(() => {});
+  }
+  await recordEnvironment({ dir: cwd, version: ENGINE_VERSION, updatedAt: new Date().toISOString() });
   console.log(`${green(OK)} Updated to v${ENGINE_VERSION}.`);
+  return true;
+}
+
+/**
+ * `update --all` over every site in the registry. The registry already knows every
+ * site's directory, so the only thing missing was a loop — and the reason to build
+ * it is that "update the tool" and "update each site" being different operations
+ * was the single most confusing thing about this tool in practice.
+ *
+ * Deliberately: one consent prompt for the whole run rather than per site, the plan
+ * printed BEFORE anything is touched, and a per-site outcome list at the end. It
+ * must never abort on the first bad site — a bulk operation that stops half way is
+ * worse than one that reports what it could not do.
+ */
+async function updateAllProjects({ yes }) {
+  const environments = await listEnvironments();
+  if (!environments.length) {
+    console.log(formatEnvironmentsTable(environments, { cli: CLI }));
+    return;
+  }
+  console.log(`This will refresh AgentPress's tooling files in ${environments.length} site${environments.length === 1 ? '' : 's'}:\n`);
+  for (const e of environments) console.log(`  ${e.name || basename(e.dir)}${e.version ? dim(`  (last updated by v${e.version})`) : ''}\n    ${e.dir}`);
+  console.log(
+    `\nEach site's .env and sandbox.config.json are preserved. Hand-edited copies of the\n` +
+      'refreshed files are not — take a backup first if that matters.',
+  );
+  if (!yes) {
+    if (!process.stdin.isTTY) {
+      bail(`${red(BAD)} Not updating: confirm with --yes when running non-interactively.`);
+      return;
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await rl.question(`? Update all ${environments.length} sites now [y/N]: `);
+    rl.close();
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      console.log('Cancelled.');
+      return;
+    }
+  }
+
+  const results = [];
+  for (const e of environments) {
+    const label = e.name || basename(e.dir);
+    console.log(`\n${cyan(STEP)} ${label}`);
+    try {
+      results.push({ label, ok: await updateProject({ yes: true, dir: e.dir, announce: false }) });
+    } catch (err) {
+      // One broken site must not strand the rest.
+      console.log(`  ${yellow(WARN)} ${err.message}`);
+      results.push({ label, ok: false });
+    }
+  }
+
+  const done = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  console.log('');
+  console.log(`${failed.length ? yellow(WARN) : green(OK)} Updated ${done.length} of ${results.length} sites to v${ENGINE_VERSION}.`);
+  for (const f of failed) console.log(`  ${yellow(WARN)} ${f.label} was not updated — see its output above.`);
+  if (failed.length) process.exitCode = 1;
 }
 
 /**
@@ -1910,6 +2027,7 @@ First time here? Three commands, in this order:
 From inside a scaffolded site's directory:
 
   ${CLI} update      Refresh AgentPress's own tooling files
+  ${CLI} update --all Same, for every site in \`list\` (run from anywhere)
   ${CLI} rewire      Point the AI agents' MCP connection back at THIS site
   ${CLI} destroy     Permanently remove that site
   npm run agentpress            The site's own menu: admin login link, status, logs
@@ -1929,7 +2047,7 @@ Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL
 `);
 }
 
-const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name']);
+const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all']);
 
 /**
  * Is a boolean flag on? The same trap as environment variables (see `envOn` in
@@ -2180,7 +2298,7 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command === 'doctor') {
-    await runDoctor({ cli: CLI });
+    await runDoctor({ cli: CLI, version: ENGINE_VERSION });
     return;
   }
 
@@ -2205,7 +2323,8 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command === 'update') {
-    await updateProject({ yes: args.yes });
+    if (flagOn(args.flags.all)) await updateAllProjects({ yes: args.yes });
+    else await updateProject({ yes: args.yes });
     return;
   }
 

@@ -141,6 +141,36 @@ test('formatEnvironmentsTable survives an entry with missing fields (it used to 
   assert.doesNotMatch(out, /undefined/);
 });
 
+test('formatEnvironmentsTable answers "which sites are behind, and which one are my agents on?"', () => {
+  // Both questions previously had no answer short of opening sandbox.config.json
+  // per site and ~/.claude.json by hand.
+  const envs = [
+    { name: 'alpha', hostname: 'alpha.test', dir: 'C:\\laragon\\www\\alpha', version: '1.8.0', agents: ['claude'] },
+    { name: 'beta', hostname: 'beta.test', dir: 'C:\\laragon\\www\\beta', version: '1.6.0' },
+    { name: 'gamma', hostname: 'gamma.test', dir: 'C:\\laragon\\www\\gamma' },
+  ];
+  const out = formatEnvironmentsTable(envs, { cli: 'ap', current: '1.8.0', mcpTarget: 'beta.test' });
+
+  assert.match(out, /VERSION/);
+  assert.match(out, /v1\.6\.0/, 'a site behind must show its own version');
+  assert.match(out, /\?/, 'a site recorded before the field existed must show ? rather than a guess');
+  assert.match(out, /^ {2}→ beta/m, 'the MCP target must be marked');
+  assert.doesNotMatch(out, /^ {2}→ alpha/m, 'and only that one');
+  // Behind and unknown are counted separately: a differing version IS behind, a '?'
+  // only means the registry predates the field, and calling that "behind" would be
+  // inventing a fact about the site.
+  assert.match(out, /1 site not on v1\.8\.0/, 'only the site with a differing recorded version');
+  assert.match(out, /1 of unknown version/, 'and the unrecorded one is reported as unknown, not behind');
+  assert.match(out, /ap update --all/, 'and name the command that fixes both');
+});
+
+test('formatEnvironmentsTable marks nothing when the MCP target is unknown or disputed', () => {
+  const envs = [{ name: 'alpha', hostname: 'alpha.test', dir: 'C:\\x', version: '1.8.0' }];
+  const out = formatEnvironmentsTable(envs, { cli: 'ap', current: '1.8.0', mcpTarget: null });
+  assert.doesNotMatch(out, /→/, 'guessing which site is wired is worse than saying nothing');
+  assert.doesNotMatch(out, /not on v/, 'and nothing is behind here');
+});
+
 test('the empty-state names a command the reader can actually run', () => {
   // It used to hardcode "node index.js <name> (from the agentpress checkout)", which is how a
   // maintainer runs it. Every documented route is npx, so the one line a brand-new user sees
