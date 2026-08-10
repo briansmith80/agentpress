@@ -73,7 +73,7 @@ const WP_BAT_ESCAPED = join(LARAGON_ROOT, 'usr', 'bin', 'wp.bat').replace(/\\/g,
  * couldn't express.
  */
 export function parseArgs(argv) {
-  const out = { command: null, positional: [], flags: {}, yes: false, verbose: false, help: false, version: false };
+  const out = { command: null, positional: [], flags: {}, stray: [], yes: false, verbose: false, help: false, version: false };
   for (const a of argv) {
     if (a === '--yes' || a === '-y') {
       out.yes = true;
@@ -100,10 +100,17 @@ export function parseArgs(argv) {
       }
       continue;
     }
-    if (!a.startsWith('-')) {
-      out.positional.push(a);
-      if (out.command === null) out.command = a;
+    // A single-dash token that is not one of the four handled above used to
+    // fall off the end of this loop and vanish without a word — `-premium=none`
+    // (one dash) was accepted in silence and ignored. Collected so the caller
+    // can say so; deliberately NOT treated as a positional, because that would
+    // turn a typo into a site name.
+    if (a.startsWith('-')) {
+      out.stray.push(a);
+      continue;
     }
+    out.positional.push(a);
+    if (out.command === null) out.command = a;
   }
   return out;
 }
@@ -220,6 +227,13 @@ function resumeHint(name, extraPlugins = [], premiumSelection = null) {
  * site is complete, so its presence also marks "this scaffold never finished".
  */
 const PENDING_SELECTION_FILE = '.agentpress-pending.json';
+/**
+ * Written into the staging `public/index.php` and read back by
+ * `agentPressMarkers` as the earliest proof a folder is ours. One constant, not
+ * two literals: the writer and the reader are ~400 lines apart, and a silent
+ * drift between them would make `resume` refuse a genuinely interrupted scaffold.
+ */
+const STAGING_INDEX_MARKER = 'agentpress placeholder';
 
 async function readPendingSelection(projectDir) {
   const path = join(projectDir, PENDING_SELECTION_FILE);
@@ -276,7 +290,21 @@ async function choosePremiumPlugins({ flagValue, yes }) {
     return selection;
   }
 
-  if (yes || !process.stdin.isTTY) return available.map((p) => p.slug);
+  // Say what the silent default resolved to. Non-interactively an unset
+  // --premium means "install everything available", which is a defensible
+  // default but was announced nowhere: the only evidence was the per-plugin
+  // install lines much later. Every remaining route to the wrong plugin set
+  // (a misspelled flag name, an omitted flag, a piped stdin) lands here, so
+  // this one line is where the surprise stops being silent.
+  if (yes || !process.stdin.isTTY) {
+    if (available.length) {
+      console.log(
+        `  ${dim('·')} no --premium given, so installing all ${available.length} premium plugin${available.length === 1 ? '' : 's'} available on this machine` +
+          ` (${available.map((p) => p.slug).join(', ')}). Use --premium=none to skip them.`,
+      );
+    }
+    return available.map((p) => p.slug);
+  }
 
   if (!available.length) {
     console.log(`  (no premium plugin zips on this machine — run \`${CLI} setup\` to add them; continuing without)`);
@@ -458,12 +486,25 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     const hasEnv = hasFolder && (await fileExists(join(projectDir, '.env')));
     const hasSandbox = hasFolder && (await fileExists(join(projectDir, 'sandbox.config.json')));
     if (hasFolder && !hasEnv) {
-      const hasVhost = Boolean(await findVhostForProject(projectDir));
-      console.log(
-        hasVhost
-          ? `\n  This looks like an interrupted scaffold — try: ${CLI} resume ${name}`
-          : `\n  This looks like an interrupted scaffold with no vhost yet — open Laragon, click\n  Reload, wait for it to settle, then run: ${CLI} resume ${name}`,
-      );
+      // Only recommend resume for a folder that carries one of our own markers.
+      // Recommending it for a folder we did not create is how a user gets talked
+      // into overwriting their own checkout — resume now refuses those anyway,
+      // so advising it here would just be a dead end.
+      const mine = await agentPressMarkers(projectDir);
+      if (!mine.length) {
+        console.log(
+          '\n  That folder has none of the files an AgentPress scaffold leaves behind, so it was\n' +
+            '  almost certainly created by something else. Pick a different name, or move the\n' +
+            '  folder aside first. (`resume` will not overwrite it either.)',
+        );
+      } else {
+        const hasVhost = Boolean(await findVhostForProject(projectDir));
+        console.log(
+          hasVhost
+            ? `\n  This looks like an interrupted scaffold — try: ${CLI} resume ${name}`
+            : `\n  This looks like an interrupted scaffold with no vhost yet — open Laragon, click\n  Reload, wait for it to settle, then run: ${CLI} resume ${name}`,
+        );
+      }
     } else if (hasFolder && hasEnv && !hasSandbox) {
       console.log(`\n  This looks like a scaffold that failed near the end — try: ${CLI} resume ${name}`);
     } else if (hasFolder && hasEnv) {
@@ -562,7 +603,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     // public/index.php first, even in staging — `wp core download` (Phase 4)
     // only refuses when it finds wp-load.php, so this placeholder is
     // harmless and gets overwritten by the real WordPress tarball later.
-    await writeFile(join(stagingDir, 'public', 'index.php'), '<?php\n// agentpress placeholder — replaced by `wp core download`\n');
+    await writeFile(join(stagingDir, 'public', 'index.php'), `<?php\n// ${STAGING_INDEX_MARKER} — replaced by \`wp core download\`\n`);
     // Inert when the docroot is public/ (the normal case); saves us if it
     // isn't — see verifyDocroot below.
     await writeFile(join(stagingDir, '.htaccess'), 'Require all denied\n');
@@ -582,7 +623,13 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       // back to installing every available premium plugin, so the user needs to
       // know their choice is no longer recorded anywhere.
     ).catch((err) => {
-      console.log(`  (could not record this run's plugin choices: ${err.message} — if you need to resume, pass --premium= explicitly)`);
+      // This file is also the earliest marker `resume` looks for, so losing it
+      // costs more than the plugin choices: if the run then dies before .env
+      // exists, the folder may carry no marker at all and resume will refuse it.
+      console.log(
+        `  (could not record this run's plugin choices: ${err.message}\n` +
+          '   to resume, pass --premium= explicitly, and add --adopt if resume says the folder is not ours)',
+      );
     });
 
     if (instant) {
@@ -979,6 +1026,22 @@ async function resumeCommand(name, { flags = {} } = {}) {
   const projectDir = join(WWW_DIR, name);
   if (!(await fileExists(projectDir))) {
     bail(`${red(BAD)} No folder at ${projectDir} — nothing to resume. Use the normal scaffold command instead.`);
+    return;
+  }
+  // Ownership check BEFORE anything is read or written. See agentPressMarkers:
+  // this command overwrites public/, README.md, .gitignore and package.json, and
+  // until now it would do that to any folder shaped like an unfinished scaffold,
+  // including someone else's checkout.
+  const markers = await agentPressMarkers(projectDir);
+  if (!markers.length && !flagOn(flags.adopt)) {
+    bail(
+      `${red(BAD)} ${projectDir} does not look like an AgentPress site, so resume will not touch it.\n` +
+        '  resume finishes an INTERRUPTED SCAFFOLD, and it overwrites public/, README.md,\n' +
+        '  .gitignore and package.json. None of the files a scaffold leaves behind are here\n' +
+        `  (${PENDING_SELECTION_FILE}, .env, sandbox.config.json, scripts/agentpress.mjs, or the\n` +
+        '  placeholder public/index.php).\n' +
+        '  If it really is an interrupted scaffold, re-run with --adopt to override.',
+    );
     return;
   }
   // An explicit flag always wins; otherwise inherit what the interrupted
@@ -1452,6 +1515,52 @@ async function isAgentPressSiteDir(cwd) {
   );
 }
 
+/**
+ * Which files that AgentPress itself writes are present in this folder. The
+ * ownership question `resume` has to answer before it overwrites anything.
+ *
+ * `resume` used to accept ANY folder under www\ that had a `public\` and no
+ * `.env`, which is also the exact shape of a freshly cloned WordPress project
+ * whose `.env` is gitignored — and resuming one overwrites `public/`,
+ * `README.md`, `.gitignore` and `package.json`. Worse, the scaffold's own
+ * name-collision message actively recommended `resume` for that folder.
+ *
+ * The list is ordered by when a scaffold writes each one, so it covers every
+ * window an interrupted run can die in:
+ *   - public/index.php placeholder  written into the staging dir first of all
+ *   - .agentpress-pending.json      immediately after the staging rename
+ *   - .env                          once the database and WordPress are in
+ *   - sandbox.config.json / scripts/  the extras phase, i.e. nearly complete
+ *
+ * Returns the markers found rather than a boolean so the refusal can name what
+ * it looked for. An empty array is the "not ours, do not touch it" answer.
+ */
+export async function agentPressMarkers(projectDir) {
+  const found = [];
+  if (await fileExists(join(projectDir, PENDING_SELECTION_FILE))) found.push(PENDING_SELECTION_FILE);
+  // A bare `.env` is NOT enough. It is one of the commonest files in any web
+  // project and is routinely gitignored, which is exactly the shape this gate
+  // exists to reject — accepting it would have left half the hole open. Ours
+  // always carries SITE_HOST (see finishInstall), and rewire/destroy both read
+  // that key, so its presence is what actually identifies the file as ours.
+  try {
+    const env = await readFile(join(projectDir, '.env'), 'utf8');
+    if (/^SITE_HOST=/m.test(env)) found.push('.env with SITE_HOST');
+  } catch {
+    // absent or unreadable: not one of the markers
+  }
+  if (await isAgentPressSiteDir(projectDir)) found.push('sandbox.config.json or scripts/agentpress.mjs');
+  // Last, because this only matters for a run that died inside the staging
+  // window, before `wp core download` replaced the placeholder.
+  try {
+    const index = await readFile(join(projectDir, 'public', 'index.php'), 'utf8');
+    if (index.includes(STAGING_INDEX_MARKER)) found.push('public/index.php (scaffold placeholder)');
+  } catch {
+    // absent or unreadable: not one of the markers
+  }
+  return found;
+}
+
 async function fileExists(p) {
   // stat, not readFile — readFile throws EISDIR on a directory, which would
   // report an existing project folder as "missing".
@@ -1631,12 +1740,58 @@ From inside a scaffolded site's directory:
   ${CLI} destroy     Permanently remove that site
 
 Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
+       Values attach with =, not a space: --premium=none, never --premium none.
+       --adopt       resume: proceed on a folder with no AgentPress marker (it will be overwritten)
+       --force-name  scaffold a site whose name looks like a mistyped command
 Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL_PORT  AGENTPRESS_PREMIUM_PLUGINS_REPO
        AGENTPRESS_NO_BANNER (hide the wordmark)  NO_COLOR / FORCE_COLOR (colour off / on)
 `);
 }
 
-const KNOWN_FLAGS = new Set(['plugins', 'premium']);
+const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name']);
+
+/**
+ * Is a boolean flag on? The same trap as environment variables (see `envOn` in
+ * ansi.mjs): `--adopt` yields boolean `true`, but `--adopt=true` yields the
+ * STRING `'true'`, and a bare `!== true` check rejects it. That turned both of
+ * this pass's own escape hatches into dead ends — the refusal said "add
+ * --force-name", and `--force-name=true` was then refused by the very message
+ * recommending it. Found in review, because only the bare spelling was tested.
+ *
+ * A bare `--adopt=` counts as on; nobody writes that meaning "off". An explicit
+ * false/0/no counts as off, so the flag can be scripted either way.
+ */
+function flagOn(value) {
+  if (value === true) return true;
+  if (typeof value !== 'string') return false;
+  return ['', 'true', '1', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+/**
+ * The value each VALUE_FLAG should be shown as an example. Per-flag on purpose:
+ * a shared template built the example from the flag name, so the `--plugins`
+ * refusal recommended `--plugins=none` — and `none` is not a special value there,
+ * it is a literal wordpress.org slug. Installing it fails, and installPlugins is
+ * the first step of finishExtras, so the scaffold dies AFTER the database, the
+ * database user and WordPress exist. Worse, the poison value is echoed back into
+ * the printed resume hint and parked in .agentpress-pending.json, so a bare
+ * `resume` replays it. Recommending a value must therefore be flag-specific.
+ */
+const VALUE_FLAG_EXAMPLE = { premium: '--premium=none', plugins: '--plugins=wordpress-seo' };
+
+/**
+ * Flags that are meaningless without a value. `parseArgs` only splits on `=`, so
+ * `--premium none` sets the flag to boolean `true` and drops `none` into the
+ * positionals — and because the call site forwards the value only when it is a
+ * string, the selector fell through to its non-interactive default of EVERY
+ * available plugin. `--premium none --yes` therefore installed and licensed every
+ * commercial plugin on the machine, the exact opposite of what was typed.
+ * Refused now rather than guessed at, because guessing wrong here is expensive
+ * either way (install what was declined, or decline what was wanted).
+ */
+const VALUE_FLAGS = new Set(['plugins', 'premium']);
+/** Commands that act on the current directory and take no site name. */
+const CWD_COMMANDS = new Set(['update', 'rewire', 'destroy']);
 const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'rewire', 'destroy', 'register-quick-app', 'help', 'version']);
 
 function editDistance(a, b) {
@@ -1650,11 +1805,153 @@ function editDistance(a, b) {
   return dp[a.length][b.length];
 }
 
-/** Anything not a known command becomes a SITE NAME and scaffolds — warn when it smells like a typo'd command instead. */
-function closestCommand(word) {
+/**
+ * Anything not a known command becomes a SITE NAME and scaffolds, so this is the
+ * only thing standing between a mistyped command and a provisioned site.
+ *
+ * A flat `editDistance <= 2` was far too loose in the one direction that costs
+ * something: it matched `test`, `host`, `best` and `hello` against `list`/`help`,
+ * i.e. several of the likeliest throwaway site names anyone types. Two extra
+ * conditions keep the real typos and drop those: the lengths must be within one
+ * of each other, and a distance of 2 counts only for words of 6+ characters.
+ *
+ * The length floor alone lost every transposition of a SHORT command (`lsit`,
+ * `hlep`, `setpu`), so an adjacent swap is matched explicitly instead. That is
+ * tight rather than fuzzy: none of the ordinary site names above is a
+ * transposition of any command, so it costs nothing to include.
+ *
+ * Pinned by a matrix in test/argv-safety.test.mjs, in both directions, because
+ * this gates a refusal and not merely a warning.
+ */
+function isAdjacentSwap(a, b) {
+  if (a.length !== b.length) return false;
+  const diff = [];
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) diff.push(i);
+  return diff.length === 2 && diff[1] === diff[0] + 1 && a[diff[0]] === b[diff[1]] && a[diff[1]] === b[diff[0]];
+}
+
+export function closestCommand(word) {
+  const w = word.toLowerCase();
   for (const cmd of KNOWN_COMMANDS) {
-    if (editDistance(word.toLowerCase(), cmd) <= 2 && word.toLowerCase() !== cmd) return cmd;
+    if (w === cmd) continue;
+    if (isAdjacentSwap(w, cmd)) return cmd;
+    if (Math.abs(w.length - cmd.length) > 1) continue;
+    const distance = editDistance(w, cmd);
+    if (distance === 1 || (distance === 2 && w.length >= 6)) return cmd;
   }
+  return null;
+}
+
+/**
+ * Every argument refusal, as a PURE function of the parsed args. Returns the
+ * refusal message, or null when the invocation is acceptable.
+ *
+ * Each rule replaces a silent misinterpretation on a command that provisions or
+ * deletes. Two of them were outright destructive: `destroy <other-site> --yes`
+ * ignored the name and deleted the folder you were standing IN, and
+ * `--premium none` (a space instead of `=`) installed and licensed EVERY
+ * commercial plugin, the exact opposite of what was typed.
+ *
+ * Pure, and extracted from create() for a reason that is not tidiness. The first
+ * version lived inline, so the only way to test it was to call create() — and
+ * the only way to prove those tests were load-bearing was to disable a guard and
+ * let the same argv through. Doing that scaffolded a site called `destory`:
+ * folder, database, database user, registry entry and a re-pointed
+ * machine-global MCP wiring, on the maintainer's own machine. That is precisely
+ * the harm these rules exist to prevent, so the rules must be checkable without
+ * executing anything. Keep this function free of side effects.
+ */
+export function refuseInvocation(args) {
+  if (args.stray.length) {
+    // Any `-word` is a two-dash flag missing a dash. The first version gated this
+    // hint on a hand-listed regex, which both missed the two flags this very pass
+    // introduced and told a user nothing when it did not match.
+    const looksLikeAFlag = args.stray.some((s) => /^-[a-z][a-z-]/i.test(s));
+    const hint = looksLikeAFlag ? ' (flags take two dashes: --yes, --premium=none)' : '';
+    return `${red(BAD)} Unrecognised argument ${args.stray.join(' ')}${hint} — refusing rather than ignoring it silently.`;
+  }
+
+  for (const flag of Object.keys(args.flags)) {
+    if (VALUE_FLAGS.has(flag) && args.flags[flag] === true) {
+      const consequence =
+        flag === 'premium'
+          ? '\n  Left unset, a run with --yes installs EVERY premium plugin on this machine,\n  which is the opposite of --premium=none.'
+          : '\n  Left unset, no extra plugins are installed at all.';
+      return (
+        `${red(BAD)} --${flag} needs its value attached with =, e.g. \`${VALUE_FLAG_EXAMPLE[flag]}\`.` +
+        `${consequence}\n  A value written after a space is not read as the flag's value.`
+      );
+    }
+    // A near-miss of a value flag is worse than an unknown flag, because the
+    // fallback is not "do nothing": `--premim=none --yes` leaves premium unset,
+    // and unset under --yes means install EVERY premium zip. The blanket
+    // unknown-flag warning above cannot be promoted to a refusal (it is the only
+    // forward-compat escape, and README documents accepted-but-unimplemented
+    // flags), so the refusal is narrowed to names that are plainly a misspelling.
+    if (!KNOWN_FLAGS.has(flag)) {
+      const meant = [...VALUE_FLAGS].find((known) => flag.toLowerCase() === known || editDistance(flag.toLowerCase(), known) <= 2);
+      if (meant) {
+        return (
+          `${red(BAD)} Unknown flag --${flag} — did you mean --${meant}?\n` +
+          `  Refused rather than ignored because --${meant} left unset is not neutral: with --yes it\n` +
+          `  ${meant === 'premium' ? 'installs EVERY premium plugin on this machine' : 'installs no extra plugins at all'}.`
+        );
+      }
+    }
+  }
+
+  if (args.command && CWD_COMMANDS.has(args.command) && args.positional.length > 1) {
+    const extra = args.positional.slice(1);
+    return (
+      `${red(BAD)} \`${args.command}\` acts on the site folder you are standing in, so it cannot take` +
+      ` ${extra.map((e) => `"${e}"`).join(', ')}.\n` +
+      '  This is a refusal because it used to be ignored SILENTLY: with --yes,\n' +
+      '  `destroy <other-site>` destroyed the folder you were IN, not the one you named.\n' +
+      `  To act on ${extra[0]}:  cd ${join(WWW_DIR, extra[0])}   then re-run \`${CLI} ${args.command}\`.`
+    );
+  }
+
+  if (args.command) {
+    // Provably safe to refuse rather than fall through to scaffolding:
+    // validateSiteName rejects any uppercase character, so a capitalised command
+    // can never have been a legitimate site name anyway.
+    const lower = args.command.toLowerCase();
+    if (lower !== args.command && KNOWN_COMMANDS.has(lower)) {
+      return `${red(BAD)} Commands are lowercase — did you mean \`${CLI} ${lower}\`?`;
+    }
+    // Interactively, the warning in the dispatch fallback plus confirmScaffold's
+    // "[y/N]" is enough: a human sees the name before anything happens. Under
+    // --yes there is no such step, and agent CLIs pass --yes by default.
+    const close = closestCommand(args.command);
+    if (close && args.yes && !flagOn(args.flags['force-name'])) {
+      return (
+        `${red(BAD)} "${args.command}" looks like a mistyped \`${close}\`, and --yes means there is no\n` +
+        '  confirmation step to catch it. Scaffolding would create a folder, a database and a\n' +
+        // Conditional because wireMcpForSite no-ops when no agent CLI is on PATH,
+        // and a refusal that overstates what would have happened is the same
+        // failure as the "restart your agent session" line this project already fixed.
+        '  database user, and (if an agent CLI is installed) re-point this machine\'s MCP\n' +
+        '  wiring at the new site.\n' +
+        `  Did you mean:  ${CLI} ${close}\n` +
+        `  Or, if you really want a site named "${args.command}":  add --force-name`
+      );
+    }
+    // The scaffold path had the SAME silently-dropped-positional bug the cwd
+    // commands did, and it is not harmless there: `${CLI} create mysite --yes`
+    // provisions a folder, database and user under the name "create" and discards
+    // "mysite" without a word. Refused last so a genuine typo still gets the
+    // clearer message above.
+    if (!KNOWN_COMMANDS.has(args.command) && args.positional.length > 1) {
+      const extra = args.positional.slice(1);
+      return (
+        `${red(BAD)} Expected one site name, but got ${args.positional.map((p) => `"${p}"`).join(' ')}.\n` +
+        `  Only the first is used, so this would have created a site named "${args.command}" and\n` +
+        `  silently discarded ${extra.map((e) => `"${e}"`).join(', ')}.\n` +
+        '  Site names cannot contain spaces — use hyphens, e.g. `my-site`.'
+      );
+    }
+  }
+
   return null;
 }
 
@@ -1687,6 +1984,12 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
 
   if (args.help || args.command === 'help') {
     printUsage();
+    return;
+  }
+
+  const refusal = refuseInvocation(args);
+  if (refusal) {
+    bail(refusal);
     return;
   }
 
@@ -1741,6 +2044,8 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
   }
 
   if (args.command) {
+    // The --yes case was refused up in refuseInvocation; this is the interactive
+    // path, where confirmScaffold still shows the name before anything happens.
     const close = closestCommand(args.command);
     if (close) {
       console.log(`${yellow(WARN)} "${args.command}" looks like a mistyped command (did you mean "${close}"?) — treating it as a SITE NAME to scaffold.`);
