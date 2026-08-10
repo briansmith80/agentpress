@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { HOSTS_PATH, SITES_ENABLED_APACHE, WWW_DIR } from './paths.mjs';
-import { psCapture } from './win.mjs';
+import { psCapture, psQuote } from './win.mjs';
 import { hostsContentEntryAddresses, inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
 
 export const WILDCARD_CONF_PATH = join(SITES_ENABLED_APACHE, 'zzz-agentpress-wildcard.conf');
@@ -216,8 +216,12 @@ export async function ensureHostsEntry(hostname) {
   const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
   await writeFile(tmp, script, 'utf8');
   try {
+    // psQuote, not a bare '${tmp}'. %TEMP% contains the Windows account name, so an
+    // apostrophe in it ("O'Brien") closed the PowerShell string early and broke the
+    // hosts write permanently for that user — reported to them, wrongly, as "the
+    // elevation prompt was declined", which no retry could fix.
     const result = await psCapture(
-      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${tmp}'; exit $p.ExitCode`,
+      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${psQuote(tmp)}; exit $p.ExitCode`,
     );
     // The elevated child's exit code flows through, but the hosts file
     // itself is the ground truth — UAC decline throws inside psCapture's
@@ -227,9 +231,13 @@ export async function ensureHostsEntry(hostname) {
       await flushDnsCache();
       return { ok: true, already: false };
     }
+    // Only blame the UAC prompt when there is nothing better to say. Defaulting to
+    // it buried the real cause whenever stderr had one, and sent users to retry an
+    // elevation prompt that was never the problem.
+    const stderr = (result.stderr || '').trim().split('\n')[0];
     return {
       ok: false,
-      reason: (result.stderr || 'the elevation prompt was declined, or the file is read-only / locked by another program').trim().split('\n')[0],
+      reason: stderr || `the elevation prompt was declined, or the file is read-only / locked by another program (exit ${result.code})`,
     };
   } finally {
     await rm(tmp, { force: true }).catch(() => {});

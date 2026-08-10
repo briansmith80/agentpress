@@ -17,6 +17,7 @@ const ansi = await read('src/ansi.mjs');
 const mcp = await read('src/mcp.mjs');
 const agents = await read('src/agents.mjs');
 const adminLogin = await read('src/admin-login.mjs');
+const engine = await read('src/engine.js');
 
 test('the frozen menu imports nothing from src/ (src does not exist beside a scaffolded site)', () => {
   const bad = [...menu.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]).filter((s) => !s.startsWith('node:'));
@@ -84,4 +85,44 @@ test('the admin-login PHP payload is the same in both copies', () => {
   assert.ok(inMenu, 'the frozen menu must carry the admin-login payload');
   assert.ok(inSrc, 'src/admin-login.mjs must carry the payload');
   assert.equal(inMenu, inSrc, 'the admin-login PHP drifted between its two copies');
+});
+
+test('the SITE_HOST hostname regex is identical in both copies (it already shipped broken once)', () => {
+  // The menu's copy once read `(:d{1,5})?` instead of `(:\d{1,5})?`, matching a
+  // literal "d". Any SITE_HOST with a port was rejected and the menu refused to
+  // start, in a file the user cannot easily fix. This is the assertion that would
+  // have caught it, and it is the reason this test file exists.
+  const grab = (src) => src.match(/\/\^\[a-z0-9\]\(\[a-z0-9\.-\]\*\[a-z0-9\]\)\?\(:\\d\{1,5\}\)\?\$\/i/)?.[0];
+  const inMenu = grab(menu);
+  const inSrc = grab(engine);
+  assert.ok(inMenu, 'the frozen menu must validate SITE_HOST with the shared regex');
+  assert.ok(inSrc, 'src/engine.js must validate SITE_HOST with the shared regex');
+  assert.equal(inMenu, inSrc, 'the hostname regex drifted between its two copies');
+});
+
+test('the pink wordmark colour is identical in both copies', () => {
+  // Two escape sequences with a truecolor fallback. One shade off is invisible in
+  // review and obvious side by side.
+  const grab = (src) => src.match(/\(process\.env\.COLORTERM \|\| ''\)\.includes\('truecolor'\)[^;]+/)?.[0];
+  assert.ok(grab(menu), 'the menu must define PINK');
+  assert.equal(grab(menu), grab(ansi), 'the pink escape codes drifted');
+});
+
+test('BANNER_WIDTH is identical in both copies (it right-aligns the subtitle)', () => {
+  const grab = (src) => src.match(/const BANNER_WIDTH = (\d+);/)?.[1];
+  assert.ok(grab(menu), 'the menu must define BANNER_WIDTH');
+  assert.equal(grab(menu), grab(ansi), 'BANNER_WIDTH drifted, so the subtitle no longer lines up');
+});
+
+test('every AGENTPRESS_* env read in the frozen menu goes through envOn', () => {
+  // The generalised version of the FORCE_COLOR=0 bug: an env var is a string, so a
+  // bare truthiness test makes "=0" mean ON. Two gates in this file read
+  // process.env directly and both were inverted. Asserting the SHAPE catches the
+  // next one automatically, which naming individual vars would not.
+  const offenders = menu
+    .split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => /process\.env\.(AGENTPRESS|KATALYST)_/.test(line))
+    .filter(([, line]) => !/envOn\(/.test(line));
+  assert.deepEqual(offenders, [], 'read these through envOn(), or "=0" will mean on');
 });

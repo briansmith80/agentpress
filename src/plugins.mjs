@@ -456,11 +456,19 @@ export async function patchOxygenHtmlToPage({ path, onStep }) {
     return { status: 'unrecognised' };
   }
 
-  // Below 2.10 the vendor code is correct, so there is nothing to fix. Unknown
-  // (null) is treated as "don't touch" for the same reason.
+  // Below 2.10 the vendor code is correct, so there is nothing to fix.
   const libxml = await libxmlVersion();
-  if (libxml === null || libxml < 21000) {
+  if (libxml !== null && libxml < 21000) {
     return { status: 'not-affected', libxml };
+  }
+  // Unknown is NOT the same as not-affected, and lumping them together made this
+  // the one silent branch in a patcher whose own guard list (PLANNING/TODO.md)
+  // requires every skip to be reported. A PHP startup warning polluting stdout is
+  // enough to make the version unreadable, and the user then gets an Oxygen whose
+  // html-to-page fails on every input with nothing on screen explaining why.
+  if (libxml === null) {
+    onStep?.('(could not read the libxml version, so the Oxygen html-to-page patch was SKIPPED — if that tool fails on every input, this is why)');
+    return { status: 'unknown-libxml', libxml: null };
   }
 
   try {

@@ -303,9 +303,11 @@ Nothing here runs in the background; removing it is deleting things. In order:
 2. Delete this checkout.
 3. Optional leftovers, harmless if kept: `~/.agentpress\` (registry, hosts backups,
    premium plugin zips — note those zips are your licensed property),
-   `<laragon>\usr\bin\wp-cli.phar` + `wp.bat` (shared WP-CLI install), the `AgentPress` line
-   in `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#laragon magic!`
-   hosts entries for destroyed sites (Laragon prunes these on reload).
+   `<laragon>\usr\bin\wp-cli-<version>.phar` + `wp.bat` (shared WP-CLI install — the
+   filename is version-scoped, so a bare `wp-cli.phar` there is either a pre-1.2.0
+   leftover or your own and is not ours to delete), the `AgentPress` line in
+   `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#agentpress` or
+   `#laragon magic!` hosts entries for destroyed sites (Laragon prunes these on reload).
 
 ## Security
 

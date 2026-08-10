@@ -73,14 +73,15 @@ const WP_BAT_ESCAPED = join(LARAGON_ROOT, 'usr', 'bin', 'wp.bat').replace(/\\/g,
  * couldn't express.
  */
 export function parseArgs(argv) {
-  const out = { command: null, positional: [], flags: {}, stray: [], yes: false, verbose: false, help: false, version: false };
+  // No `verbose` field. `--verbose` was parsed into one, never read anywhere, and
+  // absent from `help` — and because it was a named field it was structurally
+  // exempt from the unknown-flag warning, so the tool silently accepted a flag
+  // that did nothing. Dropped, so it now falls into `flags` and warns like any
+  // other unrecognised flag.
+  const out = { command: null, positional: [], flags: {}, stray: [], yes: false, help: false, version: false };
   for (const a of argv) {
     if (a === '--yes' || a === '-y') {
       out.yes = true;
-      continue;
-    }
-    if (a === '--verbose') {
-      out.verbose = true;
       continue;
     }
     if (a === '--help' || a === '-h') {
@@ -358,14 +359,14 @@ async function confirmScaffold(name, hostname) {
  * verifyDocroot's dual-request dance (wrong-docroot is impossible when the
  * wildcard derives the docroot by convention).
  */
-async function probeInstant(hostname, projectDir, { timeoutMs = 12_000 } = {}) {
+async function probeInstant(hostname, projectDir, { timeoutMs = 12_000, tls = false } = {}) {
   const token = randomBytes(12).toString('hex');
   const probeFile = join(projectDir, 'public', '.agentpress-probe.txt');
   await writeFile(probeFile, token, 'utf8');
   try {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const res = await fetchViaLoopback(hostname, '/.agentpress-probe.txt');
+      const res = await fetchViaLoopback(hostname, '/.agentpress-probe.txt', { tls });
       if (res && res.status === 200 && res.body.trim() === token) return true;
       await sleep(750);
     }
@@ -373,6 +374,22 @@ async function probeInstant(hostname, projectDir, { timeoutMs = 12_000 } = {}) {
   } finally {
     await rm(probeFile, { force: true }).catch(() => {});
   }
+}
+
+/**
+ * Does https serve THIS site, proven by a token rather than by any response at all?
+ *
+ * The scheme recorded here is not cosmetic: it goes into `.env` as SITE_SCHEME,
+ * into wp-config's per-request WP_HOME, into the admin login link and into the
+ * registry. The old test accepted any https response, and a wildcard conf
+ * generated before Laragon's certificate existed answers :443 with Laragon's own
+ * welcome page — so a site would record `https` while https served something that
+ * was not the site. One short attempt, because a false negative merely records
+ * `http`, which is always safe and always true.
+ */
+async function httpsServesSite(hostname, projectDir) {
+  if (!sslCertPresent()) return false;
+  return probeInstant(hostname, projectDir, { timeoutMs: 3000, tls: true });
 }
 
 /**
@@ -592,6 +609,30 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   // Explicit gate before any side effect — an unrecognized subcommand falls
   // through to scaffolding, so without this a typo like `node index.js
   // dcotor` would stage a folder and restart Apache machine-wide.
+  // MySQL is needed for the database step, which is a long way in: the folder, the
+  // UAC prompt and (in classic mode) a machine-wide Laragon reload all happen
+  // first, and `preflight()` already knew MySQL was down before any of it. Checked
+  // here, before the confirmation and before any side effect.
+  //
+  // Hard block in instant mode only. In classic mode the Laragon reload this
+  // scaffold triggers can itself start MySQL, so refusing would reject a run that
+  // would have worked — warn and let the confirmation carry the decision.
+  if (!state.mysqlUp) {
+    if (instant) {
+      bail(
+        `${red(BAD)} MySQL is not listening on :${MYSQL_PORT}, and this scaffold needs it to create the\n` +
+          '  database. Click Start All in Laragon and try again.\n' +
+          `  (If you moved MySQL, set AGENTPRESS_MYSQL_PORT. \`${CLI} doctor\` shows what was resolved.)`,
+      );
+      return;
+    }
+    console.log(
+      `${yellow(WARN)} MySQL is not listening on :${MYSQL_PORT} yet. The Laragon reload this scaffold\n` +
+        '  triggers may start it — if it does not, the run will stop at the database step and\n' +
+        '  can be finished later with `resume`.\n',
+    );
+  }
+
   if (!yes && !(await confirmScaffold(name, hostname))) return;
 
   const premiumSelection = await choosePremiumPlugins({ flagValue: typeof flags.premium === 'string' ? flags.premium : undefined, yes });
@@ -649,8 +690,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         );
         return;
       }
-      const httpsRes = sslCertPresent() ? await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 }) : null;
-      const scheme = httpsRes ? 'https' : 'http';
+      const scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
       console.log(`${green(OK)} ${scheme}://${hostname} is live (served by the wildcard vhost)`);
       await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme, warnings: scaffoldWarnings });
       return;
@@ -1202,7 +1242,9 @@ async function resumeCommand(name, { flags = {} } = {}) {
   }
   console.log(`${green(OK)} http://${hostname} is live and serving from public\\`);
 
-  const scheme = env.SITE_SCHEME || (sslCertPresent() && (await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 })) ? 'https' : 'http');
+  // Same token proof as the scaffold path — an existing SITE_SCHEME still wins,
+  // since that site already decided and resume must not silently change it.
+  const scheme = env.SITE_SCHEME || ((await httpsServesSite(hostname, projectDir)) ? 'https' : 'http');
 
   // Resume finishes the job without a picker: an explicit --premium wins, else
   // the interrupted scaffold's own parked answer, else (nothing parked) every
@@ -1667,9 +1709,13 @@ async function fileExists(p) {
 }
 
 function printAvailabilityTable(availability) {
-  console.log('\nPremium plugins on this machine:');
+  // `dim('·')` for a missing zip, never `red(BAD)`. These are commercial plugins the
+  // user may simply not own, and this table is the FIRST output of the second command
+  // a stranger runs — four red ✖ marks read as four failures on a healthy machine,
+  // which is precisely the crying-wolf that teaches people to ignore the glyph column.
+  console.log('\nPremium plugins (optional — your own licensed zips):');
   for (const p of availability) {
-    console.log(`  ${p.available ? green(OK) : red(BAD)} ${p.label.padEnd(52)} ${p.available ? basename(p.zip) : 'no zip yet'}`);
+    console.log(`  ${p.available ? green(OK) : dim('·')} ${p.label.padEnd(52)} ${p.available ? basename(p.zip) : dim('no zip yet')}`);
   }
 }
 
@@ -1748,9 +1794,33 @@ async function setupCommand() {
     bail(`${red(BAD)} Laragon is in Nginx mode — instant mode is Apache-only. Switch to Apache first.`);
     return;
   }
+  // Mirrors the scaffold and resume gates: without laragon.exe there is nowhere
+  // to write a vhost, and the failure that follows is a confusing filesystem
+  // error rather than the one thing the user needs to hear.
+  if (!state.laragonInstalled) {
+    bail(
+      `${red(BAD)} No laragon.exe found under the resolved Laragon root, so there is nowhere to install\n` +
+        '  the wildcard vhost. If Laragon lives somewhere unusual, set AGENTPRESS_LARAGON_ROOT to\n' +
+        '  its folder (e.g. D:\\laragon) and re-run setup.',
+    );
+    return;
+  }
 
-  await setupPreferences();
+  // Say what this command is about to do. `setup` prints nothing before its first
+  // prompt, and its first output is a table of red ✖ marks for commercial plugins
+  // the user has not bought — on the second command a stranger ever runs.
+  console.log(
+    `${cyan(STEP)} Two things, and only the first is required:\n` +
+      '  1. a single wildcard vhost, so scaffolding a site never needs a Laragon reload.\n' +
+      '  2. optionally, registering your own licensed premium plugin zips (Oxygen and\n' +
+      '     friends). Skip it and everything still works — sites just get no premium\n' +
+      '     plugins unless you add zips later.\n',
+  );
 
+  // The MANDATORY half runs FIRST. It used to sit after all the optional prompts,
+  // so abandoning the licence-key question — which a user has no reason to expect —
+  // cost them the wildcard vhost, the entire reason the command exists, with
+  // nothing printed to say it had been skipped.
   const { suffix, updated } = await installWildcardConf();
   if (updated) {
     console.log(`${green(OK)} Wildcard vhost written to ${WILDCARD_CONF_PATH} (serves *${suffix} from www\\<name>\\public${sslCertPresent() ? ', http + https' : ''})`);
@@ -1760,6 +1830,11 @@ async function setupCommand() {
   if (!sslCertPresent()) {
     console.log("  (no Laragon SSL cert found — https will light up if you enable SSL in Laragon's menu and re-run setup)");
   }
+
+  // Optional half, and it must stay AFTER the wildcard install above and BEFORE the
+  // verification below — the early returns further down would otherwise skip it.
+  await setupPreferences();
+
   if (!state.apacheUp) {
     console.log(
       `${cyan(STEP)} Apache is not running — click Start All in Laragon, then run setup again to verify.\n` +

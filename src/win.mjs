@@ -46,7 +46,13 @@ export function psCapture(command) {
   });
 }
 
-function psQuote(value) {
+/**
+ * Single-quotes a value for PowerShell, doubling any embedded apostrophe.
+ * Exported because callers that build a command string by hand need it too:
+ * `%TEMP%` contains the Windows account name, so an apostrophe in it silently
+ * terminated a quoted path and broke the elevated hosts write for that user.
+ */
+export function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 

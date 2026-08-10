@@ -22,7 +22,11 @@ const WP_CLI_BAT = join(USR_BIN, 'wp.bat');
 const WP_CLI_VERSION = '2.12.0';
 const WP_CLI_URL = `https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar`;
 // Version-scoped + tool-owned: never clobber a wp-cli the user installed as wp-cli.phar.
-const WP_CLI_PHAR = join(USR_BIN, `wp-cli-${WP_CLI_VERSION}.phar`);
+// Exported so `doctor` can report the path it will actually run instead of
+// re-deriving one. It printed a bare `wp-cli.phar`, which has been the wrong
+// filename since the version-scoped name landed in v1.2.0: a user following that
+// row to delete the file found either nothing or their own unrelated phar.
+export const WP_CLI_PHAR = join(USR_BIN, `wp-cli-${WP_CLI_VERSION}.phar`);
 const WP_CLI_SHA512 = 'be928f6b8ca1e8dfb9d2f4b75a13aa4aee0896f8a9a0a1c45cd5d2c98605e6172e6d014dda2e27f88c98befc16c040cbb2bd1bfa121510ea5cdf5f6a30fe8832';
 
 export { LARAGON_ROOT, WP_CLI_CACHE_DIR };
