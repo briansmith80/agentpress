@@ -35,9 +35,16 @@ test('patches the known-broken wrapper and keeps a backup', async () => {
   const root = await site(BROKEN);
   const res = await patchOxygenHtmlToPage({ path: root });
 
-  // Skip rather than fail where PHP is unavailable (CI without Laragon): the
-  // guard correctly declines when it cannot establish the libxml version.
-  if (res.status === 'not-affected') return;
+  // Skip rather than fail where PHP is unavailable (CI without Laragon): the guard
+  // correctly declines when it cannot establish the libxml version.
+  //
+  // BOTH statuses, and that is the whole point of the pair. Until v1.8.0 an
+  // unreadable libxml version was reported as `not-affected`, i.e. indistinguishable
+  // from a genuinely old libxml that needs no patch; it is now `unknown-libxml` and
+  // is reported to the user, because the silent version left people with an Oxygen
+  // whose html-to-page fails on every input and nothing on screen explaining why.
+  // This test only exercises the patch itself, so it stands down for either.
+  if (res.status === 'unknown-libxml' || res.status === 'not-affected') return;
 
   assert.equal(res.status, 'patched');
   const after = await readFile(fileIn(root), 'utf8');
