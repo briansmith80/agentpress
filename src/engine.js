@@ -999,7 +999,12 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   const onStep = (msg) => console.log(`  … ${msg}`);
 
   if (extraPlugins.length) {
-    await installPlugins({ path: publicDir, plugins: extraPlugins, onStep });
+    // Non-fatal per plugin now, so the failures have to reach the summary or this
+    // trades a loud failure for a quiet one — which would be the worse bug.
+    const { failed } = await installPlugins({ path: publicDir, plugins: extraPlugins, onStep });
+    for (const f of failed) {
+      warnings.push(`the plugin "${f.source}" was NOT installed (${f.reason}) — check the slug on wordpress.org`);
+    }
   }
 
   // Always installed — Phase 7's MCP wiring depends on it, same as the
