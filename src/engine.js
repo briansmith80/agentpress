@@ -634,7 +634,13 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
 
     if (instant) {
       console.log(`${cyan(STEP)} Instant mode: no Laragon reload needed.`);
-      await ensureHostsEntryWithGuidance(hostname);
+      // Kept, not discarded: every proof after this point uses loopback with an
+      // explicit Host header, so a refused hosts write cannot fail any of them and
+      // the panel would otherwise end in a green tick over URLs that resolve nowhere.
+      const scaffoldWarnings = [];
+      if (!(await ensureHostsEntryWithGuidance(hostname))) {
+        scaffoldWarnings.push(`${hostname} has no hosts entry, so the URLs below will not resolve until you add it (see above)`);
+      }
       if (!(await probeInstant(hostname, projectDir))) {
         bail(
           `${red(BAD)} The wildcard vhost did not serve ${hostname} within 12s — Apache may be down or the\n` +
@@ -646,7 +652,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       const httpsRes = sslCertPresent() ? await fetchViaLoopback(hostname, '/', { tls: true, timeoutMs: 2000 }) : null;
       const scheme = httpsRes ? 'https' : 'http';
       console.log(`${green(OK)} ${scheme}://${hostname} is live (served by the wildcard vhost)`);
-      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme });
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme, warnings: scaffoldWarnings });
       return;
     }
 
@@ -758,7 +764,21 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
  * a Laragon reload staleness failure leaves behind, see laragon.mjs's file
  * header) doesn't need its own copy of this sequence.
  */
-async function finishInstall({ name, hostname, projectDir, extraPlugins = [], premiumSelection, scheme = 'http' }) {
+/**
+ * `warnings` is threaded through this pair rather than printed where it happens,
+ * and that is the whole point of it. Every signal it carries was already COMPUTED
+ * and then thrown away, so the final panel could print a bare
+ * "✓ WordPress is ready" for a site whose hostname does not resolve, whose .env
+ * is being served over HTTP, whose containment guard is not loaded, or whose
+ * "Admin" link is not the one-click link it looks like.
+ *
+ * The declined-UAC case is the one that mattered most and the easiest to miss:
+ * both the docroot probe and the MCP handshake deliberately bypass DNS (loopback
+ * plus an explicit Host header), so a hosts write the user refused cannot fail
+ * either of them. The scaffold really did succeed; the URLs in the panel just did
+ * not resolve, and nothing said so.
+ */
+async function finishInstall({ name, hostname, projectDir, extraPlugins = [], premiumSelection, scheme = 'http', warnings = [] }) {
   if (!(await mysqlUp())) {
     throw new Error(`MySQL is not listening on :${MYSQL_PORT} — start it in Laragon, then retry.`);
   }
@@ -806,9 +826,11 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
     ].join('\n'),
     'utf8',
   );
-  await protectProjectSecrets({ name, projectDir });
+  if (!(await protectProjectSecrets({ name, projectDir }))) {
+    warnings.push("this site's .env is being served over HTTP — see the SECURITY warning above");
+  }
 
-  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}`, scheme });
+  await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}`, scheme, warnings });
 }
 
 /**
@@ -846,6 +868,13 @@ async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {
     failedAgents.push({ key: 'all', reason: `could not mint the application password: ${err.message}` });
     return { detectedKeys, configuredAgents, failedAgents, verification: null };
   }
+  // Read the wiring we are about to take over, BEFORE taking it over. Wiring is
+  // machine-global and the newest scaffold wins, so scaffolding site B silently
+  // repoints every agent away from site A — a surprise that only `rewire`
+  // explained, even though a scaffold does exactly the same thing. Captured here
+  // so scaffold, resume and rewire all report it from one place.
+  const wiredBefore = await readWiredHostnames();
+  const displaced = [...new Set(Object.values(wiredBefore).filter((h) => h && h !== hostname.toLowerCase()))];
   // MCP deliberately stays on http: the proxy is a Node process whose trust
   // of Laragon's self-signed cert isn't guaranteed, and http always works.
   const creds = { wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`, username: adminUser, password: appPassword };
@@ -873,19 +902,28 @@ async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {
       verification.hints = await diagnoseAppPasswordAuth({ publicDir });
     }
   }
-  return { detectedKeys, configuredAgents, failedAgents, verification };
+  return { detectedKeys, configuredAgents, failedAgents, verification, displaced };
 }
 
 /** The shared reporting for wireMcpForSite's outcome — identical for a scaffold and a rewire. */
-function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verification }) {
+function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verification, displaced = [] }) {
   const lines = [];
   if (!detectedKeys.length) {
+    // Stating the fact was not enough: MCP is the headline feature, so the one
+    // line about its absence should say how to get it.
     lines.push(`${dim('·')} No AI agent CLI found on PATH, so no MCP wiring was written (everything else is set up).`);
+    lines.push(`  ${dim(`Install Claude Code, Cursor, Codex or OpenCode, then run \`${CLI} rewire\` from this folder.`)}`);
     return lines;
   }
   if (configuredAgents.length) {
     const health = verification ? (verification.ok ? `verified, ${verification.tools} tools` : `NOT verified: ${verification.detail}`) : 'not checked';
     lines.push(`${verification && !verification.ok ? yellow(WARN) : green(OK)} MCP wired for: ${configuredAgents.join(', ')} (${health})`);
+  }
+  // Machine-global wiring: whoever wired last owns it. A scaffold does this as
+  // silently as a rewire did, and until now only rewire said so.
+  if (displaced.length && configuredAgents.length) {
+    lines.push(`  ${cyan(STEP)} Agents were pointed at ${displaced.join(', ')} and now point here.`);
+    lines.push(`    ${dim(`To switch back, run \`${CLI} rewire\` from that site's folder.`)}`);
   }
   // The cause goes directly under the failure it explains, not in a footnote:
   // the whole problem with the old output was that the only actionable line on
@@ -915,7 +953,7 @@ function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verifi
  * and re-scaffolding collided. sandbox.config.json is the real completion
  * marker; every step before it is idempotent on re-run.
  */
-async function finishExtras({ name, hostname, projectDir, extraPlugins = [], premiumSelection, adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl, scheme = 'http' }) {
+async function finishExtras({ name, hostname, projectDir, extraPlugins = [], premiumSelection, adminUser, adminPassword, adminEmail = 'admin@example.com', siteUrl, scheme = 'http', warnings = [] }) {
   const publicDir = join(projectDir, 'public');
   const onStep = (msg) => console.log(`  … ${msg}`);
 
@@ -932,7 +970,9 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   // installs the abilities pack, and it also runs for a `resume` whose
   // WordPress was installed by an OLDER version of this tool that never wrote
   // the guard. Idempotent, so the double-write on a fresh scaffold is free.
-  await writeMcpLoopbackGuard(publicDir, { onStep });
+  if (!(await writeMcpLoopbackGuard(publicDir, { onStep }))) {
+    warnings.push('the agent-API loopback guard is not in place — see the SECURITY warning above');
+  }
 
   onStep('syncing premium plugins from GitHub…');
   await syncPremiumPluginsFromGitHub({ selection: premiumSelection, onStep });
@@ -980,16 +1020,29 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
     createdAt: new Date().toISOString(),
   });
 
-  const adminUrl = await mintAdminLoginUrl({ path: publicDir, hostname, scheme });
+  const admin = await mintAdminLoginUrl({ path: publicDir, hostname, scheme });
+  if (!admin.oneClick) {
+    warnings.push(`the Admin link is the ordinary login form, not a one-click link (${admin.reason}) — use the printed password`);
+  }
 
   console.log(
-    `\n${green(OK)} WordPress is ready.\n` +
+    // The headline claim is now conditional on the warnings it used to talk over.
+    // "✓ WordPress is ready" printed even when the hostname did not resolve, so a
+    // user whose UAC prompt was declined got a green tick above three URLs that
+    // went nowhere.
+    (warnings.length
+      ? `\n${yellow(WARN)} WordPress is installed and serving, with ${warnings.length} thing${warnings.length === 1 ? '' : 's'} to know:\n` +
+        warnings.map((w) => `  ${yellow(WARN)} ${w}\n`).join('')
+      : `\n${green(OK)} WordPress is ready.\n`) +
       // Always say something about MCP — the headline feature used to be simply
       // absent from this panel whenever nothing was wired, whether that was
       // because no agent CLI exists or because every one of them failed.
       `${reportMcpOutcome(mcp).map((l) => `${l}\n`).join('')}` +
       `  Site   ${siteUrl}\n` +
-      `  Admin  ${adminUrl}\n` +
+      // The TTL was never mentioned to the human. A one-click link that has quietly
+      // expired looks exactly like a broken site, and the menu can mint a fresh one.
+      `  Admin  ${admin.url}\n` +
+      (admin.oneClick ? `         ${dim('one-time link, valid ~5 min — `npm run agentpress` mints a fresh one')}\n` : '') +
       `  User   ${adminUser}\n` +
       `  Pass   ${adminPassword}\n\n` +
       `  cd ${projectDir}\n` +
@@ -1004,8 +1057,12 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       // zips) promises something verify.md then correctly refuses to do — it says
       // so explicitly, and tells the agent not to fake one. Four surfaces made
       // that promise unconditionally.
+      // `/verify` is a Claude Code slash command. Telling a Cursor or Codex user to
+      // "run /verify" names something their agent does not have, so point them at
+      // the file instead — which is why AGENTS.md describes it that way too.
       (mcp.configuredAgents?.length
-        ? `\n  Then open this folder in ${AGENT_LABELS[mcp.configuredAgents[0]] || 'your agent'} and run ${cyan('/verify')} —\n` +
+        ? `\n  Then open this folder in ${AGENT_LABELS[mcp.configuredAgents[0]] || 'your agent'} and ` +
+          (mcp.configuredAgents.includes('claude') ? `run ${cyan('/verify')} —\n` : `ask it to\n  follow ${cyan('.claude/commands/verify.md')} —\n`) +
           (premiumPlugins.includes('oxygen')
             ? '  it exercises both MCP servers and Oxygen end to end, and builds the site a\n  holding page recording what passed.\n'
             : '  it exercises both MCP servers end to end. (No holding page: that is built with\n  Oxygen, which this site was scaffolded without.)\n')
@@ -1112,9 +1169,14 @@ async function resumeCommand(name, { flags = {} } = {}) {
   const { suffix } = await inferHostnameSuffix();
   const env = hasEnv ? parseEnvFile(await readFile(join(projectDir, '.env'), 'utf8')) : {};
   const hostname = env.SITE_HOST || vhost?.hostname || `${name}${suffix}`;
+  // Same reasoning as the scaffold path: this result decides whether the panel's
+  // URLs resolve, and every later proof bypasses DNS so nothing else will catch it.
+  const resumeWarnings = [];
   if (!(await hostsHasEntry(hostname))) {
     if (instant) {
-      await ensureHostsEntryWithGuidance(hostname);
+      if (!(await ensureHostsEntryWithGuidance(hostname))) {
+        resumeWarnings.push(`${hostname} has no hosts entry, so the URLs below will not resolve until you add it (see above)`);
+      }
     } else {
       bail(`${red(BAD)} No hosts entry for ${hostname} yet. Open Laragon and click Reload, wait for it to settle, then retry resume.`);
       return;
@@ -1173,9 +1235,10 @@ async function resumeCommand(name, { flags = {} } = {}) {
         adminEmail: env.WP_ADMIN_EMAIL || 'admin@example.com',
         siteUrl: `${scheme}://${hostname}`,
         scheme,
+        warnings: resumeWarnings,
       });
     } else {
-      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme });
+      await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme, warnings: resumeWarnings });
     }
   } catch (err) {
     // Echo the resolved selections, same as the scaffold's own hints: a bare
@@ -1326,6 +1389,13 @@ async function rewireCommand() {
         '  servers) — it is still holding the previous application password.\n' +
         `  Then run ${cyan('/verify')} in the agent to confirm the wiring end to end.`,
     );
+  }
+  // Exit non-zero when it did not work. This printed a ⚠ panel and exited 0, so
+  // anything scripting `rewire` — a CI step, an agent chaining commands, a
+  // `&&` in a shell — read a rejected credential as success. The only exit-1
+  // path used to be "nothing was wired at all".
+  if (result.verification?.ok === false || result.failedAgents?.length) {
+    process.exitCode = 1;
   }
 
   // ONLY record when something actually landed. Writing the empty result was a
