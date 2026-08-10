@@ -26,7 +26,11 @@ handoff_reason: release-complete
 > published tarball was downloaded and grepped for one marker per step: refuseInvocation,
 > agentPressMarkers, the npx rewire string in template/AGENTS.md, the panel warnings list,
 > AGENTPRESS_DEBUG, updateAllProjects and destroy's halted flag. All present. GitHub release
-> `v1.8.0` published and marked latest. Nothing is in flight. 93 tests pass.
+> `v1.8.0` published and marked latest. Nothing is in flight. 93 tests pass, CI green.
+>
+> **CI was red for six pushes during this work and nobody noticed** — see Context & gotchas.
+> The published 1.8.0 is NOT affected: the failure was in a test, and `test/` is not in the
+> files allowlist, so no shipped code was involved.
 >
 > Full audit report (all 72 findings, themes, what was judged not worth doing):
 > https://claude.ai/code/artifact/acff6422-d49f-4cc4-8d4d-0ee36bd54c60
@@ -117,6 +121,12 @@ handoff_reason: release-complete
 >   (`npm run agentpress`). A test now pins both the template strings and the single-bin rule.
 > - **WordPress matches `.htaccess` markers with `str_contains()` per LINE.** Never put that
 >   text in our block, not even in a comment. Guarded at write time plus two tests.
+> - **There is a GitHub CI workflow, and CI runs WITHOUT PHP, Laragon, MySQL or WordPress.**
+>   A green `npm test` here does not mean a green pipeline. Six pushes went out red during the
+>   1.8.0 work. The break: a test's PHP-unavailable escape hatch watched for `not-affected`,
+>   the status string v1.8.0 renamed to `unknown-libxml` — invisible on a machine with PHP.
+>   Check `gh run list --repo briansmith80/agentpress --limit 1` after pushing; reproduce a
+>   runner locally with `AGENTPRESS_LARAGON_ROOT` pointed at a path with no PHP.
 > - **npm reports a publish auth failure as `404 Not Found`.** Third occurrence. Check
 >   `npm whoami` before publishing; this is how v1.1.0 vanished.
 > - **`wp` is not on PATH in Git Bash here.** Use `php /c/laragon/usr/bin/wp-cli.phar`. A

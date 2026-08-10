@@ -25,7 +25,14 @@ Every step below exists because skipping it has burned this project at least onc
 3. **Bump the version in `package.json`. This is mandatory, not optional.** npm refuses to
    republish an existing version with different content, so an unbumped version cannot ship
    at all. Minor for new user-visible behaviour or a new env var; patch for pure fixes.
-4. **Push to GitHub:** `git push origin main`.
+4. **Push to GitHub:** `git push origin main` — **then check CI actually went green**:
+   `gh run list --repo briansmith80/agentpress --limit 1`. There IS a workflow
+   (`.github/workflows/ci.yml`, windows-latest) and it is easy to forget because nothing
+   locally tells you about it. During the 1.8.0 work six pushes went out on a red pipeline.
+   **CI runs without PHP, Laragon, MySQL or WordPress, so `npm test` passing locally does
+   not mean CI passes** — that exact gap is what broke it: a test's PHP-unavailable escape
+   watched for a status string the code had stopped returning, invisible on a machine with
+   PHP. To reproduce a runner locally, point `AGENTPRESS_LARAGON_ROOT` at a path with no PHP.
 5. **`npm publish`** — needs a **real terminal**. 2FA requires a browser confirmation;
    non-TTY shells fail with `EOTP` and have no web fallback. An agent generally cannot do
    this step; hand the command to the user.
