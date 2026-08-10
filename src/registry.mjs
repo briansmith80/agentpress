@@ -84,26 +84,53 @@ export async function forgetEnvironment(dir) {
  * them to work from a checkout they have never made. Defaulted so existing
  * callers and tests keep working.
  */
-export function formatEnvironmentsTable(environments, { cli = 'npx create-agentpress@latest' } = {}) {
+export function formatEnvironmentsTable(environments, { cli = 'npx create-agentpress@latest', current = null, mcpTarget = null } = {}) {
   if (environments.length === 0) {
     return `No environments yet. Create one with:  ${cli} <name>`;
   }
   // Defensive fallbacks — a nameless entry (older format, hand-edited file)
   // used to crash the exact command whose prune self-heals the registry.
   const rows = environments.map((e) => ({
+    // A leading marker for the site the agents actually point at. Wiring is
+    // machine-global and the newest scaffold wins, so "which site am I talking to?"
+    // is a real question that previously had no answer short of reading
+    // ~/.claude.json by hand.
+    mark: mcpTarget && String(e.hostname || '').toLowerCase() === String(mcpTarget).toLowerCase() ? '→' : ' ',
     name: e.name || basename(e.dir || '') || '(unknown)',
     host: e.hostname || '(unknown)',
-    agents: (e.agents && e.agents.length ? e.agents.join(',') : 'none'),
+    // `?` for sites recorded before this field existed, which is honest: the
+    // registry genuinely does not know, and printing the running version there
+    // would claim they are current when nobody has checked.
+    version: e.version ? `v${e.version}` : '?',
+    agents: e.agents && e.agents.length ? e.agents.join(',') : 'none',
     dir: e.dir || '(unknown)',
   }));
   const widths = {
     name: Math.max(4, ...rows.map((r) => r.name.length)),
     host: Math.max(4, ...rows.map((r) => r.host.length)),
+    version: Math.max(7, ...rows.map((r) => r.version.length)),
     agents: Math.max(6, ...rows.map((r) => r.agents.length)),
   };
-  const header = `  ${'NAME'.padEnd(widths.name)}  ${'HOST'.padEnd(widths.host)}  ${'AGENTS'.padEnd(widths.agents)}  DIR`;
+  const header = `    ${'NAME'.padEnd(widths.name)}  ${'HOST'.padEnd(widths.host)}  ${'VERSION'.padEnd(widths.version)}  ${'AGENTS'.padEnd(widths.agents)}  DIR`;
   const lines = rows.map(
-    (r) => `  ${r.name.padEnd(widths.name)}  ${r.host.padEnd(widths.host)}  ${r.agents.padEnd(widths.agents)}  ${r.dir}`,
+    (r) =>
+      `  ${r.mark} ${r.name.padEnd(widths.name)}  ${r.host.padEnd(widths.host)}  ${r.version.padEnd(widths.version)}  ${r.agents.padEnd(widths.agents)}  ${r.dir}`,
   );
-  return [`Environments (${REGISTRY_PATH}):`, '', header, ...lines].join('\n');
+  // Counted separately, and neither is a guess. A recorded version that differs is
+  // definitely behind; a '?' means the registry predates the field and genuinely
+  // does not know — reporting it as behind would be inventing a fact, and staying
+  // silent about it would hide the sites most likely to need the refresh.
+  const behind = current ? rows.filter((r) => r.version !== '?' && r.version !== `v${current}`) : [];
+  const unknown = rows.filter((r) => r.version === '?');
+  const footer = [];
+  // Only when a row actually carries the marker. The wired site may not be in the
+  // registry at all, and a legend for a symbol that appears nowhere is noise.
+  if (rows.some((r) => r.mark === '→')) footer.push('', `  → = the site your agents' MCP connection points at`);
+  if (current && (behind.length || unknown.length)) {
+    const parts = [];
+    if (behind.length) parts.push(`${behind.length} site${behind.length === 1 ? '' : 's'} not on v${current}`);
+    if (unknown.length) parts.push(`${unknown.length} of unknown version`);
+    footer.push(`  ${parts.join(', ')} — refresh with:  ${cli} update --all`);
+  }
+  return [`Environments (${REGISTRY_PATH}):`, '', header, ...lines, ...footer].join('\n');
 }
