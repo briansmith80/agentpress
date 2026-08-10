@@ -51,12 +51,20 @@ echo $r['login_url'];
  * anything's wrong (connector not active, no admin user, ...) rather than
  * failing outright — matches the Docker original's graceful degradation.
  */
+/**
+ * Returns `{ url, oneClick, reason }` rather than a bare string, because the two
+ * outcomes look identical in the scaffold panel and are not: a one-click token
+ * logs you straight in and expires, while the fallback is the ordinary login form
+ * that needs the password printed two lines below it. A user who does not know
+ * which one they got cannot tell a working link from a broken one. The frozen
+ * site menu has always disclosed this (it prints "one-click login unavailable");
+ * the panel silently did not.
+ */
 export async function mintAdminLoginUrl({ path, hostname, scheme = 'http' }) {
   // Refuse before doing anything: never mint an auto-login token for a
   // hostname that is not a local dev site.
   if (!isLocalDevHost(hostname)) {
-    console.log(`  (skipping the one-click login link: "${hostname}" is not a local dev hostname)`);
-    return `${scheme}://${hostname}/wp-admin`;
+    return { url: `${scheme}://${hostname}/wp-admin`, oneClick: false, reason: `"${hostname}" is not a local dev hostname` };
   }
   const result = await runWpEvalFile(ADMIN_LOGIN_PHP, { path });
   const out = result.stdout.trim();
@@ -72,10 +80,14 @@ export async function mintAdminLoginUrl({ path, hostname, scheme = 'http' }) {
       // — which is exactly why a scaffolded https site showed "http://" as its
       // WordPress Address in Settings → General.
       url.protocol = `${scheme}:`;
-      return url.toString();
+      return { url: url.toString(), oneClick: true, reason: null };
     } catch {
       // fall through to the plain login form
     }
   }
-  return `${scheme}://${hostname}/wp-admin`;
+  return {
+    url: `${scheme}://${hostname}/wp-admin`,
+    oneClick: false,
+    reason: result.code === 0 ? 'WordPress did not return a login token' : `the token mint failed (exit ${result.code})`,
+  };
 }
