@@ -105,6 +105,31 @@ test('the SVG wordmark still spells the same art as the CLI banner', async () =>
   assert.deepEqual(rebuilt, source, 'the SVG wordmark has drifted from src/ansi.mjs');
 });
 
+test('no frozen file tells the user to run `agentpress <cmd>`, which is not a command', async () => {
+  // package.json ships ONE bin, `create-agentpress`. There is no `agentpress`
+  // binary, and the decision was not to add an alias. Up to v1.7.1 five frozen
+  // files said otherwise, including AGENTS.md and three places in verify.md, and
+  // they said it at the 401 recovery moment — so an agent read the instruction,
+  // PowerShell answered "The term 'agentpress' is not recognized", and because
+  // the wrong form lived in agent-facing files the agent repeated and defended it.
+  // Inside a site, `agentpress` is only an npm SCRIPT, i.e. `npm run agentpress`.
+  const files = ['template/AGENTS.md', 'template/.claude/commands/verify.md', 'template/gitignore', 'template/README.md'];
+  const bare = /(?<!create-)(?<!run )\bagentpress\s+(rewire|update|doctor|destroy|list|setup|resume)\b/;
+  for (const file of files) {
+    const text = await read(file);
+    const offending = text
+      .split('\n')
+      .map((line, i) => [i + 1, line])
+      .filter(([, line]) => bare.test(line));
+    assert.deepEqual(offending, [], `${file} must use \`npx create-agentpress@latest <cmd>\``);
+  }
+});
+
+test('the CLI still declares exactly one bin, so the rule above stays true', async () => {
+  const pkg = JSON.parse(await read('package.json'));
+  assert.deepEqual(Object.keys(pkg.bin), ['create-agentpress'], 'adding a bin alias means revisiting the templates');
+});
+
 test('verify.md tells agents not to name the screenshot, which --output-dir alone does not cover', async () => {
   // These two are one control in two files. `--output-dir` in src/mcp.mjs only
   // governs the DEFAULT filename: verified live by driving the server over

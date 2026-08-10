@@ -11,8 +11,12 @@ references are given so you don't have to take our word for it.
 
 ## What it does NOT do
 
-- **No telemetry, analytics, or crash reporting.** There is no such code. Every network call
-  in the package is a `GET`/download; there is no `POST`, `PUT`, or `PATCH` anywhere.
+- **No telemetry, analytics, or crash reporting.** Nothing about you, your machine or your
+  sites is ever reported to us, and there is no code that could. There *are* POSTs, none of
+  them to us: one or two JSON-RPC calls to `127.0.0.1` that prove your new site's MCP endpoint
+  actually answers (`verifyMcpEndpoint`, `src/mcp.mjs` — only when an agent CLI was wired), and
+  the plugin/theme/core update checks WordPress itself sends to `api.wordpress.org` while the
+  scaffold installs and updates plugins. There is no `PUT` or `PATCH` anywhere.
 - **No remote targets.** WP-CLI is always invoked as local `php.exe` + the pinned
   `wp-cli-<version>.phar` with `--path=<local folder>` (`src/wp.mjs`). No function in this tool
   accepts a remote host to act on, so it cannot touch a site that isn't a folder on your disk.
@@ -20,13 +24,24 @@ references are given so you don't have to take our word for it.
   checked against an embedded SHA-512 *before* it is written, then re-verified on every run — a
   mismatching file is replaced, never executed. The filename is version-scoped, so a `wp` you
   installed yourself is never clobbered.
-- **No credential collection.** Passwords it generates stay on your machine (the site's own
-  `.env`); your Oxygen license key stays in `~/.agentpress/config.json`. Neither is ever
-  transmitted anywhere.
+- **No credential collection.** Nothing this tool generates or stores is ever sent to us.
+  Generated passwords stay on your machine in the site's own `.env`, and your Oxygen license
+  key stays in `~/.agentpress/config.json`. Two qualifications, because "never transmitted"
+  was too strong:
+  - The only credential this tool puts on a wire is the WordPress application password it has
+    just minted, in a `Basic` header to `127.0.0.1` (`src/mcp.mjs`). It never leaves loopback.
+  - If you configure an Oxygen license key, activating it necessarily contacts Oxygen. `wp
+    oxygen license <key>` is Oxygen's own command, and Oxygen's own code then requests
+    `oxygenbuilder.com` with the key and your site URL in the query string
+    (`plugin/licensing/class.edd-api.php` in the installed plugin). That is the vendor
+    validating your licence, not us collecting it. Leave the key unset and it never happens.
 - **Outbound destinations, exhaustively:** `wordpress.org` (WordPress core + its checksum),
-  `github.com` (WP-CLI releases, the Agent Connector plugin releases, and your own private
-  plugin repo *only if you configure one*), `registry.npmjs.org` (version check). There is no
-  default premium-plugin repo — nothing is fetched from the author's account.
+  `api.wordpress.org` (WordPress's own plugin lookups and update checks, during plugin
+  install/update), `github.com` (WP-CLI releases, the Agent Connector plugin releases, and your
+  own private plugin repo *only if you configure one*), `registry.npmjs.org` (the version check
+  in a scaffolded site's own script, and the `npx` MCP proxies at each agent session start), and
+  `oxygenbuilder.com` (only if you configure a licence key, see above). There is no default
+  premium-plugin repo — nothing is fetched from the author's account.
 
 ## Things that look alarming, and why they're necessary
 
@@ -94,18 +109,26 @@ references are given so you don't have to take our word for it.
 - **Codex's MCP wiring puts the application password on a command line, and Claude's fallback
   path can too.** Cursor and OpenCode configs are always written directly as JSON, so the
   credential never reaches an argv for them. Claude is normally written directly as JSON as
-  well — but if `~/.claude.json` cannot be read or parsed (most commonly: Claude Code is
-  installed but has never been launched, so the file does not exist yet), the code falls back
-  to `claude mcp add --env …`, which does put the password on two process command lines. The
+  well, and an **absent** `~/.claude.json` is created directly rather than triggering the
+  fallback — Claude Code installed but never launched is the ordinary state for a new user, and
+  that is exactly who should not have a password put on an argv. The fallback to
+  `claude mcp add --env …`, which does put the password on two process command lines, fires
+  when the file exists but cannot be read or parsed, or when the read-back after a write does
+  not find the entry we just wrote. That last case can happen even though the write itself
+  succeeded, most often because Claude Code was running and rewrote the file underneath us. The
   fallback prints a warning when it happens, so you will know.
   Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the
   exposure, so `codex mcp add` is still used; the credential appears briefly on that process's
   command line, where command-line auditing or EDR can persist it. It grants REST admin on a
   loopback-restricted local site.
 - **WordPress core is verified against the SHA-1 that wordpress.org publishes** beside the
-  tarball. That detects corruption and in-transit or CDN tampering, but a digest fetched from
-  the same origin cannot prove wordpress.org itself is honest. The Agent Connector plugin zips
-  are pinned by release tag, which pins a tag rather than bytes.
+  tarball, and a mismatch aborts before anything is written to disk. Two limits worth stating.
+  A digest fetched from the same origin cannot prove wordpress.org itself is honest. And the
+  check **fails open**: if the `.sha1` sidecar cannot be fetched, or comes back malformed, the
+  tool prints one line saying so and installs core unverified rather than refusing. That is a
+  deliberate trade for a local dev tool that has to work on a flaky connection, but it does mean
+  the absence of that line is the only signal the check actually ran. The Agent Connector plugin
+  zips are pinned by release tag, which pins a tag rather than bytes.
 - **Laragon's Apache binds all interfaces.** That is Laragon's default, not something this tool
   changes, but it means a local dev site is reachable from any network you join. Consider
   restricting the `Apache HTTP Server` Windows Firewall rules to private networks. Note this

@@ -140,3 +140,13 @@ test('formatEnvironmentsTable survives an entry with missing fields (it used to 
   assert.match(out, /x/);
   assert.doesNotMatch(out, /undefined/);
 });
+
+test('the empty-state names a command the reader can actually run', () => {
+  // It used to hardcode "node index.js <name> (from the agentpress checkout)", which is how a
+  // maintainer runs it. Every documented route is npx, so the one line a brand-new user sees
+  // sent them to a checkout they had never made.
+  const empty = formatEnvironmentsTable([]);
+  assert.doesNotMatch(empty, /checkout/i);
+  assert.match(empty, /npx create-agentpress@latest <name>/, 'the default must be the documented route');
+  assert.match(formatEnvironmentsTable([], { cli: 'node index.js' }), /node index\.js <name>/, 'and the caller can override it');
+});
