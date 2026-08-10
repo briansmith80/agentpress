@@ -197,6 +197,27 @@ export async function destroySite({ projectDir, onStep }) {
     }
   }
 
+  // STOP HERE when the database step failed. `.env` is the only record of DB_NAME
+  // and DB_USER anywhere, so removing the project directory next would strand the
+  // database and its user with nothing left on disk naming them — and the old order
+  // did exactly that, under a green "✓ Destroyed."
+  //
+  // Retrying after the user starts MySQL is provably safe: revokeAppPasswords
+  // returns 0 when none of ours remain, removeMcpEntries reports "nothing to
+  // remove", and both vhost removal and the directory delete are still ahead. So
+  // leaving the site in place is strictly better than a half teardown.
+  if (dbSkipReason && dbSkipReason !== 'no database recorded in .env') {
+    return {
+      removedAgents,
+      dbDropped: false,
+      dbSkipReason,
+      appPasswordRevoked,
+      hostname: env.SITE_HOST || null,
+      halted: true,
+      recovery: { dbName: env.DB_NAME, dbUser: env.DB_USER, dbHost: env.DB_HOST || null },
+    };
+  }
+
   onStep?.('removing the vhost…');
   const vhost = await findVhostForProject(projectDir);
   if (vhost) await rm(vhost.file, { force: true });
@@ -212,5 +233,5 @@ export async function destroySite({ projectDir, onStep }) {
   }
   await removeDirSafely(projectDir);
 
-  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname: env.SITE_HOST || vhost?.hostname || null };
+  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname: env.SITE_HOST || vhost?.hostname || null, halted: false };
 }

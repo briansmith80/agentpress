@@ -48,7 +48,11 @@ async function unlinkJunctionsRecursively(dir) {
  */
 export async function removeDirSafely(dir) {
   await unlinkJunctionsRecursively(dir);
-  await rm(dir, { recursive: true, force: true });
+  // Same retry options fsutil's rmWithRetry already uses. Without them a single
+  // EBUSY/EPERM — an editor holding a file open, a virus scanner mid-pass, both
+  // routine on Windows — aborted the teardown with a bare errno at the very last
+  // step, after the database and vhost were already gone.
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 export async function listJunctions(dir) {

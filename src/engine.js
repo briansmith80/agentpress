@@ -1715,11 +1715,48 @@ async function destroyCommand({ yes }) {
     }
   }
 
-  const result = await destroySite({ projectDir: cwd, onStep: (msg) => console.log(`  … ${msg}`) });
-  await forgetEnvironment(cwd);
+  // Wrapped so a throw mid-teardown still reports what DID complete. Without this,
+  // an EPERM on the very last step (an editor holding a file open) printed a bare
+  // stack and told the user nothing about the database, the vhost or the MCP entries
+  // that had already gone.
+  let result;
+  try {
+    result = await destroySite({ projectDir: cwd, onStep: (msg) => console.log(`  … ${msg}`) });
+  } catch (err) {
+    bail(
+      `${red(BAD)} Teardown stopped part-way: ${err.message}\n` +
+        '  Anything reported above as done IS done. The site folder may still be present.\n' +
+        `  Re-running \`${CLI} destroy\` here is safe — every step re-checks before acting.`,
+    );
+    return;
+  }
 
+  // The registry entry is the user's index of their sites. Keeping it while the
+  // site still exists is correct: a halted teardown has not removed anything the
+  // entry describes, and forgetting it would hide the site from `list`.
+  if (!result.halted) await forgetEnvironment(cwd);
+
+  if (result.halted) {
+    bail(
+      `${red(BAD)} Teardown HALTED before anything was deleted, because the database could not be\n` +
+        `  dropped: ${result.dbSkipReason}\n\n` +
+        '  The site folder, its vhost and its .env are all still here, and .env is the only\n' +
+        `  record of the database name and user — so nothing was stranded.\n` +
+        `  Fix the cause (usually: start MySQL) and re-run \`${CLI} destroy\`.\n` +
+        (result.recovery?.dbName
+          ? '\n  Or drop it by hand and re-run:\n' +
+            `    DROP DATABASE IF EXISTS \`${result.recovery.dbName}\`;\n` +
+            `    DROP USER IF EXISTS '${result.recovery.dbUser}'@'localhost';\n`
+          : ''),
+    );
+    return;
+  }
+
+  const clean = result.dbDropped && result.appPasswordRevoked !== null;
   console.log(
-    `\n${green(OK)} Destroyed.${result.removedAgents.length ? ` MCP entries removed for: ${result.removedAgents.join(', ')}.` : ''}` +
+    // No leading ✓ unless everything actually worked. It used to print one over
+    // "(database not dropped: ...)" in the same sentence.
+    `\n${clean ? green(OK) : yellow(WARN)} Destroyed.${result.removedAgents.length ? ` MCP entries removed for: ${result.removedAgents.join(', ')}.` : ''}` +
       `${result.dbDropped ? ' Database dropped.' : ` (database not dropped: ${result.dbSkipReason})`}\n` +
       // The preamble above promises this credential is removed, so a failure to
       // revoke belongs in the SUMMARY, not only in a step line that scrolled
