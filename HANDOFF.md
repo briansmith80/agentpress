@@ -5,11 +5,11 @@ operator: briansmith80
 repo: briansmith80/agentpress
 branch: main
 base: main
-status: ready-to-publish
-handoff_reason: 1.8.0 complete on main, needs a real terminal to publish
+status: done
+handoff_reason: release-complete
 ---
 
-# Handoff: v1.8.0 is complete on `main` and UNPUBLISHED — the whole audit roadmap landed
+# Handoff: v1.8.0 shipped — the whole audit roadmap landed in one session
 
 > **Maintainer session notes, not user documentation.** If you just cloned this repo, start
 > at [README.md](README.md); for how to work in it, read [CLAUDE.md](CLAUDE.md); to release,
@@ -22,8 +22,11 @@ handoff_reason: 1.8.0 complete on main, needs a real terminal to publish
 > Then a 13-agent audit produced 72 verified findings, and **all five steps of its roadmap are
 > now implemented, live-tested and merged to `main` as v1.8.0.**
 >
-> **The one thing left is `npm publish`**, which needs a real terminal for 2FA. Nothing is in
-> flight. 93 tests pass, `doctor` exits 0 and 1 correctly, tarball clean.
+> **v1.8.0 is live on npm and GitHub, verified both ways.** `npm view` reports 1.8.0, and the
+> published tarball was downloaded and grepped for one marker per step: refuseInvocation,
+> agentPressMarkers, the npx rewire string in template/AGENTS.md, the panel warnings list,
+> AGENTPRESS_DEBUG, updateAllProjects and destroy's halted flag. All present. GitHub release
+> `v1.8.0` published and marked latest. Nothing is in flight. 93 tests pass.
 >
 > Full audit report (all 72 findings, themes, what was judged not worth doing):
 > https://claude.ai/code/artifact/acff6422-d49f-4cc4-8d4d-0ee36bd54c60
@@ -76,18 +79,16 @@ handoff_reason: 1.8.0 complete on main, needs a real terminal to publish
 >    escapes it. `/verify` therefore also tells agents not to name the screenshot.
 
 ## Next steps (ordered, actionable)
-> 1. [ ] **`npm publish`** from a real terminal. Check `npm whoami` FIRST — npm reports a
->    publish auth failure as `404`, which happened again on the 1.7.0 publish this session.
-> 2. [ ] Then both release checks from CLAUDE.md step 6: `npm view create-agentpress version`,
->    and `npm pack create-agentpress@1.8.0` + grep the tarball for `AGENTPRESS_DEBUG`,
->    `update --all`, and `npx create-agentpress@latest rewire` in `template/AGENTS.md`.
-> 3. [ ] `gh release create v1.8.0` — the notes want to lead with the three destructive-path
->    refusals and the `agentpress` command correction, since those affect existing users.
-> 4. [ ] Ask the friend to upgrade and re-run `rewire` in `smit-oxy`; the 401 diagnosis now
->    names the cause. Still the only outstanding field question.
-> 5. [ ] File the Oxygen `html-to-page` bug upstream (unchanged, still never sent).
-> 6. [ ] Cursor CLI binary name (`cursor-agent` vs `agent`) — still unverified.
-> 7. [ ] `.gitattributes` for the CRLF warnings; `git remote` still uses the old repo name.
+> 1. [ ] Ask the friend to upgrade and re-run `rewire` in `smit-oxy`; the 401 diagnosis now
+>    names the cause. Still the only outstanding field question, and the one that tells us
+>    whether the three causes it knows about are the right three.
+> 2. [ ] File the Oxygen `html-to-page` bug upstream at `soflyy/agent-connector-for-wp`.
+>    Written, never sent, unchanged across four handoffs now. Draft in `PLANNING/TODO.md`.
+> 3. [ ] Confirm or fix the Cursor CLI binary name (`cursor-agent` vs `agent`) in
+>    `src/agents.mjs` plus the frozen menu's copy — `test/parity.test.mjs` catches drift.
+> 4. [ ] `acquireScaffoldLock` (see Open questions) — it is more stealable than documented.
+> 5. [ ] Add `.gitattributes` to end the CRLF warnings; point `git remote` at the current
+>    repo name instead of relying on GitHub's redirect.
 
 ## Open questions / known-unfixed
 > - **[FOUND, NOT FIXED] `acquireScaffoldLock` is more stealable than its comments claim.**
@@ -104,11 +105,11 @@ handoff_reason: 1.8.0 complete on main, needs a real terminal to publish
 >   wrong.
 
 ## Git / release state
-> - Branch `main`, pushed, level with `origin/main`. Working tree clean apart from this file.
-> - `package.json` is **1.8.0, UNPUBLISHED**. npm's latest is 1.7.1.
-> - Tags: `v1.7.0` → `12be5b1`, `v1.7.1` → `2e88cde`. No tag for 1.8.0 yet.
-> - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, **1.7.1**. (1.1.0 is a gap.)
-> - 15 commits this session, `3a4eac0..HEAD`.
+> - Branch `main`, pushed, level with `origin/main`.
+> - `package.json` is **1.8.0, published**.
+> - Tags: `v1.7.0`, `v1.7.1`, `v1.8.0` (latest).
+> - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.7.1, **1.8.0**. (1.1.0 is a gap.)
+> - 17 commits this session, `3a4eac0..HEAD`.
 
 ## Context & gotchas
 > - **`agentpress` is NOT a command.** `package.json` ships one bin, `create-agentpress`, and
