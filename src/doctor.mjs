@@ -13,10 +13,10 @@
 // loses 9 columns of alignment. `row()` is the only place that does either.
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { LARAGON_ROOT, HOSTS_PATH, WWW_DIR, PREMIUM_PLUGINS_DIR } from './paths.mjs';
-import { phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
+import { WP_CLI_PHAR, phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
 import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight, sslPortUp } from './laragon.mjs';
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
-import { psCapture } from './win.mjs';
+import { psCapture, resolveOnPath } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { readWiredHostnames } from './mcp.mjs';
 import { sslCertPresent, wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
@@ -53,10 +53,16 @@ async function defenderRealtime() {
   return 'unknown';
 }
 
+/**
+ * Counts the hosts lines that a *.test dev setup put there, ours as well as
+ * Laragon's. Counting only "#laragon magic!" under-reported: this tool tags its
+ * own writes differently, so a machine whose entries were all written by
+ * AgentPress reported zero and looked like nothing had ever been wired.
+ */
 async function hostsMagicCount() {
   try {
     const content = await readFile(HOSTS_PATH, 'utf8');
-    return content.split('\n').filter((l) => l.includes('#laragon magic!')).length;
+    return content.split('\n').filter((l) => /#laragon magic!|#agentpress/i.test(l)).length;
   } catch {
     return null;
   }
@@ -283,7 +289,14 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
       );
     }
   } catch (err) {
-    blocked('PHP', `could not resolve — ${err.message}`, 'no PHP found under Laragon');
+    // Every other blocker row names a fix; these two printed a raw libuv errno
+    // and nothing else, in the row most likely to fire on exactly the machine
+    // AGENTPRESS_LARAGON_ROOT exists for.
+    blocked(
+      'PHP',
+      `no PHP found under the resolved Laragon root — check ${join(LARAGON_ROOT, 'bin', 'php')} exists, or set AGENTPRESS_LARAGON_ROOT to the right folder (${err.message})`,
+      'no PHP found under Laragon — set AGENTPRESS_LARAGON_ROOT, or repair the Laragon install',
+    );
   }
 
   const nodePath = await nodeOnPath();
@@ -297,7 +310,7 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
   const wpCli = await wpCliPresent();
   row(
     'WP-CLI',
-    wpCli ? `installed (${join(LARAGON_ROOT, 'usr', 'bin', 'wp-cli.phar')})` : 'not installed yet — the first scaffold downloads it automatically',
+    wpCli ? `installed (${WP_CLI_PHAR})` : 'not installed yet — the first scaffold downloads it automatically',
     wpCli ? 'ok' : 'info',
   );
 
@@ -306,8 +319,10 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
 
   const magicCount = await hostsMagicCount();
   row(
-    'hosts entries (Laragon)',
-    magicCount === null ? 'could not read hosts file (run doctor as admin to check, or ignore — scaffold will prompt)' : `${magicCount} "#laragon magic!" lines`,
+    'hosts entries (dev)',
+    magicCount === null
+      ? 'could not read hosts file (run doctor as admin to check, or ignore — scaffold will prompt)'
+      : `${magicCount} lines tagged "#laragon magic!" or "#agentpress"`,
     // 'info' even when unreadable: the text itself says "or ignore", and the
     // scaffold prompts for it anyway. A yellow glyph beside copy that grants
     // permission to ignore it is the definition of crying wolf.
@@ -383,11 +398,21 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
     const prefix = await npmGlobalPrefix();
     const execDir = process.execPath.replace(/\\[^\\]+$/, '');
     if (prefix && prefix.toLowerCase() !== execDir.toLowerCase()) {
-      row('  npm global installs', `land in ${prefix} — switching Node versions can silently lose them`, 'warn');
+      // 'info', not 'warn'. This fires on every stock Windows Node install, it
+      // duplicates the nvm-drift row above, and the user cannot clear it — which is
+      // the definition of a row that teaches people to ignore yellow. See the
+      // status-colour rule in CLAUDE.md.
+      row('  npm global installs', `land in ${prefix} — switching Node versions can leave them behind`, 'info');
     }
   }
 
-  const gh = await spawnCapture('gh', ['--version']);
+  // Resolved on PATH first, exactly as plugins.mjs does and for the reason written
+  // there: a bare-name spawn on Windows searches the CURRENT DIRECTORY first, so
+  // `doctor` run inside a folder containing a stray gh.exe would execute that. It
+  // also stopped doctor and the sync path from being able to disagree about which
+  // gh exists.
+  const ghExe = await resolveOnPath('gh');
+  const gh = ghExe ? await spawnCapture(ghExe, ['--version']) : { code: 1, stdout: '' };
   row(
     'GitHub CLI (gh)',
     gh.code === 0
@@ -411,7 +436,11 @@ export async function runDoctor({ cli = 'node index.js' } = {}) {
         );
       }
     } catch (err) {
-      blocked('MySQL client', `could not resolve — ${err.message}`, 'no MySQL client found under Laragon');
+      blocked(
+        'MySQL client',
+        `no mysql.exe found under the resolved Laragon root — check ${join(LARAGON_ROOT, 'bin', 'mysql')} exists, or set AGENTPRESS_LARAGON_ROOT to the right folder (${err.message})`,
+        'no MySQL client found under Laragon — set AGENTPRESS_LARAGON_ROOT, or repair the Laragon install',
+      );
     }
   }
 

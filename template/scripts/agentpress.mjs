@@ -121,7 +121,9 @@ const BANNER_WIDTH = 49;
 const SHOW_BANNER = COLOR && !envOn('AGENTPRESS_NO_BANNER');
 
 function openBrowser(url) {
-  if ((process.env.AGENTPRESS_NO_OPEN ?? process.env.KATALYST_NO_OPEN)) {
+  // envOn for the same reason as every other gate here: AGENTPRESS_NO_OPEN=0 must
+  // mean "do open", and bare truthiness made it mean the opposite.
+  if (envOn('AGENTPRESS_NO_OPEN') || envOn('KATALYST_NO_OPEN')) {
     console.log(`  ${dim('Open:')} ${url}`);
     return;
   }
@@ -427,15 +429,33 @@ function wiredHostFor(agentKey) {
   }
 }
 
+/** True when `a` is a strictly newer semver than `b`. Digit-wise, so 1.10.0 > 1.9.0. */
+function isNewerVersion(a, b) {
+  const parse = (v) => String(v).split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
 async function checkUpdate() {
-  if ((process.env.AGENTPRESS_NO_UPDATE_CHECK ?? process.env.KATALYST_NO_UPDATE_CHECK)) return null;
+  // envOn, not bare truthiness: AGENTPRESS_NO_UPDATE_CHECK=0 is the conventional
+  // spelling of "off" and used to switch the check OFF anyway, the same trap the
+  // colour gate 380 lines above already documents.
+  if (envOn('AGENTPRESS_NO_UPDATE_CHECK') || envOn('KATALYST_NO_UPDATE_CHECK')) return null;
   try {
     const res = await fetch('https://registry.npmjs.org/create-agentpress/latest', {
       signal: AbortSignal.timeout(2500),
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return data.version && data.version !== VERSION ? data.version : null;
+    // Strictly NEWER, not merely different. `!==` offered a "update" to any site
+    // whose pinned version was AHEAD of npm — which is every site scaffolded from a
+    // local checkout — and then pinned the OLDER version into the suggested command,
+    // i.e. it talked users into downgrading.
+    return data.version && isNewerVersion(data.version, VERSION) ? data.version : null;
   } catch {
     return null;
   }
@@ -493,7 +513,11 @@ for (;;) {
   } else if (choice === 'shell') {
     openTerminalHere();
   } else if (choice === 'update') {
-    console.log(`  Run: npx create-agentpress@${latestVersion} update   (from this directory)`);
+    // @latest, never @<the version we happened to see>: pinning a number here means
+    // a stale menu hands out a stale command long after that version stopped being
+    // current, and it was the mechanism that turned a false "update available" into
+    // an actual downgrade instruction.
+    console.log('  Run: npx create-agentpress@latest update   (from this directory)');
   } else if (choice.startsWith('agent:')) {
     const key = choice.slice('agent:'.length);
     const wired = wiredHostFor(key);
