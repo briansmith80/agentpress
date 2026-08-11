@@ -84,7 +84,7 @@ and whether the certificate pair is present, so this is visible rather than gues
 - Confirmation prompt, then a UAC prompt for the hosts entry — approve it.
 - The first run downloads WP-CLI and WordPress core, so expect a few minutes.
 
-**Updating**
+## Updating
 
 Three things move independently, so it is worth knowing which is which:
 
