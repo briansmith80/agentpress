@@ -9,7 +9,7 @@ status: done
 handoff_reason: release-complete
 ---
 
-# Handoff: v1.8.0 shipped — the whole audit roadmap landed in one session
+# Handoff: v1.8.0 + v1.8.1 shipped — the whole audit roadmap, plus a field-reported CSS fix
 
 > **Maintainer session notes, not user documentation.** If you just cloned this repo, start
 > at [README.md](README.md); for how to work in it, read [CLAUDE.md](CLAUDE.md); to release,
@@ -26,7 +26,14 @@ handoff_reason: release-complete
 > published tarball was downloaded and grepped for one marker per step: refuseInvocation,
 > agentPressMarkers, the npx rewire string in template/AGENTS.md, the panel warnings list,
 > AGENTPRESS_DEBUG, updateAllProjects and destroy's halted flag. All present. GitHub release
-> `v1.8.0` published and marked latest. Nothing is in flight. 93 tests pass, CI green.
+> `v1.8.0` published and marked latest. 93 tests passed at that point.
+>
+> **v1.8.1 followed and is also live, verified both ways.** It fixes a field report: `/verify`
+> was seeding 11 GLOBAL Oxygen selectors named `ap-*` into every site — and Oxygen DERIVES
+> `ap-` as the recommended prefix for a site called e.g. "Acme Plumbing", so that was the
+> user's namespace, and an import replaces a same-named selector outright. Renamed to
+> `agentpress-verify-*`, disclosed every run, plus a refusal to delete selectors and two false
+> doc claims corrected. 97 tests, CI green. Nothing is in flight.
 >
 > **CI was red for six pushes during this work and nobody noticed** — see Context & gotchas.
 > The published 1.8.0 is NOT affected: the failure was in a test, and `test/` is not in the
@@ -83,6 +90,13 @@ handoff_reason: release-complete
 >    escapes it. `/verify` therefore also tells agents not to name the screenshot.
 
 ## Next steps (ordered, actionable)
+> 0. [ ] **The one verification 1.8.1 is missing.** CLAUDE.md's live test for that change is
+>    "scaffold a throwaway, run `/verify`, confirm the page renders styled and that
+>    `get-css-selectors` shows 11 `agentpress-verify-*` names and no `ap-*`". Only the scaffold
+>    half was done: the renamed classes are verified as text that reaches a site correctly, NOT
+>    as CSS Oxygen registers under the new names. Needs one `/verify` run in a site with Oxygen,
+>    from an agent session (this session's `wordpress` MCP was 401ing on stale credentials).
+>    Conveniently the same run answers item 1.
 > 1. [ ] Ask the friend to upgrade and re-run `rewire` in `smit-oxy`; the 401 diagnosis now
 >    names the cause. Still the only outstanding field question, and the one that tells us
 >    whether the three causes it knows about are the right three.
@@ -110,12 +124,22 @@ handoff_reason: release-complete
 
 ## Git / release state
 > - Branch `main`, pushed, level with `origin/main`.
-> - `package.json` is **1.8.0, published**.
-> - Tags: `v1.7.0`, `v1.7.1`, `v1.8.0` (latest).
-> - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.7.1, **1.8.0**. (1.1.0 is a gap.)
+> - `package.json` is **1.8.1, published**.
+> - Tags: `v1.7.0`, `v1.7.1`, `v1.8.0`, `v1.8.1` (latest).
+> - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0, **1.8.1**. (1.1.0 is a gap.)
 > - 17 commits this session, `3a4eac0..HEAD`.
 
 ## Context & gotchas
+> - **An Oxygen `<style>` block is NOT page-scoped, and its class prefix is not ours to pick.**
+>   Every class passed to `html-to-page` becomes a global site-wide selector that outlives the
+>   page. Worse, `breakdance_mcp_derive_css_prefix()` builds a recommended prefix from the site
+>   name's initials and `ap` is not in its reserved list, so `ap-*` belonged to any site called
+>   "Acme Plumbing" — and an import REPLACES a same-named selector's properties. Hence
+>   `agentpress-verify-*`. Never shorten it back.
+> - **Deleting an Oxygen selector is not reversible by re-adding the CSS.** Elements bind by
+>   uuid; deleting one strips `class=""` from every page using it, and `create_id()` mints a
+>   fresh uuid so a re-import leaves the page broken while appearing fixed. The only undo is
+>   the builder's own revision history. `/verify` and AGENTS.md both refuse to do it.
 > - **`agentpress` is NOT a command.** `package.json` ships one bin, `create-agentpress`, and
 >   the decision was NOT to add an alias. Inside a site, `agentpress` is only an npm *script*
 >   (`npm run agentpress`). A test now pins both the template strings and the single-bin rule.
