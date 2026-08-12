@@ -183,6 +183,19 @@ function hostsPathExpr(hostsPath) {
   return hostsPath ? psQuote(hostsPath) : "(Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts')";
 }
 
+/**
+ * Both script generators single-quote hostnames into an ELEVATED script, so
+ * the character check must live here, not only in the callers — a guard in
+ * a different function is one refactor away from not running (the same
+ * lesson runElevated's psQuote comment records for %TEMP%). Throws rather
+ * than returns: a name failing this deep is a caller bug, not user input.
+ */
+function assertScriptSafeHostname(hostname) {
+  if (!/^[a-z0-9.-]+$/i.test(String(hostname))) {
+    throw new Error(`refusing to embed suspicious hostname "${hostname}" in an elevated script`);
+  }
+}
+
 /** Runs a script elevated (one UAC prompt) and returns psCapture's result — the child's exit code flows through Start-Process. */
 async function runElevated(script) {
   const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
@@ -212,6 +225,7 @@ async function runElevated(script) {
  * elevation prompt was declined", which was false and no retry could fix.
  */
 export function hostsAppendScript(hostname, { hostsPath = null } = {}) {
+  assertScriptSafeHostname(hostname);
   return [
     `$hosts = ${hostsPathExpr(hostsPath)}`,
     `$name = '${hostname}'.ToLower()`,
@@ -276,16 +290,20 @@ export async function ensureHostsEntry(hostname) {
 
 /**
  * The lines removeHostsEntries would delete: address + ONE hostname + a
- * trailing comment that is exactly `#agentpress`, loopback address only.
- * "Only ever delete a line this tool wrote" is the load-bearing rule — a
- * hand-added line, a `#laragon magic!` line, a multi-host line, or an
- * ad-blocker's 0.0.0.0 entry never matches, whatever hostname it carries.
- * The PowerShell filter in hostsRemovalScript implements the SAME test and
- * a parity test pins the two together; see laragon.mjs's
- * hostsContentEntryAddresses for what happened last time two of these
- * presence checks drifted.
+ * trailing comment that is exactly a known tool tag, loopback address only.
+ * "Only ever delete a line a tool tagged" is the load-bearing rule — a
+ * hand-added line, a multi-host line, or an ad-blocker's 0.0.0.0 entry
+ * never matches, whatever hostname it carries. The default tag set is ours
+ * alone; `includeLaragon` adds `#laragon magic!`, which only destroy asks
+ * for — the operator's field test (2026-08-12) showed Laragon prunes dead
+ * magic lines ONLY when a new folder appears in www, so destroying your
+ * last site would otherwise leave one forever. The PowerShell filter in
+ * hostsRemovalScript implements the SAME test and a parity test pins the
+ * two together; see laragon.mjs's hostsContentEntryAddresses for what
+ * happened last time two of these presence checks drifted.
  */
-export function agentpressHostsMatches(content, hostnames) {
+export function agentpressHostsMatches(content, hostnames, { includeLaragon = false } = {}) {
+  const tags = includeLaragon ? ['agentpress', 'laragon magic!'] : ['agentpress'];
   const wanted = new Set(hostnames.map((h) => String(h).toLowerCase()));
   const matches = [];
   for (const line of String(content).split(/\r?\n/)) {
@@ -293,7 +311,7 @@ export function agentpressHostsMatches(content, hostnames) {
     if (!text || text.startsWith('#')) continue;
     const hashAt = text.indexOf('#');
     if (hashAt === -1) continue;
-    if (text.slice(hashAt + 1).trim().toLowerCase() !== 'agentpress') continue;
+    if (!tags.includes(text.slice(hashAt + 1).trim().toLowerCase())) continue;
     const fields = text.slice(0, hashAt).trim().toLowerCase().split(/\s+/);
     if (fields.length !== 2) continue;
     if (fields[0] !== '127.0.0.1' && fields[0] !== '::1') continue;
@@ -316,36 +334,56 @@ export function agentpressHostsMatches(content, hostnames) {
  * read; v1 was two processes and did.
  *
  * Every guard below closes a piece of that hole, in order:
- *   - reads via .NET ReadAllText, which THROWS on a locked file instead of
+ *   - reads via .NET ReadAllBytes, which THROWS on a locked file instead of
  *     returning empty; retried briefly, then exit 11 with nothing written
+ *   - the bytes are decoded with a STRICT UTF-8 decoder; invalid bytes are
+ *     exit 19, not a rewrite. The default lenient decode turned an ANSI
+ *     "café" comment into U+FFFD mojibake that a successful run then
+ *     persisted file-wide — proven live under 5.1, invisible to the verify
+ *     because both sides of the compare held the same replacement char.
  *   - an empty read is exit 12, never an empty write
- *   - only lines matching agentpressHostsMatches (our tag, our address,
- *     one hostname) are dropped, plus one blank line each — the blank the
- *     old unconditional "`r`n" append prefix left above every entry
+ *   - only lines matching agentpressHostsMatches (a known tool tag, a
+ *     loopback address, one hostname) are dropped, plus one blank line
+ *     each — the blank the old unconditional "`r`n" append prefix left
+ *     above every entry. An untagged, hand-written line never matches.
  *   - removing more than $maxRemove lines (caller-computed from a fresh
  *     count) or leaving the file empty aborts as exit 13
  *   - the new content goes to a sibling temp file, is read back and
- *     compared, and only then replaces hosts via rename — the file is never
- *     open in a truncated state
+ *     compared, and only then replaces hosts via File.Replace — NEVER
+ *     Move-Item -Force, which on PowerShell 5.1 deletes the destination
+ *     FIRST and renames second (proven live: a held source handle left the
+ *     machine with NO hosts file, reported as "nothing was changed").
+ *     File.Replace is atomic on NTFS and keeps the destination on failure;
+ *     if the "impossible" still happens and hosts is missing after a failed
+ *     swap, the temp file (the only good copy at that moment) is moved in,
+ *     then the verified backup — the temp file is never deleted while
+ *     hosts does not exist.
  *   - after the swap the file is read AGAIN; only byte-equality is exit 0.
  *     If it reads back EMPTY it is restored from the caller's verified
  *     backup (exit 16; restore failure 17). Any other difference means
  *     someone else wrote concurrently — theirs is fresher, so it is LEFT
  *     ALONE and reported as exit 18, never "restored" over.
  */
-export function hostsRemovalScript(hostnames, { hostsPath = null, backupPath = null, maxRemove }) {
+export function hostsRemovalScript(hostnames, { hostsPath = null, backupPath = null, maxRemove, includeLaragon = false }) {
   const names = hostnames.map((h) => String(h).toLowerCase());
+  for (const name of names) assertScriptSafeHostname(name);
+  const tagTest = includeLaragon
+    ? "($comment -eq 'agentpress' -or $comment -eq 'laragon magic!')"
+    : "($comment -eq 'agentpress')";
   return [
     "$ErrorActionPreference = 'Stop'",
     `$hosts = ${hostsPathExpr(hostsPath)}`,
     `$backup = ${backupPath ? psQuote(backupPath) : "''"}`,
     `$names = @(${names.map((n) => `'${n}'`).join(',')})`,
     `$maxRemove = ${Number(maxRemove)}`,
-    '$raw = $null',
+    '$bytes = $null',
     'for ($i = 0; $i -lt 8; $i++) {',
-    '  try { $raw = [System.IO.File]::ReadAllText($hosts); break } catch { Start-Sleep -Milliseconds 250 }',
+    '  try { $bytes = [System.IO.File]::ReadAllBytes($hosts); break } catch { Start-Sleep -Milliseconds 250 }',
     '}',
-    'if ($null -eq $raw) { exit 11 }',
+    'if ($null -eq $bytes) { exit 11 }',
+    '$strict = New-Object System.Text.UTF8Encoding($false, $true)',
+    '$raw = $null',
+    'try { $raw = $strict.GetString($bytes) } catch { exit 19 }',
     'if ($raw.Trim().Length -eq 0) { exit 12 }',
     '$kept = New-Object System.Collections.Generic.List[string]',
     '$removed = 0',
@@ -356,7 +394,7 @@ export function hostsRemovalScript(hostnames, { hostsPath = null, backupPath = n
     "    $parts = $text -split '#', 2",
     '    $comment = $parts[1].Trim().ToLower()',
     "    $fields = @($parts[0].Trim().ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
-    "    if ($comment -eq 'agentpress' -and $fields.Count -eq 2 -and ($fields[0] -eq '127.0.0.1' -or $fields[0] -eq '::1') -and ($names -contains $fields[1])) { $ours = $true }",
+    `    if (${tagTest} -and $fields.Count -eq 2 -and ($fields[0] -eq '127.0.0.1' -or $fields[0] -eq '::1') -and ($names -contains $fields[1])) { $ours = $true }`,
     '  }',
     '  if ($ours) {',
     '    $removed += 1',
@@ -373,21 +411,43 @@ export function hostsRemovalScript(hostnames, { hostsPath = null, backupPath = n
     "$tmp = $hosts + '.agentpress-new'",
     'try {',
     '  [System.IO.File]::WriteAllText($tmp, $newText, $enc)',
-    "  if ([System.IO.File]::ReadAllText($tmp) -ne $newText) { throw 'staged copy did not verify' }",
+    "  if ($strict.GetString([System.IO.File]::ReadAllBytes($tmp)) -ne $newText) { throw 'staged copy did not verify' }",
     '} catch {',
     '  try { Remove-Item -Path $tmp -Force } catch {}',
     '  exit 14',
     '}',
-    'try { Move-Item -Path $tmp -Destination $hosts -Force } catch {',
-    '  try { Remove-Item -Path $tmp -Force } catch {}',
-    '  exit 15',
+    // A REAL backup filename for File.Replace, never $null: PowerShell binds
+    // $null to a .NET string parameter as "", and Replace('' ) throws "The
+    // path is not of a legal form" — every swap would exit 15. The name also
+    // buys something: ReplaceFile RENAMES the old hosts to it (no delete
+    // window at all), leaving the freshest possible rollback copy, which the
+    // recovery paths below prefer over the caller's earlier backup.
+    "$prev = $hosts + '.agentpress-prev'",
+    '$swapped = $false',
+    'try { [System.IO.File]::Replace($tmp, $hosts, $prev); $swapped = $true } catch {}',
+    'if (-not $swapped) {',
+    '  if (Test-Path -LiteralPath $hosts) {',
+    '    try { Remove-Item -Path $tmp -Force } catch {}',
+    '    exit 15',
+    '  }',
+    '  $landed = $false',
+    '  try { Move-Item -Path $tmp -Destination $hosts -Force; $landed = $true } catch {}',
+    '  if (-not $landed) {',
+    "    $src = ''",
+    '    if (Test-Path -LiteralPath $prev) { $src = $prev } elseif ($backup -ne \'\') { $src = $backup }',
+    "    if ($src -eq '') { exit 17 }",
+    '    try { Copy-Item -Path $src -Destination $hosts -Force } catch { exit 17 }',
+    '    exit 16',
+    '  }',
     '}',
     '$final = $null',
-    'try { $final = [System.IO.File]::ReadAllText($hosts) } catch {}',
-    'if ($final -eq $newText) { exit 0 }',
+    'try { $final = $strict.GetString([System.IO.File]::ReadAllBytes($hosts)) } catch {}',
+    'if ($final -eq $newText) { try { Remove-Item -Path $prev -Force } catch {}; exit 0 }',
     'if ($null -eq $final -or $final.Trim().Length -eq 0) {',
-    "  if ($backup -ne '') { try { Copy-Item -Path $backup -Destination $hosts -Force; exit 16 } catch { exit 17 } }",
-    '  exit 17',
+    "  $src = ''",
+    '  if (Test-Path -LiteralPath $prev) { $src = $prev } elseif ($backup -ne \'\') { $src = $backup }',
+    "  if ($src -eq '') { exit 17 }",
+    '  try { Copy-Item -Path $src -Destination $hosts -Force; exit 16 } catch { exit 17 }',
     '}',
     'exit 18',
   ].join('\r\n');
@@ -400,25 +460,29 @@ function removalFailureText(code, backupPath) {
     12: 'the hosts file read back empty — refusing to touch it',
     13: 'the rewrite would have removed more lines than expected — nothing was changed',
     14: 'the staged copy did not verify — nothing was changed',
-    15: 'the rewritten file could not be swapped in (hosts locked?) — nothing was changed',
-    16: `the write did not verify, so hosts was RESTORED from ${backupPath} — no entries were removed`,
-    17: `the write did not verify AND the restore failed — check the hosts file NOW; backup: ${backupPath}`,
+    15: 'the rewritten file could not be swapped in (hosts locked by another program?) — the hosts file is unchanged',
+    16: `the swap could not complete, so hosts was RESTORED from ${backupPath} — no entries were removed`,
+    17: `the swap failed AND the restore failed — check the hosts file NOW; backup: ${backupPath}`,
     18: 'another program rewrote hosts at the same moment — left as it was; check it by hand',
+    19: 'the hosts file contains bytes that are not valid UTF-8 text — refusing to rewrite it; remove the line by hand',
   };
   return map[code] || null;
 }
 
 /**
- * Removes this tool's own `#agentpress` hosts lines, nothing else. Never
+ * Removes tool-tagged hosts lines for these hostnames, nothing else. Never
  * fatal: every failure path leaves the file as it was (or restored) and
  * returns ok:false with the reason, so callers print the line for the user
- * instead. A `#laragon magic!` line for the same hostname is deliberately
- * out of scope — touching it means racing its owner, and Laragon clears its
- * own dead entries when it next rescans www (field-verified 2026-08-12: a
- * new folder appearing in www triggers the sync; a service Stop All →
- * Start All does not). `remaining` reports them.
+ * instead. By default only our own `#agentpress` lines are in scope;
+ * destroy passes `includeLaragon` to take the site's `#laragon magic!`
+ * line with it. That opt-in exists because of a field-verified gap
+ * (2026-08-12): Laragon prunes its dead magic lines only when a NEW folder
+ * appears in www — a service Stop All → Start All does not rescan — so
+ * destroying the last site would strand its line forever. A hostname the
+ * user mapped by hand (untagged) is never touched; `remaining` reports
+ * whatever still resolves it.
  */
-export async function removeHostsEntries(hostnames) {
+export async function removeHostsEntries(hostnames, { includeLaragon = false } = {}) {
   const names = hostnames.map((h) => String(h).toLowerCase());
   for (const name of names) {
     if (!/^[a-z0-9.-]+$/.test(name)) return { ok: false, removed: 0, remaining: [], reason: `refusing suspicious hostname "${name}"`, backupPath: null };
@@ -430,7 +494,7 @@ export async function removeHostsEntries(hostnames) {
     return { ok: false, removed: 0, remaining: [], reason: `could not read the hosts file (${err.code || err.message})`, backupPath: null };
   }
   const remainingIn = (content) => names.filter((n) => hostsContentEntryAddresses(content, n).length > 0);
-  const matches = agentpressHostsMatches(current, names);
+  const matches = agentpressHostsMatches(current, names, { includeLaragon });
   if (matches.length === 0) {
     return { ok: true, removed: 0, remaining: remainingIn(current), reason: null, backupPath: null };
   }
@@ -449,13 +513,13 @@ export async function removeHostsEntries(hostnames) {
   // maxRemove: each matched entry plus at most one blank line above it. A
   // concurrent change that makes the filter want more than this fresh count
   // allows aborts inside the script.
-  const script = hostsRemovalScript(names, { backupPath, maxRemove: matches.length * 2 });
+  const script = hostsRemovalScript(names, { backupPath, maxRemove: matches.length * 2, includeLaragon });
   const result = await runElevated(script);
   const after = await readFile(HOSTS_PATH, 'utf8').catch(() => null);
 
   if (result.code === 0 || result.code === 10) {
     // Ground truth over exit code, same policy as ensureHostsEntry.
-    if (after !== null && agentpressHostsMatches(after, names).length === 0) {
+    if (after !== null && agentpressHostsMatches(after, names, { includeLaragon }).length === 0) {
       await flushDnsCache();
       return { ok: true, removed: result.code === 0 ? matches.length : 0, remaining: remainingIn(after), reason: null, backupPath };
     }

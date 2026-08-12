@@ -57,6 +57,7 @@ const FIXTURE = [
   '127.0.0.1\tnotstale1.test\t#agentpress', // substring trap (prefix)
   '127.0.0.1\tstale1.test.uk\t#agentpress', // substring trap (suffix)
   '127.0.0.1 multi.test stale1.test #agentpress', // multi-host line: we never write these
+  '127.0.0.1\tstale1.test', // hand-added, no tag: untouchable even with includeLaragon
   '127.0.0.1\tsurvivor.test\t#agentpress',
   '',
 ].join(CRLF);
@@ -78,6 +79,7 @@ test('removes only our tagged entries, collapses their blank lines, leaves every
       '127.0.0.1\tnotstale1.test\t#agentpress',
       '127.0.0.1\tstale1.test.uk\t#agentpress',
       '127.0.0.1 multi.test stale1.test #agentpress',
+      '127.0.0.1\tstale1.test',
       '127.0.0.1\tsurvivor.test\t#agentpress',
       '',
     ].join(CRLF);
@@ -85,6 +87,41 @@ test('removes only our tagged entries, collapses their blank lines, leaves every
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('includeLaragon also takes the hostname\'s "#laragon magic!" line, and NOTHING untagged', () => {
+  // destroy's opt-in: Laragon prunes its dead lines only when a new folder
+  // appears in www (field-verified), so destroy takes the site's magic line
+  // too. Other hostnames' magic lines and the hand-added line must survive.
+  const { dir, file } = tempHosts(FIXTURE);
+  try {
+    const code = runScript(hostsRemovalScript(['stale1.test', 'stale2.test'], { hostsPath: file, maxRemove: 8, includeLaragon: true })).code;
+    assert.equal(code, 0);
+    const expected = [
+      '127.0.0.1      keepme.test          #laragon magic!   ',
+      '# a comment mentioning stale1.test stays',
+      '10.0.0.5\tstale1.test\t#agentpress',
+      '127.0.0.1\tnotstale1.test\t#agentpress',
+      '127.0.0.1\tstale1.test.uk\t#agentpress',
+      '127.0.0.1 multi.test stale1.test #agentpress',
+      '127.0.0.1\tstale1.test',
+      '127.0.0.1\tsurvivor.test\t#agentpress',
+      '',
+    ].join(CRLF);
+    assert.equal(readFileSync(file, 'utf8'), expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the JS matcher and the PowerShell filter agree under includeLaragon too', () => {
+  const matches = agentpressHostsMatches(FIXTURE, ['stale1.test', 'stale2.test'], { includeLaragon: true });
+  assert.deepEqual(matches, [
+    '127.0.0.1\tstale1.test\t#agentpress',
+    '127.0.0.1\tstale2.test\t#agentpress',
+    '::1\tstale2.test\t#agentpress',
+    '127.0.0.1      stale1.test          #laragon magic!   ',
+  ]);
 });
 
 test('the JS matcher and the PowerShell filter agree on what is ours', () => {
@@ -162,6 +199,41 @@ test('regression: a file that is nothing but our entries is exit 13 — the resu
     const code = runScript(hostsRemovalScript(['only.test'], { hostsPath: file, maxRemove: 4 })).code;
     assert.equal(code, 13);
     assert.equal(readFileSync(file, 'utf8'), raw);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('regression: non-UTF-8 bytes are exit 19, never transcoded to U+FFFD mojibake', () => {
+  // The lenient default decode turned an ANSI "café" comment into U+FFFD and
+  // a successful run persisted that file-wide, invisible to the verify
+  // (proven live under PS 5.1). The strict decoder refuses instead.
+  const raw = Buffer.concat([
+    Buffer.from('# caf', 'ascii'),
+    Buffer.from([0xe9]), // Windows-1252 é — invalid as UTF-8
+    Buffer.from(`${CRLF}127.0.0.1\tgone.test\t#agentpress${CRLF}127.0.0.1\tstay.test\t#laragon magic!${CRLF}`, 'ascii'),
+  ]);
+  const { dir, file } = tempHosts(null);
+  try {
+    writeFileSync(file, raw);
+    const code = runScript(hostsRemovalScript(['gone.test'], { hostsPath: file, maxRemove: 2 })).code;
+    assert.equal(code, 19);
+    assert.deepEqual(readFileSync(file), raw);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a UTF-8 BOM survives the rewrite byte-for-byte', () => {
+  const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+  const body = `# header${CRLF}127.0.0.1\tgone.test\t#agentpress${CRLF}127.0.0.1\tstay.test\t#laragon magic!${CRLF}`;
+  const { dir, file } = tempHosts(null);
+  try {
+    writeFileSync(file, Buffer.concat([BOM, Buffer.from(body, 'ascii')]));
+    const code = runScript(hostsRemovalScript(['gone.test'], { hostsPath: file, maxRemove: 2 })).code;
+    assert.equal(code, 0);
+    const expected = Buffer.concat([BOM, Buffer.from(`# header${CRLF}127.0.0.1\tstay.test\t#laragon magic!${CRLF}`, 'ascii')]);
+    assert.deepEqual(readFileSync(file), expected);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
