@@ -319,8 +319,9 @@ Nothing here runs in the background; removing it is deleting things. In order:
    leftover or your own and is not ours to delete), the `AgentPress` line in
    `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any leftover hosts
    entries for destroyed sites: `destroy` removes its own `#agentpress` line (sites
-   destroyed by versions before 1.9.0 may still have one), and Laragon prunes its own
-   `#laragon magic!` lines on reload.
+   destroyed by versions before 1.9.0 may still have one), and Laragon clears its own
+   `#laragon magic!` lines when it next rescans www — creating a site triggers that,
+   a service Stop/Start alone does not.
 
 ## Security
 

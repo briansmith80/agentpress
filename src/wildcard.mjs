@@ -413,8 +413,10 @@ function removalFailureText(code, backupPath) {
  * fatal: every failure path leaves the file as it was (or restored) and
  * returns ok:false with the reason, so callers print the line for the user
  * instead. A `#laragon magic!` line for the same hostname is deliberately
- * out of scope — Laragon prunes its own entries when their folder is gone,
- * and touching them means racing their owner; `remaining` reports them.
+ * out of scope — touching it means racing its owner, and Laragon clears its
+ * own dead entries when it next rescans www (field-verified 2026-08-12: a
+ * new folder appearing in www triggers the sync; a service Stop All →
+ * Start All does not). `remaining` reports them.
  */
 export async function removeHostsEntries(hostnames) {
   const names = hostnames.map((h) => String(h).toLowerCase());

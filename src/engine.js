@@ -1842,9 +1842,15 @@ async function destroyCommand({ yes }) {
       (result.hostsEntry?.ok && result.hostsEntry.removed > 0 && result.hostsEntry.remaining.length === 0
         ? '\nHosts entry removed.\n'
         : '') +
+      // "Laragon's reload prunes it" was shipped here first and falsified in the
+      // field the same day: two dead magic lines survived a Stop All → Start All
+      // and were pruned the moment a NEW folder appeared in www. Laragon's hosts
+      // sync runs when it detects a new site (or its own Reload), not on a
+      // service restart — say that, or the user restarts Laragon for nothing.
       (result.hostsEntry?.ok && result.hostsEntry.remaining.length > 0
-        ? `\nRemaining trace: a "#laragon magic!" hosts line for ${result.hostname} — Laragon's own\n` +
-          '  reload prunes it now the folder is gone, or remove it by hand.\n'
+        ? `\nRemaining trace: a "#laragon magic!" hosts line for ${result.hostname} — Laragon's own.\n` +
+          '  It clears it when it next rescans www (creating a site triggers that; a plain\n' +
+          '  Stop All → Start All does not). Or remove the line by hand.\n'
         : '') +
       (result.hostsEntry && !result.hostsEntry.ok && result.hostname
         ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` +
