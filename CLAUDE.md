@@ -123,13 +123,20 @@ www folder, which is when Laragon — which rewrites the ENTIRE hosts file from 
 on every sync — may be mid-rewrite of the same file. Restored byte-identical from a backup
 taken minutes earlier. v2 (`hostsRemovalScript` in `src/wildcard.mjs`, shipped 1.9.0) is
 allowed to rewrite because every step refuses that hole: .NET reads that THROW on failure,
-an empty read aborts, only lines tagged exactly `#agentpress` are ever dropped (never
-Laragon's or a user's), a caller-computed cap on removed lines, temp-file + rename so the
-file is never mid-truncation, post-write verify with restore from a **verified** backup if
-it ever reads back empty — and it runs BEFORE the folder delete, out of Laragon's rewrite
-window. Any change to that script keeps ALL of those properties, keeps the JS/PS matcher
-parity test green, and gets a live append→remove **byte-identity** round-trip on a real
-machine before shipping.
+an empty read aborts, only lines carrying a known tool tag are ever dropped — `#agentpress`,
+plus `#laragon magic!` for the destroyed hostname where destroy opts in (operator's call,
+2026-08-12: Laragon only prunes its dead lines when a NEW folder appears in www, so the
+last site's line lingered forever), and never an untagged line a human wrote — plus a
+caller-computed cap on removed lines, a STRICT UTF-8 decode (the lenient default turned an
+ANSI "café" comment into U+FFFD and persisted it file-wide, invisible to the verify), and a
+temp-file swapped in via `File.Replace` with a REAL backup filename — never `Move-Item
+-Force`, which on PS 5.1 deletes the destination FIRST (proven live: a held handle left NO
+hosts file, reported as "nothing was changed"), and never `$null` as Replace's backup arg,
+which PowerShell binds as `""` and throws "path is not of a legal form" on every call.
+Post-write verify restores from the freshest backup if the file ever reads back empty — and
+it runs BEFORE the folder delete, out of Laragon's rewrite window. Any change to that script
+keeps ALL of those properties, keeps the JS/PS matcher parity test green, and gets a live
+append→remove **byte-identity** round-trip on a real machine before shipping.
 
 **Never spawn a competing Apache.** Tried and reverted: it restores the TCP port with a
 *stale in-memory config*, serving every existing site while silently 404ing the new one —

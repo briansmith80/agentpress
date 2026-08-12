@@ -318,10 +318,10 @@ Nothing here runs in the background; removing it is deleting things. In order:
    filename is version-scoped, so a bare `wp-cli.phar` there is either a pre-1.2.0
    leftover or your own and is not ours to delete), the `AgentPress` line in
    `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any leftover hosts
-   entries for destroyed sites: `destroy` removes its own `#agentpress` line (sites
-   destroyed by versions before 1.9.0 may still have one), and Laragon clears its own
-   `#laragon magic!` lines when it next rescans www — creating a site triggers that,
-   a service Stop/Start alone does not.
+   entries for sites destroyed by versions before 1.9.0 — since 1.9.0 `destroy` removes
+   both its own `#agentpress` line and Laragon's `#laragon magic!` line for that site
+   (Laragon only clears those itself when a new site folder appears in www, so after
+   your last site they would linger). A hosts line you added by hand is never touched.
 
 ## Security
 

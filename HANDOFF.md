@@ -31,14 +31,25 @@ handoff_reason: awaiting-operator-manual-test
 > is one process that never persists a failed read.
 >
 > **v2 shipped to `main` as 1.9.0** (`hostsRemovalScript`/`removeHostsEntries` in
-> `src/wildcard.mjs`): .NET reads that throw, abort on empty, only lines tagged exactly
-> `#agentpress` are removable, caller-computed cap, temp-file + rename, post-write verify
+> `src/wildcard.mjs`): .NET reads that throw, abort on empty, only tool-tagged lines are
+> removable — `#agentpress`, and (operator's decision after their manual pass showed
+> Laragon only prunes dead `#laragon magic!` lines when a NEW folder appears in www, never
+> on Stop/Start) destroy also takes the destroyed site's magic line; an untagged
+> hand-written line never — plus a caller-computed cap, temp-file + rename, post-write verify
 > with restore from a byte-verified backup, and it runs BEFORE the folder delete. The append
 > also now only adds a newline separator when the file needs one (the doubled blank lines the
-> operator reported are gone, and removal collapses the old ones). 113 tests; 13 of them
-> drive the REAL script bytes through PowerShell against temp fixtures, each pinning one
-> guard. Live-verified on the real machine: append→remove **byte-identity round-trip**, then
-> the 9 stale entries cleared in one elevated run (80 `#laragon magic!` lines untouched).
+> operator reported are gone, and removal collapses the old ones). 117 tests; the hosts suite
+> drives the REAL script bytes through PowerShell against temp fixtures, each regression
+> pinning one guard. Live-verified on the real machine: append→remove **byte-identity
+> round-trip**, the 9 stale entries cleared in one elevated run (80 `#laragon magic!` lines
+> untouched), and the operator's own create-to-destroy pass.
+>
+> **An adversarial review then caught two live-proven flaws inside v2 itself, both fixed:**
+> `Move-Item -Force` deletes the destination FIRST on PS 5.1, so a failed rename would have
+> left NO hosts file while reporting "nothing was changed" (now `File.Replace` with a real
+> backup filename — PS binds `$null` string args as `""`, which throws on every call); and
+> the lenient UTF-8 decode turned ANSI bytes into U+FFFD mojibake that a successful run
+> persisted file-wide (now a strict decoder, exit 19, refuse to rewrite).
 >
 > **Also since 1.8.1:** transactional destroy (halts before deleting anything the .env still
 > describes when the DB drop fails, with recovery SQL), EBUSY teardown diagnosis corrected

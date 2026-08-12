@@ -1832,25 +1832,26 @@ async function destroyCommand({ yes }) {
         ? `\n${dim('·')} ${dim('The application password could not be confirmed revoked, but the database it')}\n` +
           `  ${dim('lived in has been dropped, so it no longer exists. Nothing to do.')}\n`
         : '') +
-      // Four hosts outcomes, three of them printed. Removed cleanly: say so. Our
-      // line removed but a `#laragon magic!` one remains: name it, because "hosts
-      // entry removed" while the hostname still resolves would read as a lie.
-      // Removal failed: the old "Remaining trace" line plus the reason — v1 of this
-      // feature emptied the whole hosts file, so every failure path now leaves the
-      // file alone and this line is the fallback (see hostsRemovalScript). Nothing
-      // there to begin with: print nothing.
+      // Four hosts outcomes, three of them printed. Removed cleanly: say so, with
+      // the right plural — destroy takes the site's `#laragon magic!` line as well
+      // as our own (the operator's field test showed Laragon prunes dead magic
+      // lines only when a NEW folder appears in www, never on a service
+      // Stop/Start, so after the last site it lingered forever). Something still
+      // resolving the hostname: name it, because "removed" while it still
+      // resolves would read as a lie — but do NOT guess who wrote it: `remaining`
+      // counts ANY resolving line, including a tagged one at a non-loopback
+      // address, which the remover deliberately skips. Removal failed: the old
+      // "Remaining trace" line plus the reason — v1 of this feature emptied the
+      // whole hosts file, so every failure path now leaves the file alone and
+      // this line is the fallback (see hostsRemovalScript). Nothing there to
+      // begin with: print nothing.
       (result.hostsEntry?.ok && result.hostsEntry.removed > 0 && result.hostsEntry.remaining.length === 0
-        ? '\nHosts entry removed.\n'
+        ? `\nHosts ${result.hostsEntry.removed > 1 ? 'entries' : 'entry'} removed.\n`
         : '') +
-      // "Laragon's reload prunes it" was shipped here first and falsified in the
-      // field the same day: two dead magic lines survived a Stop All → Start All
-      // and were pruned the moment a NEW folder appeared in www. Laragon's hosts
-      // sync runs when it detects a new site (or its own Reload), not on a
-      // service restart — say that, or the user restarts Laragon for nothing.
       (result.hostsEntry?.ok && result.hostsEntry.remaining.length > 0
-        ? `\nRemaining trace: a "#laragon magic!" hosts line for ${result.hostname} — Laragon's own.\n` +
-          '  It clears it when it next rescans www (creating a site triggers that; a plain\n' +
-          '  Stop All → Start All does not). Or remove the line by hand.\n'
+        ? `\nRemaining trace: a hosts line still maps ${result.hostname}, and it is not one this\n` +
+          '  tool may remove (it only removes single-hostname loopback lines tagged by itself\n' +
+          '  or Laragon). It was left alone — remove it by hand if it is unwanted.\n'
         : '') +
       (result.hostsEntry && !result.hostsEntry.ok && result.hostname
         ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` +

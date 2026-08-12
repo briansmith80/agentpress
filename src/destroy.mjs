@@ -230,10 +230,17 @@ export async function destroySite({ projectDir, onStep }) {
   // the full account and the guards). Running here keeps our elevated write
   // out of that window. Never fatal: ok:false just means the summary prints
   // the leftover line, exactly as before the feature existed.
+  //
+  // includeLaragon takes the site's own "#laragon magic!" line too — the
+  // operator's field test showed Laragon prunes those only when a NEW folder
+  // appears in www, so after destroying your last site the dead line lingers
+  // through any number of service restarts. Removing it here is safe from
+  // Laragon's side: its sync is a full regenerate, and a hostname without a
+  // folder is exactly what it would drop itself.
   let hostsEntry = { ok: true, removed: 0, remaining: [], reason: null };
   if (env.SITE_HOST) {
     onStep?.('removing the hosts entry (a Windows permission prompt may appear — approve it)…');
-    hostsEntry = await removeHostsEntries([env.SITE_HOST]).catch((err) => ({
+    hostsEntry = await removeHostsEntries([env.SITE_HOST], { includeLaragon: true }).catch((err) => ({
       ok: false,
       removed: 0,
       remaining: [env.SITE_HOST],
