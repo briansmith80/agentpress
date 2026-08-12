@@ -15,6 +15,15 @@ each scaffolded site.
 
 Every step below exists because skipping it has burned this project at least once.
 
+**Steps 1–4 are the default end of a piece of work. Step 5 onward needs the operator to
+ask.** Finish, verify, bump, commit, push, confirm CI — then stop and report. Do not treat
+publishing as the obvious next step and do not tee it up as one. The operator runs their own
+manual create-to-destroy pass on real Laragon first: on 2026-08-12 a single such teardown
+surfaced four defects, three of them in text written in the previous two days, after a run of
+four same-day releases. Their hands-on pass finds what the unit suite and code review do not.
+Keep the version bumped regardless — `main` must never reuse a published version's number —
+since bumping is not publishing.
+
 1. **Verify locally.**
    - `node --check` every changed `.js`/`.mjs`.
    - `node index.js doctor` → must exit 0. Force a blocker
