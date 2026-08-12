@@ -145,12 +145,50 @@ function openBrowser(url) {
   }
 }
 
-function openTerminalHere() {
-  try {
-    spawn('cmd', ['/c', 'start', 'cmd', '/k', `cd /d "${CWD}"`], { detached: true, stdio: 'ignore' }).unref();
-  } catch {
-    console.log(`  cd ${CWD}`);
+/** Fire-and-forget window spawn; resolves true only when the process actually started ('spawn' fires), so callers can fall back or name what opened. */
+function trySpawnDetached(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { detached: true, stdio: 'ignore', ...opts });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.once('spawn', () => {
+      child.unref();
+      resolve(true);
+    });
+    child.once('error', () => resolve(false));
+  });
+}
+
+/**
+ * Windows Terminal first — `wt -d <dir>` opens the user's DEFAULT profile,
+ * i.e. whatever shell they actually chose, in the site folder. Hardcoding
+ * cmd.exe was a field complaint. Detection is attempt-and-fall-back, NOT
+ * existsSync: wt.exe is an app-execution alias (a reparse point fs.stat
+ * refuses to resolve), so existsSync returns false on machines that have
+ * it — verified live here: existsSync false, spawn succeeded. The absolute
+ * alias path, never a bare 'wt': bare-name spawn on Windows searches the
+ * CURRENT DIRECTORY first, and this runs inside a site folder that agents
+ * write to. shell:false passes -d as real argv (no cmd.exe quoting layer).
+ *
+ * The cmd fallback deliberately has NO `cd /d "<path>"` argument: the new
+ * window inherits this process's cwd, which is always the site dir (the menu
+ * refuses to start anywhere else) — and that argument's nested quoting
+ * printed "The filename, directory name, or volume label syntax is
+ * incorrect." at the top of every window it opened, while contributing
+ * nothing.
+ */
+async function openTerminalHere() {
+  const wt = join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps', 'wt.exe');
+  if (process.env.LOCALAPPDATA && (await trySpawnDetached(wt, ['-d', CWD], { shell: false }))) {
+    return 'Windows Terminal';
   }
+  if (await trySpawnDetached('cmd', ['/c', 'start', 'cmd'])) return 'a Command Prompt';
+  console.log(`  ${dim('(could not open a terminal — run this yourself:)')} cd ${CWD}`);
+  return null;
 }
 
 // One-click already-logged-in wp-admin, via the Agent Connector's
@@ -662,8 +700,8 @@ for (;;) {
     openBrowser(SITE);
     console.log(`  ${dim(`→ opened ${SITE} in your browser`)}\n`);
   } else if (choice === 'shell') {
-    openTerminalHere();
-    console.log(`  ${dim('→ opened a terminal in this folder')}\n`);
+    const opened = await openTerminalHere();
+    console.log(opened ? `  ${dim(`→ opened ${opened} in this folder`)}\n` : '');
   } else if (choice === 'rewire') {
     console.log('');
     await runInherit('npx', ['create-agentpress@latest', 'rewire']);
