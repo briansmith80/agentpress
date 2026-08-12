@@ -1786,7 +1786,10 @@ async function destroyCommand({ yes }) {
     return;
   }
 
-  const clean = result.dbDropped && result.appPasswordRevoked !== null;
+  // A password we could not confirm revoked is not a blemish once its database is
+  // gone, so it must not hold the tick back either — otherwise the panel says ⚠ over
+  // a teardown with nothing left to do.
+  const clean = result.dbDropped;
   console.log(
     // No leading ✓ unless everything actually worked. It used to print one over
     // "(database not dropped: ...)" in the same sentence.
@@ -1796,14 +1799,27 @@ async function destroyCommand({ yes }) {
       // revoke belongs in the SUMMARY, not only in a step line that scrolled
       // past mid-teardown. It is an admin-equivalent REST credential and the
       // site is about to stop existing, so it cannot be revoked later.
-      (result.appPasswordRevoked === null
-        ? `\n${yellow(WARN)} The application password could NOT be confirmed revoked. It still grants REST admin.\n` +
-          '  Remove it by hand in wp-admin ▸ Users ▸ Profile ▸ Application Passwords before the site goes.\n'
+      // Conditional on the database, and that matters. Application passwords live in
+      // the site's own wp_usermeta, so once the database is dropped the credential is
+      // gone with it — there is nothing left to revoke and no wp-admin to revoke it
+      // in. Sending someone to wp-admin at that point is advice they cannot follow,
+      // which is how this read on a real teardown. The warning is only true when the
+      // database SURVIVED.
+      (result.appPasswordRevoked === null && !result.dbDropped
+        ? `\n${yellow(WARN)} The application password could NOT be confirmed revoked, and the database is\n` +
+          '  still here, so it may still grant REST admin. Remove it in wp-admin ▸ Users ▸\n' +
+          '  Profile ▸ Application Passwords.\n'
+        : '') +
+      (result.appPasswordRevoked === null && result.dbDropped
+        ? `\n${dim('·')} ${dim('The application password could not be confirmed revoked, but the database it')}\n` +
+          `  ${dim('lived in has been dropped, so it no longer exists. Nothing to do.')}\n`
         : '') +
       (result.hostname ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
-  if (result.appPasswordRevoked === null) process.exitCode = 1;
+  // Same condition as the warning above: an unrevoked password whose database has
+  // been dropped is not an outstanding problem, so it must not fail the command.
+  if (result.appPasswordRevoked === null && !result.dbDropped) process.exitCode = 1;
 }
 
 /**
