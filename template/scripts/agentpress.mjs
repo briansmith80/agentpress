@@ -4,7 +4,7 @@
 // checkout's `update` command is the only thing that refreshes it.
 // Apache/MySQL are shared by every Laragon site, always-on, so unlike
 // the Docker original this menu never starts or stops anything itself.
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
@@ -173,36 +173,38 @@ echo $r['login_url'];
 /**
  * Spawns the `wp` shim via shell:true — preferring the absolute WP_BAT path
  * baked in at scaffold time (usr\bin may not be on PATH on this machine),
- * falling back to a bare `wp` from PATH. That's the one place in this file
- * that needs shell:true rather than a direct .exe spawn — but the only
- * dynamic argument is a temp-file path we generate ourselves, nothing
- * untrusted, so the cmd.exe quoting risk that matters elsewhere doesn't
- * apply here.
+ * falling back to a bare `wp` from PATH. shell:true is needed for the .bat
+ * shim, so EVERY dynamic argument the callers pass must arrive pre-quoted:
+ * with shell:true Node joins args unquoted into the cmd.exe line, and an
+ * unquoted path breaks the moment it contains a space (any "First Last"
+ * Windows username). Only paths this file generates itself are ever passed —
+ * nothing user-typed reaches this.
  */
-function runWpEvalFile(phpCode) {
+function runWp(args) {
   return new Promise((resolve) => {
-    const tmpFile = join(tmpdir(), `agentpress-eval-${randomBytes(6).toString('hex')}.php`);
-    // eval-file needs an actual <?php tag (unlike `wp eval`) — content
-    // outside one is literal output, not executed.
-    const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
-    writeFileSync(tmpFile, content, 'utf8');
     const wpCmd = existsSync(WP_BAT) ? `"${WP_BAT}"` : 'wp';
-    // Every dynamic arg is quoted: with shell:true Node joins args unquoted
-    // into the cmd.exe line, so an unquoted tmp path breaks the moment TEMP
-    // contains a space (any "First Last" Windows username). wp-cli parses
-    // quoted --path="..." fine.
-    const child = spawn(wpCmd, ['eval-file', `"${tmpFile}"`, `--path="${join(CWD, 'public')}"`], { shell: true });
+    const child = spawn(wpCmd, [...args, `--path="${join(CWD, 'public')}"`], { shell: true });
     let stdout = '';
+    let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
-    child.on('close', (code) => {
-      try {
-        unlinkSync(tmpFile);
-      } catch {
-        // best-effort
-      }
-      resolve({ code, stdout });
-    });
-    child.on('error', () => resolve({ code: null, stdout: '' }));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', (err) => resolve({ code: null, stdout: '', stderr: err.message }));
+  });
+}
+
+function runWpEvalFile(phpCode) {
+  const tmpFile = join(tmpdir(), `agentpress-eval-${randomBytes(6).toString('hex')}.php`);
+  // eval-file needs an actual <?php tag (unlike `wp eval`) — content
+  // outside one is literal output, not executed.
+  const content = /^\s*<\?php/.test(phpCode) ? phpCode : `<?php\n${phpCode}`;
+  writeFileSync(tmpFile, content, 'utf8');
+  return runWp(['eval-file', `"${tmpFile}"`]).finally(() => {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // best-effort
+    }
   });
 }
 
@@ -227,6 +229,50 @@ async function adminUrl() {
   }
   console.log(dim('  (one-click login unavailable — opening the normal login form; credentials are in .env)'));
   return `${SITE}/wp-admin`;
+}
+
+// --- database snapshots ---
+// A rollback point before letting an AI agent loose on the site. Kept in the
+// site itself (gitignored — a dump is the whole site, password hashes
+// included) and named by timestamp so "latest" is a lexicographic sort, no
+// index file to corrupt.
+const SNAPSHOT_DIR = join(CWD, 'snapshots');
+function newestSnapshot() {
+  try {
+    const files = readdirSync(SNAPSHOT_DIR)
+      .filter((f) => /^db-.*\.sql$/.test(f))
+      .sort()
+      .reverse();
+    return files[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Last lines of a file WITHOUT reading it whole — debug.log on a broken site
+ * grows to hundreds of MB, and readFileSync of that inside an interactive
+ * menu is a hang, not a feature.
+ */
+function tailFile(path, { maxBytes = 16384, maxLines = 40 } = {}) {
+  try {
+    const size = statSync(path).size;
+    const start = Math.max(0, size - maxBytes);
+    const buf = Buffer.alloc(size - start);
+    const fd = openSync(path, 'r');
+    try {
+      readSync(fd, buf, 0, buf.length, start);
+    } finally {
+      closeSync(fd);
+    }
+    return buf
+      .toString('utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== '')
+      .slice(-maxLines);
+  } catch {
+    return [];
+  }
 }
 
 // --- single-instance lock ---
@@ -490,19 +536,36 @@ if (!SHOW_BANNER) console.log(`Welcome to agentpress v${VERSION}.\n`);
 
 for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
+  // Detection-driven entries: an item appears only when its situation does.
+  // "Point MCP here" shows up exactly when some agent's hint above it carries
+  // a ⚠ (wiring absent or claimed by another site); "Restore" only once a
+  // snapshot exists; "Update this site" only when npm has a newer version.
+  // A menu of remedies for problems you don't have is noise.
+  let wiringBroken = false;
+  const agentOptions = agents.map((a) => {
+    const wired = wiredHostFor(a);
+    let hint;
+    if (wired === false) {
+      hint = yellow('⚠ no MCP wiring — run rewire');
+      wiringBroken = true;
+    } else if (wired && wired !== HOST.toLowerCase()) {
+      hint = yellow(`⚠ MCP points at ${wired}`);
+      wiringBroken = true;
+    } else if (wired) hint = 'MCP points here';
+    return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
+  });
+  const latestSnapshot = newestSnapshot();
+  const debugLog = join(CWD, 'public', 'wp-content', 'debug.log');
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
-    ...agents.map((a) => {
-      const wired = wiredHostFor(a);
-      let hint;
-      if (wired === false) hint = yellow('⚠ no MCP wiring — run rewire');
-      else if (wired && wired !== HOST.toLowerCase()) hint = yellow(`⚠ MCP points at ${wired}`);
-      else if (wired) hint = 'MCP points here';
-      return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
-    }),
+    ...agentOptions,
+    ...(wiringBroken ? [{ value: 'rewire', label: 'Point MCP here', hint: yellow('⚠ fixes the wiring above') }] : []),
+    { value: 'snapshot', label: 'Snapshot the database', hint: 'rollback point before agent sessions' },
+    ...(latestSnapshot ? [{ value: 'restore', label: 'Restore the latest snapshot', hint: latestSnapshot }] : []),
+    { value: 'errors', label: 'Show recent errors', hint: existsSync(debugLog) ? 'wp-content/debug.log' : 'debug logging is off' },
     { value: 'shell', label: 'Open a terminal here' },
-    ...(latestVersion ? [{ value: 'update', label: 'Update agentpress', hint: `v${VERSION} → v${latestVersion}` }] : []),
+    ...(latestVersion ? [{ value: 'update', label: 'Update this site', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
   ];
   const choice = await choose('What would you like to do?', options);
@@ -525,12 +588,91 @@ for (;;) {
   } else if (choice === 'shell') {
     openTerminalHere();
     console.log(`  ${dim('→ opened a terminal in this folder')}\n`);
+  } else if (choice === 'rewire') {
+    console.log('');
+    await runInherit('npx', ['create-agentpress@latest', 'rewire']);
+    // No receipt of our own: rewire prints its results, and the menu's own ⚠
+    // hints re-read the wiring on the next render — them going quiet IS the
+    // confirmation.
+    console.log('');
+  } else if (choice === 'snapshot') {
+    try {
+      mkdirSync(SNAPSHOT_DIR, { recursive: true });
+      // The folder carries its own ignore file, not just an entry in the
+      // site's .gitignore: a site that picked this menu up via `update` may
+      // keep its original .gitignore, and a dump is the whole site including
+      // password hashes — it must never reach a repo either way.
+      const marker = join(SNAPSHOT_DIR, '.gitignore');
+      if (!existsSync(marker)) writeFileSync(marker, '*\n');
+    } catch {
+      // the export below will fail loudly with the real reason
+    }
+    const name = `db-${new Date().toISOString().replace(/[:.]/g, '-')}.sql`;
+    const file = join(SNAPSHOT_DIR, name);
+    // --add-drop-table so restoring is a clean replace, not a pile of
+    // duplicate-key errors on top of the current content.
+    const r = await runWp(['db', 'export', `"${file}"`, '--add-drop-table']);
+    if (r.code === 0 && existsSync(file)) {
+      const mb = (statSync(file).size / (1024 * 1024)).toFixed(1);
+      console.log(`  ${dim(`→ database saved to snapshots\\${name} (${mb} MB)`)}\n`);
+    } else {
+      console.log(`  ${red('✖')} snapshot failed: ${(r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0]}\n`);
+    }
+  } else if (choice === 'restore') {
+    const name = newestSnapshot();
+    if (!name) {
+      console.log(`  ${dim('(no snapshot found — take one first)')}\n`);
+    } else {
+      // Cancel is first ON PURPOSE: Enter on a reflex must not overwrite the
+      // database. "overwrites", not "replaces ALL": the dump drops and
+      // recreates the tables IT contains, so posts/pages/settings/users roll
+      // back — but a table some plugin created after the snapshot survives.
+      // The hint must not promise a cleaner wipe than wp db import performs.
+      const sure = await choose(`Restore ${name} over the current database?`, [
+        { value: false, label: 'Cancel' },
+        { value: true, label: 'Restore', hint: yellow('overwrites the current WordPress content') },
+      ]);
+      if (sure) {
+        const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, name)}"`]);
+        if (r.code === 0) console.log(`  ${dim(`→ database restored from snapshots\\${name}`)}\n`);
+        else console.log(`  ${red('✖')} restore failed: ${(r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0]}\n`);
+      } else {
+        console.log('');
+      }
+    }
+  } else if (choice === 'errors') {
+    if (!existsSync(debugLog)) {
+      console.log(
+        `\n  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
+          `  ${dim('Turn it on with:')} npm run wp -- config set WP_DEBUG true --raw\n` +
+          `  ${dim('and:')}             npm run wp -- config set WP_DEBUG_LOG true --raw\n`,
+      );
+    } else {
+      const lines = tailFile(debugLog);
+      if (lines.length === 0) {
+        console.log(`\n  ${dim('wp-content/debug.log exists but is empty — nothing has gone wrong yet.')}\n`);
+      } else {
+        console.log(`\n  ${dim(`last ${lines.length} line${lines.length === 1 ? '' : 's'} of wp-content/debug.log:`)}\n`);
+        for (const l of lines) console.log(`  ${l}`);
+        console.log('');
+      }
+    }
+    await pressAnyKey();
   } else if (choice === 'update') {
     // @latest, never @<the version we happened to see>: pinning a number here means
     // a stale menu hands out a stale command long after that version stopped being
     // current, and it was the mechanism that turned a false "update available" into
-    // an actual downgrade instruction.
-    console.log('  Run: npx create-agentpress@latest update   (from this directory)\n');
+    // an actual downgrade instruction. Runs it rather than printing it — the
+    // operator's ask: the menu already detected the update, so offering a
+    // command to retype was friction, not safety (update itself still asks
+    // before overwriting files).
+    console.log('');
+    await runInherit('npx', ['create-agentpress@latest', 'update']);
+    // This running menu IS one of the files update refreshes, so the new
+    // version only shows after a relaunch. The item stays in the list — a
+    // second pick is harmless, and dropping it here would fake certainty this
+    // process cannot have about whether the run succeeded.
+    console.log(`\n  ${dim('→ update run — restart the menu (npm run agentpress) to load the refreshed files')}\n`);
   } else if (choice.startsWith('agent:')) {
     const key = choice.slice('agent:'.length);
     const wired = wiredHostFor(key);

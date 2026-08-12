@@ -1,5 +1,8 @@
 .env
 .agentpress.lock
+# Database snapshots from the menu's "Snapshot the database" — a dump is the
+# whole site, password hashes included; it must never reach a repo.
+/snapshots/
 # Only exists while a scaffold is unfinished (resume reads it, completion deletes it).
 .agentpress-pending.json
 # wp-config.php holds the same DB credentials .env does — pushing a scaffolded
