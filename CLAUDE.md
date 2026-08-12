@@ -112,6 +112,20 @@ expected and documented.
 "nothing to `npm install`" is a design property. Hand-roll instead — `src/ansi.mjs` is ~15
 lines of escape codes in place of chalk.
 
+**Never rewrite the hosts file wholesale. Append only.** `ensureHostsEntry` adds a line
+through an elevated PowerShell `Add-Content`, and that is the only safe shape. On
+2026-08-12 a `removeHostsEntry` was written to delete a destroyed site's line by reading
+the file, filtering, and `Set-Content`-ing the result. Its matcher was verified against a
+fake hosts file (comments, blanks, shared lines, `::1`, uppercase, and both substring
+traps all handled), the elevated context was verified to read 103 lines and compute 94
+kept, and the same script under PowerShell 5.1 against a copy produced exactly 94. Run
+against the real file it left the machine's hosts **EMPTY** — all ~90 entries gone, every
+`.test` hostname unresolvable. Restored from a backup taken minutes earlier, byte-identical.
+The cause was never established; Laragon co-manages this file and was running while folders
+it tracks were being deleted. The feature was reverted. `destroy` prints the leftover line
+and lets the user or Laragon's own prune deal with it. Do not retry this without a way to
+reproduce the failure off a real machine, and never without a backup you have verified.
+
 **Never spawn a competing Apache.** Tried and reverted: it restores the TCP port with a
 *stale in-memory config*, serving every existing site while silently 404ing the new one —
 worse than a clear outage. Detect and report; recovery is the user's Stop All → Start All.

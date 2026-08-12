@@ -7,7 +7,6 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
-import { removeHostsEntry } from './wildcard.mjs';
 import { removeDirSafely } from './junctions.mjs';
 import { dropDatabase, parseDbHost, resolveRootCredential } from './mysql.mjs';
 import { revokeAppPasswords } from './mcp.mjs';
@@ -234,19 +233,5 @@ export async function destroySite({ projectDir, onStep }) {
   }
   await removeDirSafely(projectDir);
 
-  // LAST, and only once everything else is gone. A hosts line for a site that still
-  // exists is correct; a hosts line for a site that does not is a hostname still
-  // resolving to 127.0.0.1. Best-effort: a declined UAC prompt leaves the line and the
-  // caller prints it, which is exactly what this command used to do unconditionally.
-  const hostname = env.SITE_HOST || vhost?.hostname || null;
-  let hostsRemoved = null;
-  if (hostname) {
-    onStep?.('removing the hosts entry (a Windows permission prompt may appear — approve it)…');
-    const res = await removeHostsEntry(hostname).catch((err) => ({ ok: false, reason: err.message }));
-    hostsRemoved = res.ok ? true : false;
-    if (!res.ok) onStep?.(`  (could not remove it: ${res.reason})`);
-    else if (res.already) hostsRemoved = 'absent';
-  }
-
-  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname, hostsRemoved, halted: false };
+  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname: env.SITE_HOST || vhost?.hostname || null, halted: false };
 }

@@ -1716,12 +1716,13 @@ async function destroyCommand({ yes }) {
       '  - the WordPress application password this tool minted\n' +
       '  - MCP registrations for any agents this site configured\n' +
       '  - the vhost conf and this project directory\n' +
-      // Corrected: the old text said "this tool never writes hosts directly", which was
-      // false — ensureHostsEntry writes it through an elevated PowerShell run — and it
-      // then left a destroyed hostname resolving to 127.0.0.1 until Laragon happened to
-      // prune it. Reported by a user who asked whether the line could just be removed.
-      "  - the site's hosts entry (a Windows permission prompt may appear; declining just\n" +
-      '    leaves the line, and it will be printed so you can remove it by hand)\n' +
+      // The old text claimed "this tool never writes hosts directly", which was false —
+      // ensureHostsEntry appends the line through an elevated PowerShell run. Corrected
+      // without promising removal: see the hosts rule in CLAUDE.md for why this command
+      // does not delete the line.
+      "This does NOT remove the site's hosts entry. This tool adds that line when it\n" +
+      'scaffolds, but it does not take it out again: the line is printed at the end so you\n' +
+      "can remove it by hand, and Laragon's own reload prunes entries whose folder is gone.\n" +
       'This cannot be undone.',
   );
   if (!yes) {
@@ -1836,13 +1837,14 @@ async function destroyCommand({ yes }) {
         ? `\n${dim('·')} ${dim('The application password could not be confirmed revoked, but the database it')}\n` +
           `  ${dim('lived in has been dropped, so it no longer exists. Nothing to do.')}\n`
         : '') +
-      // Three outcomes, not one. Reporting a "remaining trace" that has in fact been
-      // removed would be the same class of untruth as the claim it replaced.
-      (result.hostname && result.hostsRemoved === false
-        ? `\nRemaining trace: the hosts entry for ${result.hostname} could not be removed — delete this\n` +
-          `  line from ${HOSTS_PATH} when convenient:\n    127.0.0.1\t${result.hostname}\n`
-        : '') +
-      (result.hostname && result.hostsRemoved === true ? `  Hosts entry for ${result.hostname} removed.\n` : ''),
+      // Printed, never removed. See the hosts rule in CLAUDE.md: an attempt to delete
+      // this line rewrote the whole file and the machine's hosts ended up EMPTY, for
+      // reasons that were never established — Laragon co-manages this file and was
+      // running. Print and let the user or Laragon deal with it.
+      (result.hostname
+        ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` +
+          `  Laragon's own reload prunes entries whose folder is gone.\n`
+        : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
   // Same condition as the warning above: an unrevoked password whose database has
