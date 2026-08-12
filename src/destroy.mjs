@@ -7,6 +7,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
+import { removeHostsEntries } from './wildcard.mjs';
 import { removeDirSafely } from './junctions.mjs';
 import { dropDatabase, parseDbHost, resolveRootCredential } from './mysql.mjs';
 import { revokeAppPasswords } from './mcp.mjs';
@@ -222,6 +223,25 @@ export async function destroySite({ projectDir, onStep }) {
   const vhost = await findVhostForProject(projectDir);
   if (vhost) await rm(vhost.file, { force: true });
 
+  // Hosts BEFORE the folder delete, deliberately. Laragon rewrites the entire
+  // hosts file from a temp copy when it syncs, and deleting a www folder is a
+  // trigger — the first version of this feature ran after the delete and left
+  // the machine's hosts file EMPTY (see hostsRemovalScript in wildcard.mjs for
+  // the full account and the guards). Running here keeps our elevated write
+  // out of that window. Never fatal: ok:false just means the summary prints
+  // the leftover line, exactly as before the feature existed.
+  let hostsEntry = { ok: true, removed: 0, remaining: [], reason: null };
+  if (env.SITE_HOST) {
+    onStep?.('removing the hosts entry (a Windows permission prompt may appear — approve it)…');
+    hostsEntry = await removeHostsEntries([env.SITE_HOST]).catch((err) => ({
+      ok: false,
+      removed: 0,
+      remaining: [env.SITE_HOST],
+      reason: err.message,
+    }));
+    if (!hostsEntry.ok) onStep?.(`  (hosts entry not removed: ${hostsEntry.reason})`);
+  }
+
   onStep?.('removing the project directory…');
   // Windows can't rmdir a directory that's a live process's cwd — a real
   // hit, not just a test artifact: the natural way to run this command is
@@ -233,5 +253,5 @@ export async function destroySite({ projectDir, onStep }) {
   }
   await removeDirSafely(projectDir);
 
-  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostname: env.SITE_HOST || vhost?.hostname || null, halted: false };
+  return { removedAgents, dbDropped, dbSkipReason, appPasswordRevoked, hostsEntry, hostname: env.SITE_HOST || vhost?.hostname || null, halted: false };
 }

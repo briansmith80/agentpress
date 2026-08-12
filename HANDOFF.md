@@ -1,15 +1,15 @@
 ---
-session_date: 2026-08-10T16:00:23Z
+session_date: 2026-08-12T09:30:00Z
 author: claude-code
 operator: briansmith80
 repo: briansmith80/agentpress
 branch: main
 base: main
 status: done
-handoff_reason: release-complete
+handoff_reason: awaiting-operator-manual-test
 ---
 
-# Handoff: v1.8.0 + v1.8.1 shipped — the whole audit roadmap, plus a field-reported CSS fix
+# Handoff: hosts removal root-caused and rebuilt after emptying the file — 1.9.0 ready, UNPUBLISHED
 
 > **Maintainer session notes, not user documentation.** If you just cloned this repo, start
 > at [README.md](README.md); for how to work in it, read [CLAUDE.md](CLAUDE.md); to release,
@@ -17,7 +17,36 @@ handoff_reason: release-complete
 >
 > Earlier handoffs are archived under `.handoffs/`.
 
-## TL;DR
+## TL;DR (2026-08-12)
+> **`main` is at 1.9.0, NOT published, by the operator's explicit instruction** — they run a
+> manual create-to-destroy pass before any publish. Do not publish or tee it up.
+>
+> **The hosts incident, root-caused.** The first `destroy`-removes-the-hosts-entry attempt
+> (briefly on `main` as d368040) left this machine's hosts file **0 bytes** — restored
+> byte-identical from a backup, feature reverted (04ffc42). This session established the
+> mechanism: `Get-Content -ErrorAction SilentlyContinue` returns NOTHING on a failed read,
+> the filter over zero lines yielded an empty result, and `Set-Content` persisted it — and
+> the read had every chance to fail, because destroy had just deleted a www folder, which is
+> when Laragon rewrites the whole hosts file from a temp copy. Laragon "can do it" because it
+> is one process that never persists a failed read.
+>
+> **v2 shipped to `main` as 1.9.0** (`hostsRemovalScript`/`removeHostsEntries` in
+> `src/wildcard.mjs`): .NET reads that throw, abort on empty, only lines tagged exactly
+> `#agentpress` are removable, caller-computed cap, temp-file + rename, post-write verify
+> with restore from a byte-verified backup, and it runs BEFORE the folder delete. The append
+> also now only adds a newline separator when the file needs one (the doubled blank lines the
+> operator reported are gone, and removal collapses the old ones). 113 tests; 13 of them
+> drive the REAL script bytes through PowerShell against temp fixtures, each pinning one
+> guard. Live-verified on the real machine: append→remove **byte-identity round-trip**, then
+> the 9 stale entries cleared in one elevated run (80 `#laragon magic!` lines untouched).
+>
+> **Also since 1.8.1:** transactional destroy (halts before deleting anything the .env still
+> describes when the DB drop fails, with recovery SQL), EBUSY teardown diagnosis corrected
+> (editor/language-server race, not the shell's cwd), the `--yes` SSL Stop All → Start All
+> notice, and the doctor/registry/update-all work — see the sections below and `git log
+> f972509..`.
+
+## TL;DR as of v1.8.1 (2026-08-10)
 > **v1.7.0 and v1.7.1 shipped earlier this session** (MCP 401 diagnosis; two `/verify` fixes).
 > Then a 13-agent audit produced 72 verified findings, and **all five steps of its roadmap are
 > now implemented, live-tested and merged to `main` as v1.8.0.**
@@ -90,6 +119,10 @@ handoff_reason: release-complete
 >    escapes it. `/verify` therefore also tells agents not to name the screenshot.
 
 ## Next steps (ordered, actionable)
+> -1. [ ] **Wait for the operator's manual create-to-destroy pass, then publish 1.9.0**
+>    (steps 5–8 of CLAUDE.md's release order: `npm publish` from a real terminal, verify
+>    version AND tarball contents, GitHub release, HANDOFF). Their teardown feedback drove
+>    this whole arc; their pass on 2026-08-12 found four defects the suite did not.
 > 0. [ ] **The one verification 1.8.1 is missing.** CLAUDE.md's live test for that change is
 >    "scaffold a throwaway, run `/verify`, confirm the page renders styled and that
 >    `get-css-selectors` shows 11 `agentpress-verify-*` names and no `ap-*`". Only the scaffold
@@ -124,10 +157,12 @@ handoff_reason: release-complete
 
 ## Git / release state
 > - Branch `main`, pushed, level with `origin/main`.
-> - `package.json` is **1.8.1, published**.
-> - Tags: `v1.7.0`, `v1.7.1`, `v1.8.0`, `v1.8.1` (latest).
+> - `package.json` is **1.9.0, UNPUBLISHED — operator manual-tests before any publish.**
+> - npm latest is **1.8.1**. 1.8.2 and 1.8.3 were `main`-only bumps (docs; the hosts revert)
+>   and will never be published — the gap is intentional, like 1.1.0's. This 1.9.0 reuses the
+>   number d368040 briefly carried; that one never reached npm, so no conflict.
+> - Tags: `v1.7.0`, `v1.7.1`, `v1.8.0`, `v1.8.1` (latest). No tag until 1.9.0 publishes.
 > - npm: 1.0.0, 1.0.1, 1.2.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0, **1.8.1**. (1.1.0 is a gap.)
-> - 17 commits this session, `3a4eac0..HEAD`.
 
 ## Context & gotchas
 > - **An Oxygen `<style>` block is NOT page-scoped, and its class prefix is not ours to pick.**
