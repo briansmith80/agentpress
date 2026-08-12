@@ -112,19 +112,24 @@ expected and documented.
 "nothing to `npm install`" is a design property. Hand-roll instead — `src/ansi.mjs` is ~15
 lines of escape codes in place of chalk.
 
-**Never rewrite the hosts file wholesale. Append only.** `ensureHostsEntry` adds a line
-through an elevated PowerShell `Add-Content`, and that is the only safe shape. On
-2026-08-12 a `removeHostsEntry` was written to delete a destroyed site's line by reading
-the file, filtering, and `Set-Content`-ing the result. Its matcher was verified against a
-fake hosts file (comments, blanks, shared lines, `::1`, uppercase, and both substring
-traps all handled), the elevated context was verified to read 103 lines and compute 94
-kept, and the same script under PowerShell 5.1 against a copy produced exactly 94. Run
-against the real file it left the machine's hosts **EMPTY** — all ~90 entries gone, every
-`.test` hostname unresolvable. Restored from a backup taken minutes earlier, byte-identical.
-The cause was never established; Laragon co-manages this file and was running while folders
-it tracks were being deleted. The feature was reverted. `destroy` prints the leftover line
-and lets the user or Laragon's own prune deal with it. Do not retry this without a way to
-reproduce the failure off a real machine, and never without a backup you have verified.
+**The hosts file: a silently-failed read must never become a write.** On 2026-08-12 the
+first hosts-removal left the machine's hosts file **EMPTY** — all ~90 entries gone — after
+passing every offline check (matcher verified against a fake file with every trap, elevated
+probe read 103 lines / 94 kept, identical script correct under PS 5.1 against a copy).
+Mechanism, established afterwards: its `Get-Content -ErrorAction SilentlyContinue` returns
+NOTHING on a failed read, the filter over zero lines produced an empty `$kept`, and
+`Set-Content` persisted it. The read had every chance to fail: destroy had just deleted a
+www folder, which is when Laragon — which rewrites the ENTIRE hosts file from a temp copy
+on every sync — may be mid-rewrite of the same file. Restored byte-identical from a backup
+taken minutes earlier. v2 (`hostsRemovalScript` in `src/wildcard.mjs`, shipped 1.9.0) is
+allowed to rewrite because every step refuses that hole: .NET reads that THROW on failure,
+an empty read aborts, only lines tagged exactly `#agentpress` are ever dropped (never
+Laragon's or a user's), a caller-computed cap on removed lines, temp-file + rename so the
+file is never mid-truncation, post-write verify with restore from a **verified** backup if
+it ever reads back empty — and it runs BEFORE the folder delete, out of Laragon's rewrite
+window. Any change to that script keeps ALL of those properties, keeps the JS/PS matcher
+parity test green, and gets a live append→remove **byte-identity** round-trip on a real
+machine before shipping.
 
 **Never spawn a competing Apache.** Tried and reverted: it restores the TCP port with a
 *stale in-memory config*, serving every existing site while silently 404ing the new one —

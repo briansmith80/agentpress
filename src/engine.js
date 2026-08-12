@@ -1715,14 +1715,9 @@ async function destroyCommand({ yes }) {
       '  - the database and its dedicated user\n' +
       '  - the WordPress application password this tool minted\n' +
       '  - MCP registrations for any agents this site configured\n' +
-      '  - the vhost conf and this project directory\n' +
-      // The old text claimed "this tool never writes hosts directly", which was false —
-      // ensureHostsEntry appends the line through an elevated PowerShell run. Corrected
-      // without promising removal: see the hosts rule in CLAUDE.md for why this command
-      // does not delete the line.
-      "This does NOT remove the site's hosts entry. This tool adds that line when it\n" +
-      'scaffolds, but it does not take it out again: the line is printed at the end so you\n' +
-      "can remove it by hand, and Laragon's own reload prunes entries whose folder is gone.\n" +
+      '  - the vhost conf, the hosts entry this tool added, and this project directory\n' +
+      'Removing the hosts entry needs a Windows permission prompt, like adding it did.\n' +
+      'Declining it is fine — the leftover line is printed at the end instead.\n' +
       'This cannot be undone.',
   );
   if (!yes) {
@@ -1837,13 +1832,23 @@ async function destroyCommand({ yes }) {
         ? `\n${dim('·')} ${dim('The application password could not be confirmed revoked, but the database it')}\n` +
           `  ${dim('lived in has been dropped, so it no longer exists. Nothing to do.')}\n`
         : '') +
-      // Printed, never removed. See the hosts rule in CLAUDE.md: an attempt to delete
-      // this line rewrote the whole file and the machine's hosts ended up EMPTY, for
-      // reasons that were never established — Laragon co-manages this file and was
-      // running. Print and let the user or Laragon deal with it.
-      (result.hostname
+      // Four hosts outcomes, three of them printed. Removed cleanly: say so. Our
+      // line removed but a `#laragon magic!` one remains: name it, because "hosts
+      // entry removed" while the hostname still resolves would read as a lie.
+      // Removal failed: the old "Remaining trace" line plus the reason — v1 of this
+      // feature emptied the whole hosts file, so every failure path now leaves the
+      // file alone and this line is the fallback (see hostsRemovalScript). Nothing
+      // there to begin with: print nothing.
+      (result.hostsEntry?.ok && result.hostsEntry.removed > 0 && result.hostsEntry.remaining.length === 0
+        ? '\nHosts entry removed.\n'
+        : '') +
+      (result.hostsEntry?.ok && result.hostsEntry.remaining.length > 0
+        ? `\nRemaining trace: a "#laragon magic!" hosts line for ${result.hostname} — Laragon's own\n` +
+          '  reload prunes it now the folder is gone, or remove it by hand.\n'
+        : '') +
+      (result.hostsEntry && !result.hostsEntry.ok && result.hostname
         ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` +
-          `  Laragon's own reload prunes entries whose folder is gone.\n`
+          `  (not removed automatically: ${result.hostsEntry.reason})\n`
         : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;

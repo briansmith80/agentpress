@@ -309,20 +309,23 @@ the copies drifting.
 Nothing here runs in the background; removing it is deleting things. In order:
 
 1. `node index.js destroy` from inside each scaffolded site you want gone (this cleans the
-   DB, vhost, MCP entries, and folder for that site).
+   DB, vhost, MCP entries, hosts entry, and folder for that site — the hosts entry needs
+   a UAC prompt, and declining it just leaves that one line for you).
 2. Delete this checkout.
 3. Optional leftovers, harmless if kept: `~/.agentpress\` (registry, hosts backups,
    premium plugin zips — note those zips are your licensed property),
    `<laragon>\usr\bin\wp-cli-<version>.phar` + `wp.bat` (shared WP-CLI install — the
    filename is version-scoped, so a bare `wp-cli.phar` there is either a pre-1.2.0
    leftover or your own and is not ours to delete), the `AgentPress` line in
-   `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any `#agentpress` or
-   `#laragon magic!` hosts entries for destroyed sites (Laragon prunes these on reload).
+   `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any leftover hosts
+   entries for destroyed sites: `destroy` removes its own `#agentpress` line (sites
+   destroyed by versions before 1.9.0 may still have one), and Laragon prunes its own
+   `#laragon magic!` lines on reload.
 
 ## Security
 
 This is a local dev tool that does a few things that look alarming in isolation (executes PHP
-via WP-CLI, runs PowerShell, one UAC prompt for the hosts file, installs downloaded plugins).
+via WP-CLI, runs PowerShell, UAC prompts for the hosts file, installs downloaded plugins).
 **[SECURITY.md](SECURITY.md)** explains each one with source references, states what it
 deliberately does *not* do (no telemetry, no outbound data, no remote targets), and lists the
 limitations we would rather disclose than hide. Worth two minutes before you run any tool that

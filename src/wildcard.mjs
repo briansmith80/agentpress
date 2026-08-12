@@ -178,6 +178,70 @@ function hostsHas(content, hostname) {
   return hostsContentEntryAddresses(content, hostname).length > 0;
 }
 
+/** The $hosts assignment shared by both elevated scripts; tests override the path to drive the real script against a temp file, unelevated. */
+function hostsPathExpr(hostsPath) {
+  return hostsPath ? psQuote(hostsPath) : "(Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts')";
+}
+
+/** Runs a script elevated (one UAC prompt) and returns psCapture's result — the child's exit code flows through Start-Process. */
+async function runElevated(script) {
+  const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
+  await writeFile(tmp, script, 'utf8');
+  try {
+    // psQuote, not a bare '${tmp}'. %TEMP% contains the Windows account name, so an
+    // apostrophe in it ("O'Brien") closed the PowerShell string early and broke the
+    // hosts write permanently for that user — reported to them, wrongly, as "the
+    // elevation prompt was declined", which no retry could fix.
+    return await psCapture(
+      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${psQuote(tmp)}; exit $p.ExitCode`,
+    );
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * The elevated append. Exported so tests can run the REAL script against a
+ * temp file — the shipped bytes, not a re-implementation of them.
+ *
+ * The presence re-check inside the elevated script must be TOKEN-EXACT, the
+ * same test hostsHas() does. It used to be `-notmatch [regex]::Escape($name)`,
+ * a substring match: with myblog.test already in hosts, scaffolding "blog"
+ * found "blog.test" inside "myblog.test", skipped the write, and the caller —
+ * which re-reads hosts and correctly finds no entry — then reported "the
+ * elevation prompt was declined", which was false and no retry could fix.
+ */
+export function hostsAppendScript(hostname, { hostsPath = null } = {}) {
+  return [
+    `$hosts = ${hostsPathExpr(hostsPath)}`,
+    `$name = '${hostname}'.ToLower()`,
+    '$present = $false',
+    'foreach ($line in @(Get-Content -Path $hosts -ErrorAction SilentlyContinue)) {',
+    '  $text = $line.Trim()',
+    "  if ($text -eq '' -or $text.StartsWith('#')) { continue }",
+    "  $tokens = @(($text -split '#')[0].ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
+    // Skip token 0: that field is the address, never a hostname.
+    '  if ($tokens.Count -ge 2 -and ($tokens[1..($tokens.Count - 1)] -contains $name)) { $present = $true }',
+    '}',
+    'if (-not $present) {',
+    // The separator is CONDITIONAL on the file's last byte. It used to be a flat
+    // "`r`n" prefix on every append, which put a blank line above every entry the
+    // moment the file already ended with a newline — i.e. always, since Laragon
+    // keeps it that way. The operator read the doubled spacing off their real
+    // hosts file next to Laragon's single-spaced block. Defaulting to the prefix
+    // when the tail can't be read is deliberate: a stray blank line is cosmetic,
+    // an entry glued onto the previous line is broken.
+    '  $prefix = "`r`n"',
+    '  try {',
+    '    $raw = [System.IO.File]::ReadAllText($hosts)',
+    '    if ($raw.Length -eq 0 -or $raw.EndsWith("`n")) { $prefix = \'\' }',
+    '  } catch {}',
+    '  Add-Content -Path $hosts -Value ($prefix + "127.0.0.1`t" + $name + "`t#agentpress") -NoNewline:$false',
+    '}',
+    'exit 0',
+  ].join('\r\n');
+}
+
 /**
  * Appends the hosts entry OURSELVES via one elevated PowerShell run (UAC
  * prompt), instead of waiting minutes on Laragon's elevated helper mid-
@@ -191,57 +255,218 @@ export async function ensureHostsEntry(hostname) {
   if (!/^[a-z0-9.-]+$/i.test(hostname)) return { ok: false, reason: `refusing to write suspicious hostname "${hostname}"` };
 
   await snapshotHosts().catch(() => {});
-  // The presence re-check inside the elevated script must be TOKEN-EXACT, the
-  // same test hostsHas() does. It used to be `-notmatch [regex]::Escape($name)`,
-  // a substring match: with myblog.test already in hosts, scaffolding "blog"
-  // found "blog.test" inside "myblog.test", skipped the write, and the caller —
-  // which re-reads hosts and correctly finds no entry — then reported "the
-  // elevation prompt was declined", which was false and no retry could fix.
-  const script = [
-    "$hosts = Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts'",
-    `$name = '${hostname}'.ToLower()`,
-    '$present = $false',
-    'foreach ($line in @(Get-Content -Path $hosts -ErrorAction SilentlyContinue)) {',
-    '  $text = $line.Trim()',
-    "  if ($text -eq '' -or $text.StartsWith('#')) { continue }",
-    "  $tokens = @(($text -split '#')[0].ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
-    // Skip token 0: that field is the address, never a hostname.
-    '  if ($tokens.Count -ge 2 -and ($tokens[1..($tokens.Count - 1)] -contains $name)) { $present = $true }',
-    '}',
-    'if (-not $present) {',
-    "  Add-Content -Path $hosts -Value (\"`r`n127.0.0.1`t\" + $name + \"`t#agentpress\") -NoNewline:$false",
-    '}',
-    'exit 0',
-  ].join('\r\n');
-  const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
-  await writeFile(tmp, script, 'utf8');
-  try {
-    // psQuote, not a bare '${tmp}'. %TEMP% contains the Windows account name, so an
-    // apostrophe in it ("O'Brien") closed the PowerShell string early and broke the
-    // hosts write permanently for that user — reported to them, wrongly, as "the
-    // elevation prompt was declined", which no retry could fix.
-    const result = await psCapture(
-      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${psQuote(tmp)}; exit $p.ExitCode`,
-    );
-    // The elevated child's exit code flows through, but the hosts file
-    // itself is the ground truth — UAC decline throws inside psCapture's
-    // process and shows up as nonzero/stderr.
-    const after = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
-    if (hostsHas(after, hostname)) {
-      await flushDnsCache();
-      return { ok: true, already: false };
-    }
-    // Only blame the UAC prompt when there is nothing better to say. Defaulting to
-    // it buried the real cause whenever stderr had one, and sent users to retry an
-    // elevation prompt that was never the problem.
-    const stderr = (result.stderr || '').trim().split('\n')[0];
-    return {
-      ok: false,
-      reason: stderr || `the elevation prompt was declined, or the file is read-only / locked by another program (exit ${result.code})`,
-    };
-  } finally {
-    await rm(tmp, { force: true }).catch(() => {});
+  const result = await runElevated(hostsAppendScript(hostname));
+  // The elevated child's exit code flows through, but the hosts file
+  // itself is the ground truth — UAC decline throws inside psCapture's
+  // process and shows up as nonzero/stderr.
+  const after = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
+  if (hostsHas(after, hostname)) {
+    await flushDnsCache();
+    return { ok: true, already: false };
   }
+  // Only blame the UAC prompt when there is nothing better to say. Defaulting to
+  // it buried the real cause whenever stderr had one, and sent users to retry an
+  // elevation prompt that was never the problem.
+  const stderr = (result.stderr || '').trim().split('\n')[0];
+  return {
+    ok: false,
+    reason: stderr || `the elevation prompt was declined, or the file is read-only / locked by another program (exit ${result.code})`,
+  };
+}
+
+/**
+ * The lines removeHostsEntries would delete: address + ONE hostname + a
+ * trailing comment that is exactly `#agentpress`, loopback address only.
+ * "Only ever delete a line this tool wrote" is the load-bearing rule — a
+ * hand-added line, a `#laragon magic!` line, a multi-host line, or an
+ * ad-blocker's 0.0.0.0 entry never matches, whatever hostname it carries.
+ * The PowerShell filter in hostsRemovalScript implements the SAME test and
+ * a parity test pins the two together; see laragon.mjs's
+ * hostsContentEntryAddresses for what happened last time two of these
+ * presence checks drifted.
+ */
+export function agentpressHostsMatches(content, hostnames) {
+  const wanted = new Set(hostnames.map((h) => String(h).toLowerCase()));
+  const matches = [];
+  for (const line of String(content).split(/\r?\n/)) {
+    const text = line.trim();
+    if (!text || text.startsWith('#')) continue;
+    const hashAt = text.indexOf('#');
+    if (hashAt === -1) continue;
+    if (text.slice(hashAt + 1).trim().toLowerCase() !== 'agentpress') continue;
+    const fields = text.slice(0, hashAt).trim().toLowerCase().split(/\s+/);
+    if (fields.length !== 2) continue;
+    if (fields[0] !== '127.0.0.1' && fields[0] !== '::1') continue;
+    if (wanted.has(fields[1])) matches.push(line);
+  }
+  return matches;
+}
+
+/**
+ * The elevated removal script. On 2026-08-12 the first version of this
+ * feature left the machine's hosts file EMPTY — all ~90 entries gone — after
+ * passing every offline check. The mechanism (established afterwards): its
+ * `Get-Content -ErrorAction SilentlyContinue` returns NOTHING when the read
+ * fails, the filter loop over zero lines produced an empty $kept, and
+ * Set-Content wrote that emptiness without complaint. The read had every
+ * chance to fail: destroy had just deleted a www folder, which is exactly
+ * when Laragon — which rewrites the ENTIRE hosts file from a temp copy on
+ * every sync — may be mid-rewrite of the same file. Laragon can do the
+ * rewrite safely because it is one process that never persists a failed
+ * read; v1 was two processes and did.
+ *
+ * Every guard below closes a piece of that hole, in order:
+ *   - reads via .NET ReadAllText, which THROWS on a locked file instead of
+ *     returning empty; retried briefly, then exit 11 with nothing written
+ *   - an empty read is exit 12, never an empty write
+ *   - only lines matching agentpressHostsMatches (our tag, our address,
+ *     one hostname) are dropped, plus one blank line each — the blank the
+ *     old unconditional "`r`n" append prefix left above every entry
+ *   - removing more than $maxRemove lines (caller-computed from a fresh
+ *     count) or leaving the file empty aborts as exit 13
+ *   - the new content goes to a sibling temp file, is read back and
+ *     compared, and only then replaces hosts via rename — the file is never
+ *     open in a truncated state
+ *   - after the swap the file is read AGAIN; only byte-equality is exit 0.
+ *     If it reads back EMPTY it is restored from the caller's verified
+ *     backup (exit 16; restore failure 17). Any other difference means
+ *     someone else wrote concurrently — theirs is fresher, so it is LEFT
+ *     ALONE and reported as exit 18, never "restored" over.
+ */
+export function hostsRemovalScript(hostnames, { hostsPath = null, backupPath = null, maxRemove }) {
+  const names = hostnames.map((h) => String(h).toLowerCase());
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$hosts = ${hostsPathExpr(hostsPath)}`,
+    `$backup = ${backupPath ? psQuote(backupPath) : "''"}`,
+    `$names = @(${names.map((n) => `'${n}'`).join(',')})`,
+    `$maxRemove = ${Number(maxRemove)}`,
+    '$raw = $null',
+    'for ($i = 0; $i -lt 8; $i++) {',
+    '  try { $raw = [System.IO.File]::ReadAllText($hosts); break } catch { Start-Sleep -Milliseconds 250 }',
+    '}',
+    'if ($null -eq $raw) { exit 11 }',
+    'if ($raw.Trim().Length -eq 0) { exit 12 }',
+    '$kept = New-Object System.Collections.Generic.List[string]',
+    '$removed = 0',
+    'foreach ($line in @($raw -split "\\r?\\n")) {',
+    '  $text = $line.Trim()',
+    '  $ours = $false',
+    "  if ($text -ne '' -and -not $text.StartsWith('#') -and $text.Contains('#')) {",
+    "    $parts = $text -split '#', 2",
+    '    $comment = $parts[1].Trim().ToLower()',
+    "    $fields = @($parts[0].Trim().ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
+    "    if ($comment -eq 'agentpress' -and $fields.Count -eq 2 -and ($fields[0] -eq '127.0.0.1' -or $fields[0] -eq '::1') -and ($names -contains $fields[1])) { $ours = $true }",
+    '  }',
+    '  if ($ours) {',
+    '    $removed += 1',
+    "    if ($kept.Count -gt 0 -and $kept[$kept.Count - 1].Trim() -eq '') { $kept.RemoveAt($kept.Count - 1); $removed += 1 }",
+    '    continue',
+    '  }',
+    '  $kept.Add($line)',
+    '}',
+    'if ($removed -eq 0) { exit 10 }',
+    'if ($removed -gt $maxRemove) { exit 13 }',
+    '$newText = $kept -join "`r`n"',
+    'if ($newText.Trim().Length -eq 0) { exit 13 }',
+    '$enc = New-Object System.Text.UTF8Encoding($false)',
+    "$tmp = $hosts + '.agentpress-new'",
+    'try {',
+    '  [System.IO.File]::WriteAllText($tmp, $newText, $enc)',
+    "  if ([System.IO.File]::ReadAllText($tmp) -ne $newText) { throw 'staged copy did not verify' }",
+    '} catch {',
+    '  try { Remove-Item -Path $tmp -Force } catch {}',
+    '  exit 14',
+    '}',
+    'try { Move-Item -Path $tmp -Destination $hosts -Force } catch {',
+    '  try { Remove-Item -Path $tmp -Force } catch {}',
+    '  exit 15',
+    '}',
+    '$final = $null',
+    'try { $final = [System.IO.File]::ReadAllText($hosts) } catch {}',
+    'if ($final -eq $newText) { exit 0 }',
+    'if ($null -eq $final -or $final.Trim().Length -eq 0) {',
+    "  if ($backup -ne '') { try { Copy-Item -Path $backup -Destination $hosts -Force; exit 16 } catch { exit 17 } }",
+    '  exit 17',
+    '}',
+    'exit 18',
+  ].join('\r\n');
+}
+
+/** What each non-zero verdict from the elevated script means for the user. 0 and 10 are the ok paths and handled separately. */
+function removalFailureText(code, backupPath) {
+  const map = {
+    11: 'the hosts file could not be read (locked by another program) — nothing was changed',
+    12: 'the hosts file read back empty — refusing to touch it',
+    13: 'the rewrite would have removed more lines than expected — nothing was changed',
+    14: 'the staged copy did not verify — nothing was changed',
+    15: 'the rewritten file could not be swapped in (hosts locked?) — nothing was changed',
+    16: `the write did not verify, so hosts was RESTORED from ${backupPath} — no entries were removed`,
+    17: `the write did not verify AND the restore failed — check the hosts file NOW; backup: ${backupPath}`,
+    18: 'another program rewrote hosts at the same moment — left as it was; check it by hand',
+  };
+  return map[code] || null;
+}
+
+/**
+ * Removes this tool's own `#agentpress` hosts lines, nothing else. Never
+ * fatal: every failure path leaves the file as it was (or restored) and
+ * returns ok:false with the reason, so callers print the line for the user
+ * instead. A `#laragon magic!` line for the same hostname is deliberately
+ * out of scope — Laragon prunes its own entries when their folder is gone,
+ * and touching them means racing their owner; `remaining` reports them.
+ */
+export async function removeHostsEntries(hostnames) {
+  const names = hostnames.map((h) => String(h).toLowerCase());
+  for (const name of names) {
+    if (!/^[a-z0-9.-]+$/.test(name)) return { ok: false, removed: 0, remaining: [], reason: `refusing suspicious hostname "${name}"`, backupPath: null };
+  }
+  let current;
+  try {
+    current = await readFile(HOSTS_PATH, 'utf8');
+  } catch (err) {
+    return { ok: false, removed: 0, remaining: [], reason: `could not read the hosts file (${err.code || err.message})`, backupPath: null };
+  }
+  const remainingIn = (content) => names.filter((n) => hostsContentEntryAddresses(content, n).length > 0);
+  const matches = agentpressHostsMatches(current, names);
+  if (matches.length === 0) {
+    return { ok: true, removed: 0, remaining: remainingIn(current), reason: null, backupPath: null };
+  }
+
+  // The backup is taken BEFORE elevation and verified byte-identical — the
+  // incident's recovery came from exactly such a snapshot, minutes old. An
+  // unverifiable backup aborts the whole operation.
+  let backupPath;
+  try {
+    backupPath = await snapshotHosts();
+    if ((await readFile(backupPath, 'utf8')) !== current) throw new Error('backup did not read back identical');
+  } catch (err) {
+    return { ok: false, removed: 0, remaining: remainingIn(current), reason: `could not take a verified hosts backup first (${err.message}) — not touching the file`, backupPath: null };
+  }
+
+  // maxRemove: each matched entry plus at most one blank line above it. A
+  // concurrent change that makes the filter want more than this fresh count
+  // allows aborts inside the script.
+  const script = hostsRemovalScript(names, { backupPath, maxRemove: matches.length * 2 });
+  const result = await runElevated(script);
+  const after = await readFile(HOSTS_PATH, 'utf8').catch(() => null);
+
+  if (result.code === 0 || result.code === 10) {
+    // Ground truth over exit code, same policy as ensureHostsEntry.
+    if (after !== null && agentpressHostsMatches(after, names).length === 0) {
+      await flushDnsCache();
+      return { ok: true, removed: result.code === 0 ? matches.length : 0, remaining: remainingIn(after), reason: null, backupPath };
+    }
+    return { ok: false, removed: 0, remaining: after === null ? names : remainingIn(after), reason: 'the elevated run reported success but the tagged lines are still present — leaving everything alone', backupPath };
+  }
+  const stderr = (result.stderr || '').trim().split('\n')[0];
+  return {
+    ok: false,
+    removed: 0,
+    remaining: after === null ? names : remainingIn(after),
+    reason: removalFailureText(result.code, backupPath) || stderr || `the elevation prompt was declined, or the elevated run failed (exit ${result.code})`,
+    backupPath,
+  };
 }
 
 /**
