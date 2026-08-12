@@ -1959,7 +1959,7 @@ function printAvailabilityTable(availability) {
   // user may simply not own, and this table is the FIRST output of the second command
   // a stranger runs — four red ✖ marks read as four failures on a healthy machine,
   // which is precisely the crying-wolf that teaches people to ignore the glyph column.
-  console.log('\nPremium plugins (optional — your own licensed zips):');
+  console.log(`\n${bold('Premium plugins')} ${dim('(optional — your own licensed zips)')}`);
   for (const p of availability) {
     console.log(`  ${p.available ? green(OK) : dim('·')} ${p.label.padEnd(52)} ${p.available ? basename(p.zip) : dim('no zip yet')}`);
   }
@@ -1983,9 +1983,9 @@ async function setupPreferences() {
     const missing = availability.filter((p) => !p.available);
     if (missing.length) {
       const dir = join(AGENTPRESS_HOME, 'premium-plugins');
-      console.log(`\n  To make a plugin available, drop your licensed zip into:\n    ${dir}`);
-      console.log(`  Expected filenames: ${missing.map((p) => `${p.slug}[-*].zip`).join(', ')}`);
-      console.log('  (Or keep them in your own private GitHub releases repo — premiumPluginsRepo in config.json, see the README.)');
+      console.log(`\n  To make a plugin available, drop your licensed zip into:\n    ${pink(dir)}`);
+      console.log(`  ${dim(`Expected filenames: ${missing.map((p) => `${p.slug}[-*].zip`).join(', ')}`)}`);
+      console.log(`  ${dim('(Or keep them in your own private GitHub releases repo — premiumPluginsRepo in config.json, see the README.)')}`);
       const open = (await rl.question('  Open that folder in Explorer now so you can drop zips in? [y/N]: ')).trim();
       if (/^y(es)?$/i.test(open)) {
         const { spawn } = await import('node:child_process');
@@ -2055,10 +2055,12 @@ async function setupCommand() {
   // Say what this command is about to do. `setup` prints nothing before its first
   // prompt, and its first output is a table of red ✖ marks for commercial plugins
   // the user has not bought — on the second command a stranger ever runs.
+  // Same visual language as printUsage: bold headers, pink for the things the
+  // user types or acts on, dim for meta — the status glyphs keep their meaning.
   console.log(
-    `${cyan(STEP)} Two things, and only the first is required:\n` +
-      '  1. a single wildcard vhost, so scaffolding a site never needs a Laragon reload.\n' +
-      '  2. optionally, registering your own licensed premium plugin zips (Oxygen and\n' +
+    `${bold('Setup')} does two things, and only the first is required:\n` +
+      `  ${pink('1')}  a single wildcard vhost, so scaffolding a site never needs a Laragon reload\n` +
+      `  ${pink('2')}  optionally, registering your own licensed premium plugin zips (Oxygen and\n` +
       '     friends). Skip it and everything still works — sites just get no premium\n' +
       '     plugins unless you add zips later.\n',
   );
@@ -2083,8 +2085,8 @@ async function setupCommand() {
 
   if (!state.apacheUp) {
     console.log(
-      `${cyan(STEP)} Apache is not running — click Start All in Laragon, then run setup again to verify.\n` +
-        `\n  All commands: ${CLI} help`,
+      `${cyan(STEP)} Apache is not running — click ${bold('Start All')} in Laragon, then run ${pink(`${CLI} setup`)} again to verify.\n` +
+        `\n  ${dim('All commands:')} ${pink(`${CLI} help`)}`,
     );
     return;
   }
@@ -2100,25 +2102,25 @@ async function setupCommand() {
           : '') +
         '\n  Setup is done — you never need to run it again on this machine (unless you\n' +
         '  want to add plugin zips or change the license key).\n' +
-        `\n  Next: create your first site with  ${CLI} my-site\n` +
-        `  All commands: ${CLI} help`,
+        `\n  ${dim('Next: create your first site with')}  ${pink(`${CLI} my-site`)}\n` +
+        `  ${dim('All commands:')} ${pink(`${CLI} help`)}`,
     );
     return;
   }
   if (httpLive && !httpsLive) {
     console.log(
       `\n${cyan(STEP)} http is live, but the https half of the wildcard needs the running Apache to\n` +
-        '  reload the updated conf. ONE-TIME step: in Laragon, do a full Stop All →\n' +
-        `  Start All, then run \`${CLI} setup\` again to confirm.\n` +
-        `\n  All commands: ${CLI} help`,
+        `  reload the updated conf. ONE-TIME step: in Laragon, do a full ${bold('Stop All → Start All')},\n` +
+        `  then run ${pink(`${CLI} setup`)} again to confirm.\n` +
+        `\n  ${dim('All commands:')} ${pink(`${CLI} help`)}`,
     );
     return;
   }
   console.log(
     `\n${cyan(STEP)} Not active yet — the running Apache predates the conf. ONE-TIME step:\n` +
-      '  in Laragon, do a full Stop All → Start All (not just Reload), then run\n' +
-      `  \`${CLI} setup\` again to confirm. After that, no scaffold ever needs a reload.\n` +
-      `\n  All commands: ${CLI} help`,
+      `  in Laragon, do a full ${bold('Stop All → Start All')} (not just Reload), then run\n` +
+      `  ${pink(`${CLI} setup`)} again to confirm. After that, no scaffold ever needs a reload.\n` +
+      `\n  ${dim('All commands:')} ${pink(`${CLI} help`)}`,
   );
 }
 
