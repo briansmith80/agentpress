@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { banner, cyan, dim, green, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
+import { banner, bold, cyan, dim, green, pink, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
 import { runDoctor } from './doctor.mjs';
 import { AGENTPRESS_HOME, HOSTS_PATH, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
@@ -2138,42 +2138,65 @@ async function registerQuickAppCommand() {
 }
 
 function printUsage() {
-  console.log(`
-create-agentpress v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon
-
-First time here? Three commands, in this order:
-  1. doctor     confirm this machine is ready (changes nothing)
-  2. setup      once per machine — see the note below
-  3. <name>     scaffold your first site
-
-  ${CLI} doctor              Check this machine's Laragon/PHP/MySQL/Node state
-  ${CLI} setup               Once per machine (see below)
-  ${CLI} <name>              Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)
-  ${CLI} resume <name>       Finish an interrupted scaffold
-  ${CLI} list                List scaffolded sites
-  ${CLI} register-quick-app  Add a Laragon Quick app entry for this tool
-
-From inside a scaffolded site's directory:
-
-  ${CLI} update      Refresh AgentPress's own tooling files
-  ${CLI} update --all Same, for every site in \`list\` (run from anywhere)
-  ${CLI} rewire      Point the AI agents' MCP connection back at THIS site
-  ${CLI} destroy     Permanently remove that site
-  npm run agentpress            The site's own menu: admin login link, status, logs
-  /verify        (in an agent)  Exercise both MCP servers and Oxygen end to end
-
-\`setup\` does two things. It installs one wildcard vhost, so scaffolding a site never
-needs a Laragon reload; and it optionally registers your own licensed premium plugin
-zips (Oxygen and friends). The premium half is skippable — everything works without it.
-
-Flags: --yes/-y  --help/-h  --version/-v  --plugins=slug1,slug2 (wordpress.org)  --premium=all|none|slug1,slug2
-       Values attach with =, not a space: --premium=none, never --premium none.
-       --adopt       resume: proceed on a folder with no AgentPress marker (it will be overwritten)
-       --force-name  scaffold a site whose name looks like a mistyped command
-Env:   AGENTPRESS_LARAGON_ROOT  AGENTPRESS_MYSQL_ROOT_PASSWORD  AGENTPRESS_MYSQL_PORT  AGENTPRESS_PREMIUM_PLUGINS_REPO
-       AGENTPRESS_OXYGEN_LICENSE (Oxygen key; \`setup\` can store it for you instead)
-       AGENTPRESS_NO_BANNER (hide the wordmark)  NO_COLOR / FORCE_COLOR (colour off / on)
-`);
+  // The pink wordmark is already above this — create() prints it for every
+  // command — so help only styles its body. Pad the RAW cell, then colour:
+  // ANSI escapes count toward String.length, so colouring first silently
+  // eats columns (the rule doctor's layout lives by). Everything degrades to
+  // exactly the old plain text under NO_COLOR / a pipe, where pink() and
+  // bold() are identity functions.
+  const row = (cell, desc, width) => `  ${pink(cell.padEnd(width))}  ${desc}`;
+  const cmd = (c, d) => row(c, d, 22);
+  const env = (n, d) => row(n, d, 31);
+  console.log(
+    [
+      '',
+      `${bold('create-agentpress')} v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon`,
+      '',
+      `${bold('Usage')}  ${CLI} ${pink('<command>')} ${dim('[flags]')}`,
+      '',
+      `${bold('First time here?')} Three commands, in this order: ${pink('doctor')} ${dim(STEP)} ${pink('setup')} ${dim(STEP)} ${pink('<name>')}`,
+      '',
+      bold('Commands'),
+      cmd('doctor', "Check this machine's Laragon/PHP/MySQL/Node state (changes nothing)"),
+      cmd('setup', 'Once per machine — see the note below'),
+      cmd('<name>', 'Scaffold a WordPress site at http://<name>.test (or your Laragon suffix)'),
+      cmd('resume <name>', 'Finish an interrupted scaffold'),
+      cmd('list', 'List scaffolded sites'),
+      cmd('register-quick-app', 'Add a Laragon Quick app entry for this tool'),
+      '',
+      bold('Inside a scaffolded site'),
+      cmd('update', "Refresh AgentPress's own tooling files"),
+      cmd('update --all', 'The same, for every site in `list` (run from anywhere)'),
+      cmd('rewire', "Point the AI agents' MCP connection back at THIS site"),
+      cmd('destroy', 'Permanently remove that site'),
+      cmd('npm run agentpress', 'The site menu: admin login, DB snapshots, recent errors'),
+      cmd('/verify', 'In an agent: exercise both MCP servers and Oxygen end to end'),
+      '',
+      `${pink('setup')} does two things. It installs one wildcard vhost, so scaffolding a site never`,
+      'needs a Laragon reload; and it optionally registers your own licensed premium plugin',
+      'zips (Oxygen and friends). The premium half is skippable — everything works without it.',
+      '',
+      bold('Flags'),
+      cmd('--yes, -y', 'Skip confirmation prompts'),
+      cmd('--plugins=a,b', 'Extra wordpress.org plugins for this site'),
+      cmd('--premium=all|none|a,b', 'Which premium plugins this site gets'),
+      cmd('--adopt', 'resume: proceed on a folder with no AgentPress marker (it will be overwritten)'),
+      cmd('--force-name', 'Scaffold a site whose name looks like a mistyped command'),
+      cmd('--help, -h', 'This screen'),
+      cmd('--version, -v', 'Print the version'),
+      `  ${dim('Values attach with =, not a space: --premium=none, never --premium none.')}`,
+      '',
+      bold('Environment'),
+      env('AGENTPRESS_LARAGON_ROOT', "Laragon folder, when it can't be auto-detected"),
+      env('AGENTPRESS_MYSQL_ROOT_PASSWORD', 'MySQL root password, when root has one'),
+      env('AGENTPRESS_MYSQL_PORT', 'MySQL port, when not 3306'),
+      env('AGENTPRESS_PREMIUM_PLUGINS_REPO', 'Where your licensed premium plugin zips live'),
+      env('AGENTPRESS_OXYGEN_LICENSE', 'Oxygen key (`setup` can store it for you instead)'),
+      env('AGENTPRESS_NO_BANNER', 'Hide the wordmark'),
+      env('NO_COLOR / FORCE_COLOR', 'Colour off / on'),
+      '',
+    ].join('\n'),
+  );
 }
 
 const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all']);
