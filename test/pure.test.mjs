@@ -141,6 +141,32 @@ test('formatEnvironmentsTable survives an entry with missing fields (it used to 
   assert.doesNotMatch(out, /undefined/);
 });
 
+test('the hand-recovery SQL names the same grant host the code actually drops', async () => {
+  // provisionDatabase creates the user as @'127.0.0.1' and dropDatabase drops that
+  // exact grant. The halt message once told users to type @'localhost', which under
+  // DROP USER IF EXISTS is a silent no-op: it reports success and leaves the MySQL
+  // user behind. Pinned here because the two live in different files.
+  const read = async (rel) => (await import('node:fs/promises')).readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const mysql = await read('src/mysql.mjs');
+  const engine = await read('src/engine.js');
+
+  const host = mysql.match(/CREATE USER IF NOT EXISTS '\$\{dbUser\}'@'([\d.]+)'/)?.[1];
+  assert.equal(host, '127.0.0.1', 'the grant host in mysql.mjs changed — update the recovery text too');
+  assert.match(engine, /DROP USER IF EXISTS '\$\{result\.recovery\.dbUser\}'@'127\.0\.0\.1'/);
+  assert.doesNotMatch(engine, /DROP USER IF EXISTS[^\n]*@'localhost'/, 'localhost would silently drop nothing');
+});
+
+test('the locked-folder advice never tells the user to pass a site name to destroy', async () => {
+  // destroy takes no site name and refuses one (v1.8.0). An earlier draft of this
+  // very message said "cd out, then destroy <name>", i.e. advice the tool rejects.
+  const read = async (rel) => (await import('node:fs/promises')).readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const engine = await read('src/engine.js');
+  const block = engine.match(/That folder is in use[\s\S]{0,1200}?\n {10}: `/)?.[0] || '';
+  assert.ok(block, 'the locked-folder branch must be findable');
+  assert.doesNotMatch(block, /destroy \$\{basename/, 'never suggest destroy <name>');
+  assert.match(block, /Remove-Item -Recurse -Force/, 'give the manual removal instead');
+});
+
 test('formatEnvironmentsTable answers "which sites are behind, and which one are my agents on?"', () => {
   // Both questions previously had no answer short of opening sandbox.config.json
   // per site and ~/.claude.json by hand.

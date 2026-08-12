@@ -1728,10 +1728,34 @@ async function destroyCommand({ yes }) {
   try {
     result = await destroySite({ projectDir: cwd, onStep: (msg) => console.log(`  … ${msg}`) });
   } catch (err) {
+    // EBUSY/EPERM on the project directory has one overwhelmingly common cause, and
+    // the generic message did not name it: Windows holds a handle on every process's
+    // current directory, so a shell sitting IN the folder blocks the rmdir. This code
+    // already chdir's ITSELF out (see destroy.mjs) but it cannot move the parent
+    // shell, which is exactly where a user runs this from — `cd` into the site, then
+    // destroy it. Reported from the field on a real teardown that got as far as
+    // dropping the database and removing the vhost before failing here.
+    const locked = /EBUSY|EPERM|ENOTEMPTY/.test(err.code || '') || /EBUSY|EPERM|ENOTEMPTY/.test(err.message || '');
     bail(
       `${red(BAD)} Teardown stopped part-way: ${err.message}\n` +
-        '  Anything reported above as done IS done. The site folder may still be present.\n' +
-        `  Re-running \`${CLI} destroy\` here is safe — every step re-checks before acting.`,
+        '  Anything reported above as done IS done — only the steps after it were skipped.\n' +
+        (locked
+          ? '  That folder is in use, and the usual cause is a shell or editor sitting inside\n' +
+            '  it. Windows holds a handle on every process\'s current directory; this command\n' +
+            '  steps ITSELF out before deleting, but it cannot move the shell that launched it.\n' +
+            '\n' +
+            '  The folder is now all that is left, so finish it from a shell somewhere else\n' +
+            '  (close any editor open on it first):\n' +
+            `    Remove-Item -Recurse -Force ${cwd}\n` +
+            `  \`${CLI} list\` prunes the entry once the folder is gone.\n` +
+            '\n' +
+            // Deliberately NOT "re-run destroy from outside": destroy takes no site name,
+            // and v1.8.0 made it refuse one precisely because it used to ignore the name
+            // and delete the folder you were standing in.
+            '  Re-running destroy from inside the site is safe, but it will hit the same lock\n' +
+            '  for as long as this shell is in the folder.\n'
+          : `  Re-running \`${CLI} destroy\` here is safe — every step re-checks before acting,\n` +
+            '  and the database drop is idempotent.'),
     );
     return;
   }
@@ -1748,10 +1772,15 @@ async function destroyCommand({ yes }) {
         '  The site folder, its vhost and its .env are all still here, and .env is the only\n' +
         `  record of the database name and user — so nothing was stranded.\n` +
         `  Fix the cause (usually: start MySQL) and re-run \`${CLI} destroy\`.\n` +
+        // @'127.0.0.1', NOT @'localhost'. provisionDatabase creates the user as
+        // 127.0.0.1 and dropDatabase drops that exact grant, so a hand-typed
+        // localhost variant is a silent no-op under IF EXISTS — it would report
+        // success and leave the MySQL user behind. Keep these two in step with
+        // src/mysql.mjs; a test pins them.
         (result.recovery?.dbName
           ? '\n  Or drop it by hand and re-run:\n' +
             `    DROP DATABASE IF EXISTS \`${result.recovery.dbName}\`;\n` +
-            `    DROP USER IF EXISTS '${result.recovery.dbUser}'@'localhost';\n`
+            `    DROP USER IF EXISTS '${result.recovery.dbUser}'@'127.0.0.1';\n`
           : ''),
     );
     return;
