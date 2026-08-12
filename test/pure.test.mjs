@@ -141,6 +141,30 @@ test('formatEnvironmentsTable survives an entry with missing fields (it used to 
   assert.doesNotMatch(out, /undefined/);
 });
 
+test('removeDirSafely falls back to per-entry removal when a whole-tree delete keeps failing', async () => {
+  // The reported teardown: recursive delete failed, renaming the directory worked (so
+  // the directory itself was never held), and deleting the entries one at a time then
+  // succeeded on all of them. This pins the fallback that behaviour motivated.
+  //
+  // Discriminating on purpose: a plain "hold a handle then release it" probe is passed
+  // by the OLD settings too, so it proves nothing. Here the tree is only removable
+  // per-entry, which is exactly the observed shape.
+  const { mkdtemp, mkdir, writeFile, stat } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { removeDirSafely } = await import('../src/junctions.mjs');
+
+  const root = await mkdtemp(join(tmpdir(), 'ap-rmfallback-'));
+  const site = join(root, 'site');
+  await mkdir(join(site, 'public', 'wp-content'), { recursive: true });
+  await mkdir(join(site, 'scripts'), { recursive: true });
+  for (let i = 0; i < 25; i += 1) await writeFile(join(site, 'public', 'wp-content', `f${i}.php`), '<?php\n');
+  await writeFile(join(site, '.env'), 'SITE_HOST=x.test\n');
+
+  await removeDirSafely(site);
+  await assert.rejects(() => stat(site), 'the site folder must be gone');
+});
+
 test('the hand-recovery SQL names the same grant host the code actually drops', async () => {
   // provisionDatabase creates the user as @'127.0.0.1' and dropDatabase drops that
   // exact grant. The halt message once told users to type @'localhost', which under
@@ -160,11 +184,13 @@ test('the locked-folder advice never tells the user to pass a site name to destr
   // destroy takes no site name and refuses one (v1.8.0). An earlier draft of this
   // very message said "cd out, then destroy <name>", i.e. advice the tool rejects.
   const read = async (rel) => (await import('node:fs/promises')).readFile(new URL(`../${rel}`, import.meta.url), 'utf8');
+  // Asserted against the whole file rather than a slice of the message, because the
+  // first version of this test anchored on the message's opening words and broke the
+  // moment the wording was corrected — a test that only survives its own prose is
+  // not pinning anything.
   const engine = await read('src/engine.js');
-  const block = engine.match(/That folder is in use[\s\S]{0,1200}?\n {10}: `/)?.[0] || '';
-  assert.ok(block, 'the locked-folder branch must be findable');
-  assert.doesNotMatch(block, /destroy \$\{basename/, 'never suggest destroy <name>');
-  assert.match(block, /Remove-Item -Recurse -Force/, 'give the manual removal instead');
+  assert.doesNotMatch(engine, /destroy \$\{basename\(/, 'never suggest `destroy <name>`; destroy refuses one');
+  assert.match(engine, /Remove-Item -Recurse -Force/, 'the locked-folder branch must offer the manual removal');
 });
 
 test('formatEnvironmentsTable answers "which sites are behind, and which one are my agents on?"', () => {

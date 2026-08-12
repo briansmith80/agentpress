@@ -1739,21 +1739,25 @@ async function destroyCommand({ yes }) {
     bail(
       `${red(BAD)} Teardown stopped part-way: ${err.message}\n` +
         '  Anything reported above as done IS done — only the steps after it were skipped.\n' +
+        // Ordered by what actually happened in the field, not by what sounds likely.
+        // The reported case was an EDITOR INDEXING the tree (VS Code plus two PHP
+        // language servers over ~2000 WordPress files), which is a race: the folder
+        // itself was never held — renaming it worked — and deleting the entries one at a
+        // time then succeeded on every one. An earlier version of this message blamed
+        // the shell's current directory and said to remove the folder from elsewhere;
+        // that is a real cause too, but it was NOT this one, and asserting it sent the
+        // user to a command that also failed.
         (locked
-          ? '  That folder is in use, and the usual cause is a shell or editor sitting inside\n' +
-            '  it. Windows holds a handle on every process\'s current directory; this command\n' +
-            '  steps ITSELF out before deleting, but it cannot move the shell that launched it.\n' +
+          ? '  Something is holding a file inside it. Usually an editor or language server\n' +
+            '  indexing the WordPress tree, or a virus scanner mid-pass — a race, not a\n' +
+            '  permanent lock, which is why the retries above may simply need another go.\n' +
             '\n' +
-            '  The folder is now all that is left, so finish it from a shell somewhere else\n' +
-            '  (close any editor open on it first):\n' +
+            `  The folder is all that is left. Try again first:   ${CLI} destroy\n` +
+            '  If it still refuses, close any editor open on the folder, then remove it\n' +
+            '  from a shell that is NOT inside it:\n' +
             `    Remove-Item -Recurse -Force ${cwd}\n` +
-            `  \`${CLI} list\` prunes the entry once the folder is gone.\n` +
-            '\n' +
-            // Deliberately NOT "re-run destroy from outside": destroy takes no site name,
-            // and v1.8.0 made it refuse one precisely because it used to ignore the name
-            // and delete the folder you were standing in.
-            '  Re-running destroy from inside the site is safe, but it will hit the same lock\n' +
-            '  for as long as this shell is in the folder.\n'
+            '  Deleting the entries one at a time works when a whole-tree delete will not.\n' +
+            `  \`${CLI} list\` prunes the entry once the folder is gone.\n`
           : `  Re-running \`${CLI} destroy\` here is safe — every step re-checks before acting,\n` +
             '  and the database drop is idempotent.'),
     );

@@ -46,13 +46,47 @@ async function unlinkJunctionsRecursively(dir) {
  * junction/symlink anywhere in the tree FIRST, in its own pass, so the
  * final recursive removal has nothing left to (possibly) follow.
  */
+/**
+ * Two escalating attempts. The second one is the part with evidence behind it; be
+ * careful not to over-claim the first.
+ *
+ * WHAT WAS OBSERVED on a real teardown (a site folder is a WordPress install, ~2000
+ * files, with VS Code and two PHP language servers indexing it): the recursive
+ * delete failed with EBUSY, a RENAME of the same directory succeeded — so the
+ * directory itself was never held, a child file was — and then deleting the
+ * top-level entries ONE AT A TIME succeeded on every single one. That is why the
+ * piecemeal fallback exists: it is the thing that demonstrably worked.
+ *
+ * WHAT IS NOT ESTABLISHED: that the previous 5 x 100ms budget was too short. A probe
+ * holding a real exclusive handle for 900ms was survived by BOTH the old and the new
+ * settings, because Node scales retryDelay per attempt (5 x 100ms is ~1.5s
+ * cumulative, not 500ms). The larger budget is cheap insurance for a longer race,
+ * not a diagnosed fix — do not cite it as one.
+ *
+ * Only a genuinely held handle survives both passes, and that is the case the caller
+ * reports to the user.
+ */
 export async function removeDirSafely(dir) {
   await unlinkJunctionsRecursively(dir);
-  // Same retry options fsutil's rmWithRetry already uses. Without them a single
-  // EBUSY/EPERM — an editor holding a file open, a virus scanner mid-pass, both
-  // routine on Windows — aborted the teardown with a bare errno at the very last
-  // step, after the database and vhost were already gone.
-  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  try {
+    await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    return;
+  } catch (err) {
+    if (!/EBUSY|EPERM|ENOTEMPTY/.test(err.code || '')) throw err;
+  }
+  // Piecemeal pass. Collect failures rather than stopping at the first, so one stuck
+  // file cannot hide the rest, then let the final rm report what is genuinely left.
+  let entries = [];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    // vanished between attempts, which is a success
+    return;
+  }
+  for (const name of entries) {
+    await rm(join(dir, name), { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }).catch(() => {});
+  }
+  await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }
 
 export async function listJunctions(dir) {
