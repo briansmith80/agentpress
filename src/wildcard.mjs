@@ -179,6 +179,95 @@ function hostsHas(content, hostname) {
 }
 
 /**
+ * Removes this site's hosts line, the mirror of ensureHostsEntry and by the same
+ * elevated route. `destroy` used to state that it never touches hosts and print the
+ * line for you to delete by hand, which was doubly wrong: this tool DOES write hosts
+ * (below), and leaving the line behind means a destroyed hostname keeps resolving to
+ * 127.0.0.1 until Laragon happens to prune it.
+ *
+ * The match is deliberately narrow. A line is removed only when its non-comment
+ * tokens are exactly [address, this-hostname] — so a line naming several hosts, or
+ * naming a different host, cannot be touched no matter what tag it carries. Same
+ * reasoning as revokeAppPasswords never using `--all`: on a long-lived machine this
+ * file holds entries the user wrote by hand and they are not ours to tidy.
+ *
+ * Never fatal. A declined UAC prompt returns ok:false and the caller prints the line,
+ * which is exactly the old behaviour.
+ */
+export async function removeHostsEntry(hostname) {
+  if (!/^[a-z0-9.-]+$/i.test(hostname)) return { ok: false, reason: `refusing to act on suspicious hostname "${hostname}"` };
+  const current = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
+  if (!hostsHas(current, hostname)) return { ok: true, already: true };
+
+  await snapshotHosts().catch(() => {});
+  return runElevatedHostsScript(hostsRemovalScript(hostname), hostname);
+}
+
+/**
+ * The elevated removal script, as a pure function of the hostname, so the SHIPPED text
+ * can be exercised against a temp file rather than a copy of it being tested.
+ * `hostsExpr` is the PowerShell expression for the file to edit; a test passes
+ * `$args[0]`.
+ *
+ * Token-exact and count-exact, mirroring hostsHas. A substring test here would be the
+ * same bug ensureHostsEntry's comment records: "blog" matching "myblog.test".
+ *
+ * Verified against a fake hosts file covering every shape that matters: it removes
+ * `127.0.0.1 host #agentpress`, `127.0.0.1 host #laragon magic!`, `::1 host` and
+ * `127.0.0.1 HOST`, while keeping comments, blank lines, a different host, a SHARED
+ * line naming two hosts, a commented-out mention, and both substring traps
+ * (`nothost.test`, `host.test.uk`).
+ */
+export function hostsRemovalScript(hostname, hostsExpr = "Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts'") {
+  return [
+    `$hosts = ${hostsExpr}`,
+    `$name = '${hostname}'.ToLower()`,
+    // -ErrorAction Stop, NEVER SilentlyContinue. This script REWRITES the file from
+    // what it read, so a silently-swallowed read failure (the file locked by another
+    // process) would leave $kept empty and Set-Content would blank the machine's hosts
+    // file. Fail loudly and touch nothing instead.
+    '$all = @(Get-Content -Path $hosts -ErrorAction Stop)',
+    'if ($all.Count -eq 0) { exit 3 }',
+    '$kept = New-Object System.Collections.Generic.List[string]',
+    'foreach ($line in $all) {',
+    '  $text = $line.Trim()',
+    "  if ($text -eq '' -or $text.StartsWith('#')) { $kept.Add($line); continue }",
+    "  $tokens = @(($text -split '#')[0].ToLower() -split '\\s+' | Where-Object { $_ -ne '' })",
+    // Exactly two tokens, the second being ours: an address and this hostname alone.
+    '  if ($tokens.Count -eq 2 -and $tokens[1] -eq $name) { continue }',
+    '  $kept.Add($line)',
+    '}',
+    // Nothing matched: do not rewrite a system file for no reason.
+    'if ($kept.Count -eq $all.Count) { exit 0 }',
+    // Belt and braces against ever truncating it to nothing.
+    'if ($kept.Count -eq 0) { exit 4 }',
+    'Set-Content -Path $hosts -Value $kept -Encoding ASCII',
+    'exit 0',
+  ].join('\r\n');
+}
+
+async function runElevatedHostsScript(script, hostname) {
+  const tmp = join(tmpdir(), `agentpress-hosts-rm-${randomBytes(6).toString('hex')}.ps1`);
+  await writeFile(tmp, script, 'utf8');
+  try {
+    const result = await psCapture(
+      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${psQuote(tmp)}; exit $p.ExitCode`,
+    );
+    // The file is the ground truth, not the child's exit code — same stance as the
+    // write path, because a declined prompt surfaces inconsistently.
+    const after = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
+    if (!hostsHas(after, hostname)) {
+      await flushDnsCache();
+      return { ok: true, already: false };
+    }
+    const stderr = (result.stderr || '').trim().split('\n')[0];
+    return { ok: false, reason: stderr || `the elevation prompt was declined, or the file is read-only / locked (exit ${result.code})` };
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
+}
+
+/**
  * Appends the hosts entry OURSELVES via one elevated PowerShell run (UAC
  * prompt), instead of waiting minutes on Laragon's elevated helper mid-
  * reload. Never fatal: a declined prompt returns ok:false and the caller

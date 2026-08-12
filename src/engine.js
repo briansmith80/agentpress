@@ -5,7 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { banner, cyan, dim, green, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
 import { runDoctor } from './doctor.mjs';
-import { AGENTPRESS_HOME, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
+import { AGENTPRESS_HOME, HOSTS_PATH, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
 import {
   findVhostForProject,
@@ -693,6 +693,21 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       }
       const scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
       console.log(`${green(OK)} ${scheme}://${hostname} is live (served by the wildcard vhost)`);
+      // Say how to GET https when the machine plainly could serve it. A certificate on
+      // disk with :443 not answering for this site means the running Apache predates the
+      // wildcard conf's https half — the one-time Stop All → Start All that `setup`
+      // already explains for itself, and that a scaffold said nothing about. Reported by
+      // a user who had to work it out after a scaffold reported http.
+      //
+      // Only when the cert EXISTS: with no cert, http is the only option and there is
+      // nothing to act on, so mentioning it would be noise.
+      if (scheme === 'http' && sslCertPresent()) {
+        scaffoldWarnings.push(
+          'https is available on this machine but not being served yet — in Laragon do a\n' +
+            '    one-time Stop All then Start All (not just Reload), approving any Windows\n' +
+            `    permission prompt. Then this site answers on https://${hostname}.`,
+        );
+      }
       await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme, warnings: scaffoldWarnings });
       return;
     }
@@ -1701,9 +1716,12 @@ async function destroyCommand({ yes }) {
       '  - the WordPress application password this tool minted\n' +
       '  - MCP registrations for any agents this site configured\n' +
       '  - the vhost conf and this project directory\n' +
-      "This does NOT remove the site's hosts entry (this tool never writes hosts directly) —\n" +
-      "the line will be printed at the end so you can remove it by hand, or leave it; Laragon's\n" +
-      'own reload prunes entries for folders that no longer exist.\n' +
+      // Corrected: the old text said "this tool never writes hosts directly", which was
+      // false — ensureHostsEntry writes it through an elevated PowerShell run — and it
+      // then left a destroyed hostname resolving to 127.0.0.1 until Laragon happened to
+      // prune it. Reported by a user who asked whether the line could just be removed.
+      "  - the site's hosts entry (a Windows permission prompt may appear; declining just\n" +
+      '    leaves the line, and it will be printed so you can remove it by hand)\n' +
       'This cannot be undone.',
   );
   if (!yes) {
@@ -1818,7 +1836,13 @@ async function destroyCommand({ yes }) {
         ? `\n${dim('·')} ${dim('The application password could not be confirmed revoked, but the database it')}\n` +
           `  ${dim('lived in has been dropped, so it no longer exists. Nothing to do.')}\n`
         : '') +
-      (result.hostname ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` : ''),
+      // Three outcomes, not one. Reporting a "remaining trace" that has in fact been
+      // removed would be the same class of untruth as the claim it replaced.
+      (result.hostname && result.hostsRemoved === false
+        ? `\nRemaining trace: the hosts entry for ${result.hostname} could not be removed — delete this\n` +
+          `  line from ${HOSTS_PATH} when convenient:\n    127.0.0.1\t${result.hostname}\n`
+        : '') +
+      (result.hostname && result.hostsRemoved === true ? `  Hosts entry for ${result.hostname} removed.\n` : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
   // Same condition as the warning above: an unrevoked password whose database has

@@ -1,6 +1,6 @@
 {
   "name": "create-agentpress",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "type": "module",
   "description": "AgentPress: scaffold AI-agent-ready WordPress sites on Laragon (Windows) — instant vhosts, https, premium plugin licensing, MCP wiring.",
   "bin": {
