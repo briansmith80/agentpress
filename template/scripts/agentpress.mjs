@@ -289,10 +289,14 @@ async function choose(message, options) {
     let renderedLines = 0;
     const render = (final) => {
       if (renderedLines > 0) process.stdout.write(`\x1b[${renderedLines}A\x1b[J`);
-      const rows = [`${pink('?')} ${message}`];
-      if (final) {
-        rows.push(`${dim('>')} ${options[cursor].label}`);
-      } else {
+      // The confirmed choice collapses to ONE line, question and answer
+      // together. It used to collapse to two, and because the menu loops,
+      // every action deposited an identical two-line block with nothing
+      // between them — four "What would you like to do? / > Open WP Admin"
+      // pairs stacked into a wall on a real session (operator screenshot,
+      // 2026-08-12). One line per round reads as a session log instead.
+      const rows = final ? [`${pink('?')} ${message} ${dim('›')} ${options[cursor].label}`] : [`${pink('?')} ${message}`];
+      if (!final) {
         rows.push('');
         options.forEach((o, i) => {
           const marker = i === cursor ? pink('>') : ' ';
@@ -503,21 +507,30 @@ for (;;) {
   ];
   const choice = await choose('What would you like to do?', options);
 
+  // Every looping action ends with a dim one-line receipt and a blank line.
+  // Both exist for the same screenshot: silent actions left nothing but the
+  // collapsed prompt behind, so repeated picks fused into a stuttering wall —
+  // and the silence itself invited re-picking, since nothing said the click
+  // had landed. The receipt never includes the admin URL: the one-click link
+  // carries a single-use login token, and tokens are never echoed.
   if (choice === null || choice === 'exit') {
     console.log(`\n${dim('cd')} ${CWD} ${dim('&& npm run agentpress')} to come back.\n`);
     process.exit(0);
   } else if (choice === 'admin') {
     openBrowser(await adminUrl());
+    console.log(`  ${dim('→ opened WP Admin in your browser')}\n`);
   } else if (choice === 'site') {
     openBrowser(SITE);
+    console.log(`  ${dim(`→ opened ${SITE} in your browser`)}\n`);
   } else if (choice === 'shell') {
     openTerminalHere();
+    console.log(`  ${dim('→ opened a terminal in this folder')}\n`);
   } else if (choice === 'update') {
     // @latest, never @<the version we happened to see>: pinning a number here means
     // a stale menu hands out a stale command long after that version stopped being
     // current, and it was the mechanism that turned a false "update available" into
     // an actual downgrade instruction.
-    console.log('  Run: npx create-agentpress@latest update   (from this directory)');
+    console.log('  Run: npx create-agentpress@latest update   (from this directory)\n');
   } else if (choice.startsWith('agent:')) {
     const key = choice.slice('agent:'.length);
     const wired = wiredHostFor(key);
@@ -549,5 +562,8 @@ for (;;) {
       console.log(`\n  ${dim('Tip: run')} ${pink('/verify')} ${dim('inside the agent to test MCP, Playwright and Oxygen end to end.')}\n`);
     }
     await runInherit(AGENT_COMMANDS[key] || key);
+    // The agent owned the terminal until just now — one blank line keeps its
+    // last output from fusing with the next menu round.
+    console.log('');
   }
 }
