@@ -91,7 +91,7 @@ Three things move independently, so it is worth knowing which is which:
 | What | How | When you need it |
 |------|-----|------------------|
 | **The tool** | `npx …@latest` already runs the newest version. After `npm i -g create-agentpress`, update with `npm i -g create-agentpress@latest`. | Always, to get new behaviour |
-| **A site's own files** (`AGENTS.md`, `/verify`, `scripts/`, `.gitignore`) | `npx create-agentpress@latest update`, from inside that site's folder | Per site, and only for sites you still work in |
+| **A site's own files** (`AGENTS.md`, `/verify`, `scripts/`, `.gitignore`) | `npx create-agentpress@latest update`, from inside that site's folder — or `update --all` from anywhere, for every site at once. The site's own menu also offers this whenever a newer version is out. | Per site, and only for sites you still work in |
 | **The machine-wide MCP wiring** | `npx create-agentpress@latest rewire`, from inside any site's folder | Once, when a release changes how agents are wired |
 
 Newly scaffolded sites always get everything current. Existing sites keep the copies they
@@ -117,8 +117,9 @@ from a git checkout):
 
 # from inside a scaffolded site's directory:
 … update               # refresh the site's AgentPress-owned files
+… update --all         # the same, for every site in `list` (run from anywhere)
 … rewire               # point the AI agents' MCP connection back at THIS site
-… destroy              # permanently remove the site
+… destroy              # permanently remove the site: DB, vhost, MCP wiring, hosts entry, folder
 
 # flags
 … my-site --plugins=akismet,seo-by-rank-math   # extra wordpress.org plugins
@@ -209,6 +210,28 @@ Each site gets its own MySQL database and dedicated user (never root), its own v
 `wp-admin` link via the Agent Connector plugin (always installed), and — if any AI agent CLIs
 are detected on the machine — MCP wiring for every one of them.
 
+## The site menu
+
+Every site ships a small interactive menu — `npm run agentpress` from the site folder:
+
+- **Open WP Admin** — a fresh one-click, already-logged-in link every time (they're
+  single-use), falling back to the normal login form with a note when it can't mint one.
+- **Open your agent** (Claude Code, Cursor, Codex, OpenCode) right in the site — warning
+  first when the machine-global MCP wiring points at a *different* site, with a
+  **Point MCP here** item that runs `rewire` for you whenever that warning is showing.
+- **Snapshot the database** / **Restore the latest snapshot** — a dated `wp db export`
+  kept in the site's `snapshots\` folder (gitignored: a dump is the whole site, password
+  hashes included). Take one before letting an agent loose on the site; restoring is a
+  two-keystroke rollback.
+- **Show recent errors** — the tail of `wp-content\debug.log`, or how to turn debug
+  logging on when there isn't one.
+- **Open a terminal here** — Windows Terminal with your default profile, already in the
+  site folder (a plain Command Prompt on machines without it).
+- **Update this site** — appears only when npm has a newer version, and runs the update
+  for you.
+
+The menu is dependency-free and frozen into the site at scaffold time; `update` refreshes it.
+
 ## Two MCP servers, wired automatically (one of them a browser)
 
 Every scaffold configures **both** of these for every detected agent CLI (Claude Code, Cursor,
@@ -273,8 +296,9 @@ It re-points every detected agent CLI at that site, checks the endpoint actually
 prints the number of MCP tools it found), and tells you which site it took the wiring from. It
 also mints a fresh application password, which invalidates the site's previous one. Use it after
 destroying the site that owned the wiring, or to wire an agent CLI you installed after the site
-was created. The site's own `npm run agentpress` menu warns you when the wiring points elsewhere,
-and `doctor` shows which site currently owns it.
+was created. The site's own `npm run agentpress` menu warns you when the wiring points
+elsewhere — and offers a one-key **Point MCP here** fix — and `doctor` shows which site
+currently owns it.
 
 ## Architecture
 

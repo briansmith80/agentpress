@@ -10,9 +10,14 @@ port of [katalystwp](https://github.com/soflyy/katalystwp).
 ## Everyday use
 
 ```bash
-npm run agentpress   # the interactive menu — open the site, open wp-admin, ...
+npm run agentpress   # the menu — admin login, DB snapshot/restore, recent errors, your agent
 npm run wp -- <command...>   # WP-CLI, e.g. npm run wp -- plugin list
 ```
+
+Worth knowing about the menu: **Snapshot the database** before letting an AI agent loose on
+the site gives you a two-keystroke rollback (**Restore the latest snapshot**) if the session
+goes sideways. Snapshots land in `snapshots/`, gitignored — a dump is the whole site,
+password hashes included.
 
 WordPress core lives in `public/` (that's Laragon's document root for this project —
 everything else here is AgentPress's own tooling, not part of the site).
@@ -38,6 +43,8 @@ day one, and again any time MCP starts returning 401.
 - `AGENTS.md` — what an AI agent needs to know about this site. Yours to edit.
 - `.claude/commands/verify.md` — the `/verify` procedure. Any agent can read it, not just
   Claude Code.
+- `snapshots/` — dated database dumps from the menu's Snapshot item (only exists once you
+  take one). Gitignored; treat dumps as secrets.
 - `public/` — WordPress core + your content.
 
 ## Updating AgentPress's own tooling
@@ -70,7 +77,8 @@ Two things it writes under `public/`, and nothing else:
 The MCP wiring is machine-wide: there is one `wordpress` server per agent CLI, and it points
 at whichever site was scaffolded (or rewired) most recently. So if you scaffold another site,
 or destroy the site that owned the wiring, your agents stop being able to reach **this** one.
-The menu warns you about that before it launches an agent.
+The menu warns you about that before it launches an agent, and offers **Point MCP here** to
+fix it on the spot.
 
 To point them back here, from this directory:
 
