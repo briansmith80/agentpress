@@ -1,8 +1,9 @@
 # CLAUDE.md — working on AgentPress
 
 Guidance for Claude Code working in this repo. **Not user documentation** — that's
-[README.md](README.md). Session-by-session narrative lives in [HANDOFF.md](HANDOFF.md);
-in-flight plans live in `PLANNING/`.
+[README.md](README.md). Session-by-session narrative lives in `HANDOFF.md`; in-flight
+plans live in `PLANNING/`. Both are the maintainer's local files, gitignored on purpose —
+if you cloned this repo they will not exist, and nothing in `src/` depends on them.
 
 `create-agentpress` scaffolds AI-agent-ready WordPress sites on Laragon (Windows, native
 Apache/MySQL/PHP, no Docker). `index.js` → `src/engine.js` (`create()` is the single command

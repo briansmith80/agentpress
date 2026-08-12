@@ -10,3 +10,10 @@ Thumbs.db
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# Maintainer-private, local-only: session narratives and in-flight planning.
+# These lived in the public repo until 2026-08-12; they stay on disk for the
+# session workflow (CLAUDE.md references them) but are no longer tracked.
+PLANNING/
+HANDOFF.md
+.handoffs/
