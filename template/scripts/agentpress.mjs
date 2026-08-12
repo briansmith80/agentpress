@@ -171,6 +171,70 @@ echo $r['login_url'];
 `;
 
 /**
+ * Where mysqldump.exe/mysql.exe live. `wp db export/import` shell out to
+ * them, and Laragon does NOT put MySQL's bin on PATH unless "Add to Path"
+ * was applied — the exact assumption WP_BAT exists for, one binary over.
+ * Field-hit on the first real snapshot: "'mysqldump' is not recognized".
+ *
+ * Resolution order mirrors src/mysql.mjs (its own copy — frozen file): the
+ * ACTUALLY-RUNNING mysqld/mariadbd's own directory first, so the dump comes
+ * from the server's own version (this matters: the reference machine has
+ * both 8.0.30 and 8.4.3 on disk); newest on disk under <laragon>\bin\mysql
+ * as the fallback, with the Laragon root derived from the baked wp.bat.
+ * Probed once per menu session, only when a `wp db` command runs.
+ */
+let cachedDbBin;
+async function dbClientBinDir() {
+  if (cachedDbBin !== undefined) return cachedDbBin;
+  cachedDbBin = null;
+  const running = await new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          "(Get-CimInstance Win32_Process -Filter \"Name='mysqld.exe' OR Name='mariadbd.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath)",
+        ],
+        { shell: false },
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('close', () => resolve(out.trim() || null));
+    child.on('error', () => resolve(null));
+  });
+  if (running) {
+    const dir = join(running, '..');
+    if (existsSync(join(dir, 'mysqldump.exe')) || existsSync(join(dir, 'mariadb-dump.exe'))) {
+      cachedDbBin = dir;
+      return cachedDbBin;
+    }
+  }
+  try {
+    if (existsSync(WP_BAT)) {
+      // <root>\usr\bin\wp.bat → <root>\bin\mysql\<version>\bin
+      const mysqlRoot = join(WP_BAT, '..', '..', '..', 'bin', 'mysql');
+      for (const v of readdirSync(mysqlRoot).sort().reverse()) {
+        const bin = join(mysqlRoot, v, 'bin');
+        if (existsSync(join(bin, 'mysqldump.exe'))) {
+          cachedDbBin = bin;
+          return cachedDbBin;
+        }
+      }
+    }
+  } catch {
+    // no Laragon-shaped tree — PATH is all we have
+  }
+  return cachedDbBin;
+}
+
+/**
  * Spawns the `wp` shim via shell:true — preferring the absolute WP_BAT path
  * baked in at scaffold time (usr\bin may not be on PATH on this machine),
  * falling back to a bare `wp` from PATH. shell:true is needed for the .bat
@@ -180,10 +244,22 @@ echo $r['login_url'];
  * Windows username). Only paths this file generates itself are ever passed —
  * nothing user-typed reaches this.
  */
-function runWp(args) {
+async function runWp(args) {
+  const env = { ...process.env };
+  // Only `wp db …` needs the MySQL client tools; eval-file and friends must
+  // not pay the one-time probe (it would lag the first one-click login).
+  if (args[0] === 'db') {
+    const dbBin = await dbClientBinDir();
+    if (dbBin) {
+      // Find the real PATH key: Windows env names are case-insensitive and
+      // adding a second spelling ("PATH" beside "Path") is undefined behaviour.
+      const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'Path';
+      env[key] = `${dbBin};${env[key] || ''}`;
+    }
+  }
   return new Promise((resolve) => {
     const wpCmd = existsSync(WP_BAT) ? `"${WP_BAT}"` : 'wp';
-    const child = spawn(wpCmd, [...args, `--path="${join(CWD, 'public')}"`], { shell: true });
+    const child = spawn(wpCmd, [...args, `--path="${join(CWD, 'public')}"`], { shell: true, env });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
@@ -608,7 +684,12 @@ for (;;) {
       // the export below will fail loudly with the real reason
     }
     const name = `db-${new Date().toISOString().replace(/[:.]/g, '-')}.sql`;
-    const file = join(SNAPSHOT_DIR, name);
+    // FORWARD slashes, both directions. `wp db import` feeds the path to the
+    // mysql client inside a SOURCE statement, whose parser reads backslash
+    // pairs as client commands — a real C:\laragon\... path died live with
+    // "ERROR at line 1: Unknown command '\l'". Export takes either; both get
+    // the same shape so the paths in receipts and errors always match.
+    const file = join(SNAPSHOT_DIR, name).replace(/\\/g, '/');
     // --add-drop-table so restoring is a clean replace, not a pile of
     // duplicate-key errors on top of the current content.
     const r = await runWp(['db', 'export', `"${file}"`, '--add-drop-table']);
@@ -616,7 +697,15 @@ for (;;) {
       const mb = (statSync(file).size / (1024 * 1024)).toFixed(1);
       console.log(`  ${dim(`→ database saved to snapshots\\${name} (${mb} MB)`)}\n`);
     } else {
-      console.log(`  ${red('✖')} snapshot failed: ${(r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0]}\n`);
+      const reason = (r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0];
+      console.log(`  ${red('✖')} snapshot failed: ${reason}`);
+      // Only reachable when the resolver above found nothing to prepend —
+      // the machine has no Laragon-shaped MySQL tree and no tools on PATH.
+      if (/not recognized/i.test(reason)) {
+        console.log(`  ${dim("mysqldump isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
+        console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
+      }
+      console.log('');
     }
   } else if (choice === 'restore') {
     const name = newestSnapshot();
@@ -633,9 +722,19 @@ for (;;) {
         { value: true, label: 'Restore', hint: yellow('overwrites the current WordPress content') },
       ]);
       if (sure) {
-        const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, name)}"`]);
+        // Forward slashes for the same reason as the export above: mysql's
+        // SOURCE parser eats backslash pairs as client commands.
+        const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, name).replace(/\\/g, '/')}"`]);
         if (r.code === 0) console.log(`  ${dim(`→ database restored from snapshots\\${name}`)}\n`);
-        else console.log(`  ${red('✖')} restore failed: ${(r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0]}\n`);
+        else {
+          const reason = (r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0];
+          console.log(`  ${red('✖')} restore failed: ${reason}`);
+          if (/not recognized/i.test(reason)) {
+            console.log(`  ${dim("mysql isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
+            console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
+          }
+          console.log('');
+        }
       } else {
         console.log('');
       }
