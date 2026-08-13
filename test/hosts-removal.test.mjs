@@ -22,10 +22,15 @@ function runScript(script) {
   const file = join(dir, 'script.ps1');
   writeFileSync(file, script, 'utf8');
   try {
+    // 120s, not 30s: the FIRST PowerShell spawn on a cold windows-latest
+    // runner pays AV scan + .NET warm-up and blew through 30s once (CI,
+    // 2026-08-13 — status null read as a bare `null !== 0` assertion).
+    // Subsequent spawns in the same run take ~1s.
     const r = spawnSync(PS_EXE, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], {
       encoding: 'utf8',
-      timeout: 30_000,
+      timeout: 120_000,
     });
+    if (r.status === null) throw new Error(`PowerShell run did not complete (timeout or spawn failure): ${r.stderr || r.error?.message || ''}`);
     return { code: r.status, stderr: r.stderr || '' };
   } finally {
     rmSync(dir, { recursive: true, force: true });
