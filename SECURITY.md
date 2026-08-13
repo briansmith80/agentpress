@@ -53,7 +53,7 @@ references are given so you don't have to take our word for it.
 | Writes into Laragon's Apache config | `src/wildcard.mjs` | One wildcard vhost (`setup`, once) so new sites need no Apache reload. Placed last in config order so existing sites always win. |
 | Downloads and installs code | `src/wordpress.mjs`, `src/plugins.mjs` | WordPress core and plugins — the tool's entire purpose. |
 | Discovers MySQL root credentials | `src/mysql.mjs` | Tries empty then `"root"` (Laragon's defaults) to create a **per-site database and dedicated user**. Root is never written into any scaffolded site. Overridable with `AGENTPRESS_MYSQL_ROOT_PASSWORD`. |
-| Writes into agent CLI configs | `src/mcp.mjs` | Registers the site as an MCP server for Claude Code / Cursor / Codex / OpenCode, which is the feature. |
+| Writes agent MCP configs | `src/mcp.mjs` | Registers the site as an MCP server: into the site's own `.mcp.json` for Claude Code, into home-directory configs for Cursor / Codex / OpenCode. The feature. |
 | **Edits a third-party plugin's PHP** | `src/plugins.mjs` (`patchOxygenHtmlToPage`) | The only place this tool modifies code it did not write. Oxygen's `html-to-page` fails on **every** input on libxml ≥ 2.10 (a `<meta charset>` prefix with `LIBXML_HTML_NOIMPLIED` raises a spurious "Memory allocation failed"), and it is the builder's documented primary tool. One line is replaced with an XML encoding declaration. It matches the **exact** known-broken string or refuses aloud, checks the libxml version first, keeps the original as `html-to-page.php.agentpress-bak`, comments the change in the file, never fails a scaffold, and stops applying itself the moment Oxygen ships a fix. Skip it with `--premium=none`. |
 
 ## Where secrets live
@@ -106,17 +106,16 @@ references are given so you don't have to take our word for it.
   when it cannot. **On a site you created before v1.5.0**, run `rewire` from its folder (or
   `destroy` it) to clear the backlog, or delete the extras in wp-admin ▸ Users ▸ Profile ▸
   Application Passwords. Note `update` will *not* do it — it never touches credentials.
-- **Codex's MCP wiring puts the application password on a command line, and Claude's fallback
-  path can too.** Cursor and OpenCode configs are always written directly as JSON, so the
-  credential never reaches an argv for them. Claude is normally written directly as JSON as
-  well, and an **absent** `~/.claude.json` is created directly rather than triggering the
-  fallback — Claude Code installed but never launched is the ordinary state for a new user, and
-  that is exactly who should not have a password put on an argv. The fallback to
-  `claude mcp add --env …`, which does put the password on two process command lines, fires
-  when the file exists but cannot be read or parsed, or when the read-back after a write does
-  not find the entry we just wrote. That last case can happen even though the write itself
-  succeeded, most often because Claude Code was running and rewrote the file underneath us. The
-  fallback prints a warning when it happens, so you will know.
+- **Where the application password lands, per agent.** Cursor and OpenCode configs are written
+  directly as JSON in your home directory, so the credential never reaches an argv for them.
+  Claude Code (since 1.10.0) is wired **per site**: the credential is written directly as JSON
+  into that site's own `.mcp.json`, never onto a command line and never into a machine-global
+  file. That file lives inside the site folder, so the tool gitignores it (the template ships
+  the rule, and every wiring re-ensures it) — but if you replace the site's `.gitignore` or
+  force-add the file, you are committing an admin-equivalent REST credential, exactly as you
+  would be by committing the `.env` that already lives beside it. Sites wired before 1.10.0
+  keep their old machine-global `~/.claude.json` entry until you run `rewire` in them; the old
+  argv-exposing `claude mcp add` fallback is gone entirely.
   Codex's config is TOML and hand-serialising into a user's existing TOML is riskier than the
   exposure, so `codex mcp add` is still used; the credential appears briefly on that process's
   command line, where command-line auditing or EDR can persist it. It grants REST admin on a

@@ -92,15 +92,15 @@ Three things move independently, so it is worth knowing which is which:
 |------|-----|------------------|
 | **The tool** | `npx …@latest` already runs the newest version. After `npm i -g create-agentpress`, update with `npm i -g create-agentpress@latest`. | Always, to get new behaviour |
 | **A site's own files** (`AGENTS.md`, `/verify`, `scripts/`, `.gitignore`) | `npx create-agentpress@latest update`, from inside that site's folder — or `update --all` from anywhere, for every site at once. The site's own menu also offers this whenever a newer version is out. | Per site, and only for sites you still work in |
-| **The machine-wide MCP wiring** | `npx create-agentpress@latest rewire`, from inside any site's folder | Once, when a release changes how agents are wired |
+| **The MCP wiring** | `npx create-agentpress@latest rewire`, from inside a site's folder | When a release changes how agents are wired, or to point the global (non-Claude) wiring at a site |
 
 Newly scaffolded sites always get everything current. Existing sites keep the copies they
 were built with until you run `update` in them, which is deliberate: it overwrites files you
 may have edited, so it asks first.
 
-`rewire`'s main job is pointing your agents at *this* site, since that wiring is
-machine-global and the newest scaffold wins. Getting the latest wiring is a side effect, so
-running it once in whichever site you want as your MCP target covers both.
+`rewire` refreshes *this* site's own Claude Code wiring (`.mcp.json`) and points the
+machine-global wiring (Cursor, Codex, OpenCode) here — see "How the wiring is scoped" below.
+Getting the latest wiring shape is a side effect, so running it once per site covers both.
 
 ## Usage
 
@@ -201,6 +201,7 @@ private too — it holds your license key.
     verify.md            the /verify procedure — readable by any agent, not just Claude Code
   AGENTS.md              what an AI agent needs to know about this site
   .env                   DB + admin credentials + site hostname (gitignored)
+  .mcp.json              this site's own Claude Code MCP wiring (gitignored — holds its credential)
   sandbox.config.json    plugins/agents this site was scaffolded with
   package.json  README.md  wp-cli.yml  .gitignore
 ```
@@ -217,7 +218,7 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
 - **Open WP Admin** — a fresh one-click, already-logged-in link every time (they're
   single-use), falling back to the normal login form with a note when it can't mint one.
 - **Open your agent** (Claude Code, Cursor, Codex, OpenCode) right in the site — warning
-  first when the machine-global MCP wiring points at a *different* site, with a
+  first when an agent's MCP wiring points at a *different* site, with a
   **Point MCP here** item that runs `rewire` for you whenever that warning is showing.
 - **Snapshot the database** / **Restore the latest snapshot** — a dated `wp db export`
   kept in the site's `snapshots\` folder (gitignored: a dump is the whole site, password
@@ -280,25 +281,31 @@ re-importing the CSS mints a new id rather than repairing the old reference.
 
 Both files are plain markdown in the site, yours to edit.
 
-**Note:** the MCP wiring is machine-global (one `wordpress` entry per agent CLI), so it always
-points at the **most recently scaffolded** site. Scaffolding a second site re-points it;
-destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever URL it
-is given, so it never needs re-pointing.)
+**How the wiring is scoped** (this matters the day you scaffold a second site):
 
-**To take it back**, run `rewire` from inside the site you want the agents to talk to:
+- **Claude Code: per site, since 1.10.0.** Each site carries its own `.mcp.json` (gitignored —
+  it holds the site's credential), so every site keeps its wiring forever and scaffolding
+  another site changes nothing. The one cost: Claude Code asks once, on your first launch in
+  each site, whether to enable that site's MCP servers — approve both. Sites wired by older
+  versions still use the old machine-global entry until you run `rewire` in them once.
+- **Cursor, Codex, OpenCode: machine-global** (one `wordpress` entry per agent CLI), pointing
+  at the **most recently scaffolded** site. Scaffolding a second site re-points them;
+  destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever URL
+  it is given, so it never needs re-pointing.)
+
+**To point agents back at a site**, run `rewire` from inside it:
 
 ```bash
 cd <laragon>\www\my-site
 npx create-agentpress@latest rewire
 ```
 
-It re-points every detected agent CLI at that site, checks the endpoint actually answers (it
-prints the number of MCP tools it found), and tells you which site it took the wiring from. It
-also mints a fresh application password, which invalidates the site's previous one. Use it after
-destroying the site that owned the wiring, or to wire an agent CLI you installed after the site
-was created. The site's own `npm run agentpress` menu warns you when the wiring points
-elsewhere — and offers a one-key **Point MCP here** fix — and `doctor` shows which site
-currently owns it.
+For Claude Code that refreshes the site's own `.mcp.json` (and migrates a pre-1.10.0 site to
+per-site wiring); for the other CLIs it re-points the global entry here. It checks the
+endpoint actually answers (printing the number of MCP tools it found) and mints a fresh
+application password, which invalidates the site's previous one. The site's own
+`npm run agentpress` menu warns you when an agent's wiring points elsewhere — with a one-key
+**Point MCP here** fix — and `doctor` shows which site owns the global entry.
 
 ## Architecture
 
@@ -366,8 +373,9 @@ asks for a UAC prompt.
   `laragon.mjs` for the full story. When it happens: full Stop All → Start All in Laragon,
   then the `resume <name>` command the failure message prints. **Instant mode removes this
   entire failure class** — run `setup` once.
-- **One MCP connection per agent CLI, machine-wide** — see the note above. `rewire` moves it
-  between sites; there is no way to have two sites wired at once.
+- **Cursor, Codex and OpenCode get one MCP connection each, machine-wide** — see "How the
+  wiring is scoped" above. `rewire` moves it between sites; those CLIs cannot have two sites
+  wired at once. Claude Code is exempt since 1.10.0: every site keeps its own wiring.
 - **`--setup-script=`/`--dev-script=` are not implemented.** The original's customization
   hooks didn't make it into this port.
 - **Agent CLIs are detected, never installed.** If a selected agent isn't found on PATH, the
