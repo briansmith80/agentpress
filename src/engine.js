@@ -271,7 +271,7 @@ async function readPendingSelection(projectDir) {
  * of "all available". Choosing an extension pulls Oxygen in with it — the
  * extensions are inert without the builder.
  */
-async function choosePremiumPlugins({ flagValue, yes }) {
+async function choosePremiumPlugins({ flagValue, yes, prompts = null }) {
   const availability = await premiumPluginAvailability();
   const available = availability.filter((p) => p.available);
 
@@ -314,7 +314,10 @@ async function choosePremiumPlugins({ flagValue, yes }) {
   }
 
   console.log('\nWhich premium plugins should THIS project get?');
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // The scaffold passes its shared interface (see the freeze comment at its
+  // creation); `resume` passes none and has no earlier prompts to stack
+  // with, so a self-created one is safe there. Close only what we created.
+  const rl = prompts ?? createInterface({ input: process.stdin, output: process.stdout });
   const selection = [];
   try {
     for (const plugin of availability) {
@@ -326,7 +329,7 @@ async function choosePremiumPlugins({ flagValue, yes }) {
       if (answer === '' || /^y(es)?$/i.test(answer)) selection.push(plugin.slug);
     }
   } finally {
-    rl.close();
+    if (!prompts) rl.close();
   }
   if (selection.some((s) => s.startsWith('breakdance-')) && !selection.includes('oxygen')) {
     const oxygen = available.find((p) => p.slug === 'oxygen');
@@ -338,14 +341,13 @@ async function choosePremiumPlugins({ flagValue, yes }) {
   return selection;
 }
 
-async function confirmScaffold(name, hostname) {
+/** `rl` is the scaffold's SHARED prompt interface (see the comment where it is created) — this must not open its own. */
+async function confirmScaffold(name, hostname, rl) {
   if (!process.stdin.isTTY) {
     bail(`${red(BAD)} Not scaffolding: confirm with --yes when running non-interactively.`);
     return false;
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
   const answer = await rl.question(`? Scaffold a new WordPress site "${name}" at http://${hostname}? [y/N]: `);
-  rl.close();
   if (!/^y(es)?$/i.test(answer.trim())) {
     console.log('Cancelled.');
     return false;
@@ -367,8 +369,11 @@ async function confirmScaffold(name, hostname) {
  * uses (conf-on-disk ≠ conf-in-Apache). Declining, --yes and non-TTY runs
  * keep the classic path exactly as before. Returns true when instant mode is
  * verified ACTIVE.
+ *
+ * `rl` is the scaffold's SHARED prompt interface — this must not open its
+ * own (see the comment where it is created for the freeze that rule fixes).
  */
-async function offerInstantMode() {
+async function offerInstantMode(rl) {
   const confAlready = wildcardConfInstalled();
   console.log(
     confAlready
@@ -376,9 +381,7 @@ async function offerInstantMode() {
       : `${cyan(STEP)} Instant mode is not enabled. Enabling it makes this and every future scaffold instant:\n` +
           '  no Laragon reloads, no machine-wide Apache/MySQL blip, sites live the moment they exist.',
   );
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = (await rl.question('? Enable it now? The one-time cost is a full Stop All → Start All in Laragon. [Y/n]: ')).trim();
+  const answer = (await rl.question('? Enable it now? The one-time cost is a full Stop All → Start All in Laragon. [Y/n]: ')).trim();
     // Default is YES — this prompt exists because the old opt-in tip was
     // ignored, and Enter-through should land on the good path.
     if (/^n(o)?$/i.test(answer)) return false;
@@ -411,9 +414,6 @@ async function offerInstantMode() {
         `  scaffold. Run \`${CLI} setup\` afterwards; it verifies instant mode and says what is missing.\n`,
     );
     return false;
-  } finally {
-    rl.close();
-  }
 }
 
 /**
@@ -651,8 +651,21 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   // is PROVEN by a live probe (conf-on-disk ≠ conf-in-Apache until the
   // one-time restart happened).
   let instant = wildcardConfInstalled() && (await wildcardActive());
-  if (!instant && process.stdin.isTTY && !yes) {
-    instant = await offerInstantMode();
+  // ONE readline interface for the whole interactive stretch — the offer, the
+  // scaffold confirmation, and the premium picker. These were three
+  // back-to-back interfaces, each cycling Windows stdin through
+  // pause/resume, and on the offer flow's second real run the premium picker
+  // froze solid: keys not echoed, question never resolving (field report,
+  // 2026-08-12). libuv's Windows console reader cancels its pending read on
+  // pause, and that cancellation can race the next interface's resume; two
+  // interfaces got away with it for months, adding a third made it
+  // intermittent. One interface, one resume, no cycles. Closed in the
+  // finally below on EVERY path — an open interface keeps the process alive.
+  const prompts = process.stdin.isTTY && !yes ? createInterface({ input: process.stdin, output: process.stdout }) : null;
+  let premiumSelection;
+  try {
+  if (!instant && prompts) {
+    instant = await offerInstantMode(prompts);
     if (instant) {
       // The Stop All → Start All the user just did restarted MySQL too, so
       // the preflight snapshot from before it is stale — without this
@@ -708,9 +721,12 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     );
   }
 
-  if (!yes && !(await confirmScaffold(name, hostname))) return;
+  if (!yes && !(await confirmScaffold(name, hostname, prompts))) return;
 
-  const premiumSelection = await choosePremiumPlugins({ flagValue: typeof flags.premium === 'string' ? flags.premium : undefined, yes });
+  premiumSelection = await choosePremiumPlugins({ flagValue: typeof flags.premium === 'string' ? flags.premium : undefined, yes, prompts });
+  } finally {
+    prompts?.close();
+  }
 
   const release = await acquireScaffoldLock();
   try {
