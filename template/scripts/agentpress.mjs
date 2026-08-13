@@ -27,6 +27,14 @@ const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Code
 // to the shell, so "Open Cursor CLI" ran `cursor` (a different program, or
 // nothing) instead of Cursor's agent binary, and the failure was swallowed.
 const AGENT_COMMANDS = { claude: 'claude', cursor: 'cursor-agent', codex: 'codex', opencode: 'opencode' };
+// Cursor renamed its CLI command from `cursor-agent` to `agent`
+// (cursor.com/docs/cli/installation, checked 2026-08-12), so a machine has
+// one or the other depending on install age. Launch probes the old
+// unambiguous name first, then the new one — `agent` is too generic to trust
+// on name alone, so it only counts when its resolved path looks like
+// Cursor's. Deliberate copies of src/agents.mjs's maps (frozen file);
+// test/parity.test.mjs pins them together.
+const AGENT_COMMAND_FALLBACKS = { cursor: 'agent' };
 
 // --- colour ---
 // Declared up here, ahead of the early bails below, so those failure messages
@@ -143,6 +151,34 @@ function openBrowser(url) {
   } catch {
     console.log(`  ${dim('Open:')} ${url}`);
   }
+}
+
+/** Where a command resolves on PATH, via System32's where.exe (absolute path: bare-name spawn searches the CWD first, and this runs inside a folder agents write to). Null when not found. */
+function resolveOnPath(cmd) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'where.exe'), [cmd], { shell: false });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('close', (code) => resolve(code === 0 ? out.trim().split(/\r?\n/)[0] || null : null));
+    child.on('error', () => resolve(null));
+  });
+}
+
+/** The command to launch for an agent key, honouring the rename fallback. Same logic as src/agents.mjs's detectAgents; the generic fallback name only counts when its path looks like Cursor's. */
+async function agentLaunchCommand(key) {
+  const primary = AGENT_COMMANDS[key] || key;
+  const fallbackName = AGENT_COMMAND_FALLBACKS[key];
+  if (!fallbackName) return primary;
+  if (await resolveOnPath(primary)) return primary;
+  const fallback = await resolveOnPath(fallbackName);
+  if (fallback && /cursor|[\\/]\.local[\\/]bin[\\/]/i.test(fallback)) return fallbackName;
+  return primary;
 }
 
 /** Fire-and-forget window spawn; resolves true only when the process actually started ('spawn' fires), so callers can fall back or name what opened. */
@@ -488,6 +524,16 @@ async function choose(message, options) {
       } else if (/^[1-9]$/.test(str || '') && Number(str) <= options.length) {
         cursor = Number(str) - 1;
         return finish(options[cursor].value, true);
+      } else if (str === '0') {
+        // 0 = Exit, but ONLY when an exit option exists. The obvious
+        // "0 selects the last item" is a trap: this same chooser renders the
+        // restore confirm, whose last item is Restore — a reflex 0 there
+        // would overwrite the database instead of leaving the menu.
+        const exitAt = options.findIndex((o) => o.value === 'exit');
+        if (exitAt >= 0) {
+          cursor = exitAt;
+          return finish(options[cursor].value, true);
+        }
       }
       render(false);
     };
@@ -840,7 +886,7 @@ for (;;) {
       // startup repaints the terminal, so this is a hint, not an instruction.
       console.log(`\n  ${dim('Tip: run')} ${pink('/verify')} ${dim('inside the agent to test MCP, Playwright and Oxygen end to end.')}\n`);
     }
-    await runInherit(AGENT_COMMANDS[key] || key);
+    await runInherit(await agentLaunchCommand(key));
     // The agent owned the terminal until just now — one blank line keeps its
     // last output from fusing with the next menu round.
     console.log('');
