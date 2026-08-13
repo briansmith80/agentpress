@@ -22,7 +22,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, X509Certificate } from 'node:crypto';
 import { HOSTS_PATH, SITES_ENABLED_APACHE, WWW_DIR } from './paths.mjs';
 import { psCapture, psQuote } from './win.mjs';
 import { hostsContentEntryAddresses, inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
@@ -40,6 +40,56 @@ export function sslCertPresent() {
   return existsSync(LARAGON_CRT) && existsSync(LARAGON_KEY);
 }
 
+/**
+ * Does a SAN string make `hostname` BROWSER-valid? Split out pure for tests.
+ *
+ * The rule that matters: browsers reject wildcard certificates at the TLD
+ * level — `*.test` is the same shape as `*.com` — so the trailing `*.test`
+ * in Laragon's SAN list counts for NOTHING in Chrome, and only an EXPLICIT
+ * `DNS:<hostname>` entry makes a `.test` site's https real. Multi-label
+ * wildcards (`*.foo.test`) are honoured, but that never covers a new
+ * top-level site name.
+ */
+export function sanCoversHostname(san, hostname) {
+  const needle = String(hostname || '').toLowerCase();
+  if (!needle) return false;
+  const entries = String(san || '')
+    .toLowerCase()
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith('dns:'))
+    .map((s) => s.slice(4));
+  if (entries.includes(needle)) return true;
+  // A multi-label wildcard covers exactly one extra label — and never at TLD level.
+  return entries.some((e) => {
+    if (!e.startsWith('*.')) return false;
+    const base = e.slice(2);
+    if (!base.includes('.')) return false; // `*.test`: rejected by browsers, so rejected here
+    return needle.endsWith(`.${base}`) && needle.split('.').length === base.split('.').length + 1;
+  });
+}
+
+/**
+ * Is `hostname` actually in Laragon's certificate, the way a BROWSER judges
+ * it? A ":443 answers" probe cannot tell — our probes deliberately skip
+ * validation, which is how this stayed invisible until a real field run:
+ * ping resolved, Apache served TLS, and Chrome refused the page with
+ * ERR_CERT_COMMON_NAME_INVALID (2026-08-13, site `test3`). Laragon's cert
+ * lists every site EXPLICITLY (regenerated only when Laragon restarts) plus
+ * a `*.test` browsers ignore — so a brand-new site is browser-invalid on
+ * https until the next Stop All → Start All, however healthy the TLS socket
+ * looks. The cert's NotBefore matched the operator's last restart to the
+ * minute; the new site was absent from the list.
+ */
+export async function certCoversHostname(hostname) {
+  try {
+    const cert = new X509Certificate(await readFile(LARAGON_CRT));
+    return sanCoversHostname(cert.subjectAltName, hostname);
+  } catch {
+    return false;
+  }
+}
+
 async function generateWildcardConf() {
   const { suffix } = await inferHostnameSuffix();
   const www = WWW_DIR.replace(/\\/g, '/');
@@ -47,9 +97,19 @@ async function generateWildcardConf() {
   const key = LARAGON_KEY.replace(/\\/g, '/');
   // The 443 vhost is only EMITTED when the cert pair exists — a
   // SSLCertificateFile pointing at a missing file is a hard Apache startup
-  // failure, which would take down every site on the machine. Laragon's
-  // cert carries a *.test wildcard SAN (verified live), so one cert covers
-  // every future site with no regeneration.
+  // failure, which would take down every site on the machine.
+  //
+  // What the cert COVERS is a separate question, and an earlier version of
+  // this comment got it wrong: Laragon's cert does carry a `*.test` SAN,
+  // but browsers reject TLD-level wildcards (`*.test` is the same shape as
+  // `*.com`), so that entry counts for nothing in Chrome. Real coverage
+  // comes from the EXPLICIT per-site names Laragon writes into the SAN
+  // list, which it only regenerates on its own restart — so a brand-new
+  // site's https is browser-invalid until the next Stop All → Start All,
+  // even though this vhost serves it perfectly well at the TLS layer.
+  // Field-proven 2026-08-13 (ERR_CERT_COMMON_NAME_INVALID on a fresh site;
+  // cert NotBefore matched the operator's last restart to the minute).
+  // certCoversHostname() above is how callers must judge https validity.
   const sslBlock = sslCertPresent()
     ? `
 <IfModule ssl_module>
