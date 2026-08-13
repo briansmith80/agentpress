@@ -466,6 +466,60 @@ async function httpsServesSite(hostname, projectDir) {
 }
 
 /**
+ * The one-restart path to a fully-https site, offered at the only moment it
+ * can deliver one: the site's folder now exists, so a Laragon restart will
+ * regenerate the certificate WITH this site's name in it — and the scheme
+ * decided right after this is what gets baked into .env, the admin link and
+ * every URL the panel prints.
+ *
+ * Field driver (operator, 2026-08-13): after the cert-honesty fix a new site
+ * came out http, and a restart AFTER the scaffold didn't make it feel secure
+ * either — the cert became valid but every link the tool had written still
+ * said http. "It feels like a win but it's not." Offering the restart before
+ * the scheme is recorded is what turns the same restart into an actually
+ * https site.
+ *
+ * Its own SHORT-LIVED readline interface, deliberately: the scaffold's
+ * shared one is closed minutes earlier (see the stdin freeze comment there),
+ * and keeping that one open through the whole build would let a stray Enter
+ * pressed during the long WordPress install buffer up and auto-answer this
+ * prompt. Two interface cycles per run is the profile that was stable for
+ * months; three BACK-TO-BACK was the freeze.
+ */
+async function offerHttpsForNewSite(hostname, projectDir) {
+  console.log(
+    `${cyan(STEP)} https for ${hostname} is one restart away: Laragon regenerates its certificate on\n` +
+      '  restart and will include this new site. (Browsers reject the certificate\'s *.test\n' +
+      '  wildcard, so a new site needs its own entry before https is trusted.)',
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question('? Do the one-time Stop All → Start All now, for a fully-https site? [Y/n]: ')).trim();
+    if (/^n(o)?$/i.test(answer)) return false;
+    console.log(`${cyan(STEP)} In Laragon: ${bold('Stop All')}, then ${bold('Start All')}. Press Enter here once it is back up…`);
+    await rl.question('');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if ((await certCoversHostname(hostname)) && (await probeInstant(hostname, projectDir, { timeoutMs: 5000, tls: true }))) {
+        console.log(`${green(OK)} https://${hostname} is browser-valid — recording https for this site.\n`);
+        return true;
+      }
+      if (attempt < 2) {
+        console.log(`  ${yellow(WARN)} The certificate does not cover ${hostname} yet (Apache may still be starting). Press Enter to re-check…`);
+        console.log(`  ${dim('If Laragon itself has stopped responding, close and reopen it, Start All, then press Enter.')}`);
+        await rl.question('');
+      }
+    }
+    console.log(
+      `${yellow(WARN)} Still not valid — continuing with http, which works now. The summary explains how\n` +
+        '  to get https later.\n',
+    );
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+/**
  * The project root holds `.env` (DB + admin passwords). It sits OUTSIDE the
  * site's own docroot (`public/`), so the site's own vhost can never serve
  * it — but Laragon's default catch-all vhost serves the whole `www\` tree by
@@ -790,7 +844,16 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         );
         return;
       }
-      const scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
+      let scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
+      // The folder exists as of moments ago, which is what makes the offered
+      // restart able to produce a certificate covering this site — see
+      // offerHttpsForNewSite. Interactive runs only; --yes and pipes keep
+      // http plus the summary warning.
+      if (scheme === 'http' && !yes && process.stdin.isTTY && sslCertPresent() && !(await certCoversHostname(hostname))) {
+        if (await offerHttpsForNewSite(hostname, projectDir)) {
+          scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
+        }
+      }
       console.log(`${green(OK)} ${scheme}://${hostname} is live (served by the wildcard vhost)`);
       // Say how to GET https when the machine plainly could serve it — and say the RIGHT
       // reason, because there are two distinct ones. New-site case (the common one):
