@@ -924,16 +924,32 @@ async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {
     failedAgents.push({ key: 'all', reason: `could not mint the application password: ${err.message}` });
     return { detectedKeys, configuredAgents, failedAgents, verification: null };
   }
-  // Read the wiring we are about to take over, BEFORE taking it over. Wiring is
-  // machine-global and the newest scaffold wins, so scaffolding site B silently
-  // repoints every agent away from site A — a surprise that only `rewire`
-  // explained, even though a scaffold does exactly the same thing. Captured here
-  // so scaffold, resume and rewire all report it from one place.
+  // Read the wiring we are about to take over, BEFORE taking it over. Wiring
+  // for cursor/opencode is machine-global and the newest scaffold wins, so
+  // scaffolding site B silently repoints those agents away from site A — a
+  // surprise that only `rewire` explained, even though a scaffold does exactly
+  // the same thing. Claude Code is EXCLUDED since 1.10.0: its wiring is the
+  // site's own .mcp.json, nothing global moves, so reporting it as displaced
+  // would claim a theft that no longer happens (any legacy user-scope entry is
+  // deliberately left where it points).
   const wiredBefore = await readWiredHostnames();
-  const displaced = [...new Set(Object.values(wiredBefore).filter((h) => h && h !== hostname.toLowerCase()))];
+  const displaced = [
+    ...new Set(
+      Object.entries(wiredBefore)
+        .filter(([key, h]) => key !== 'claude' && h && h !== hostname.toLowerCase())
+        .map(([, h]) => h),
+    ),
+  ];
   // MCP deliberately stays on http: the proxy is a Node process whose trust
   // of Laragon's self-signed cert isn't guaranteed, and http always works.
-  const creds = { wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`, username: adminUser, password: appPassword };
+  // siteDir rides along for configureClaude, which writes the site's own
+  // .mcp.json rather than any machine-global config.
+  const creds = {
+    wpApiUrl: `http://${hostname}/wp-json/mcp/mcp-adapter-default-server`,
+    username: adminUser,
+    password: appPassword,
+    siteDir: join(publicDir, '..'),
+  };
   for (const key of detectedKeys) {
     onStep(`wiring MCP for ${key}…`);
     try {
@@ -975,10 +991,18 @@ function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verifi
     const health = verification ? (verification.ok ? `verified, ${verification.tools} tools` : `NOT verified: ${verification.detail}`) : 'not checked';
     lines.push(`${verification && !verification.ok ? yellow(WARN) : green(OK)} MCP wired for: ${configuredAgents.join(', ')} (${health})`);
   }
-  // Machine-global wiring: whoever wired last owns it. A scaffold does this as
-  // silently as a rewire did, and until now only rewire said so.
+  // The one-time consent is part of the journey now, so say it here — the
+  // alternative is the user's first launch hitting an unexplained security
+  // prompt about executing code. Claude-only: the other CLIs stay global.
+  if (configuredAgents.includes('claude')) {
+    lines.push(`  ${dim("Claude Code is wired per-site (.mcp.json): its first launch here asks once to enable")}`);
+    lines.push(`  ${dim("this site's MCP servers — approve both, and this site keeps its wiring forever.")}`);
+  }
+  // Machine-global wiring (cursor/opencode, and legacy claude entries):
+  // whoever wired last owns it. A scaffold does this as silently as a rewire
+  // did, and until now only rewire said so.
   if (displaced.length && configuredAgents.length) {
-    lines.push(`  ${cyan(STEP)} Agents were pointed at ${displaced.join(', ')} and now point here.`);
+    lines.push(`  ${cyan(STEP)} Some agents were pointed at ${displaced.join(', ')} and now point here.`);
     lines.push(`    ${dim(`To switch back, run \`${CLI} rewire\` from that site's folder.`)}`);
   }
   // The cause goes directly under the failure it explains, not in a footnote:

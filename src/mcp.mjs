@@ -10,7 +10,6 @@ import { dirname, join } from 'node:path';
 import { runWp } from './wp.mjs';
 import { psRun } from './win.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
-import { yellow, WARN } from './ansi.mjs';
 
 const APP_PASSWORD_NAME = 'agentpress';
 // Both spellings are ours: pre-rename sites carry the old name, and destroy
@@ -174,79 +173,23 @@ async function updateJsonConfig(path, mutate) {
  * goes through real `powershell.exe` instead of spawning the shim directly.
  */
 /**
- * Writes ~/.claude.json DIRECTLY rather than shelling out to `claude mcp add`,
- * because that CLI takes the credential on argv (`--env WP_API_PASSWORD=…`) —
- * which puts an admin-equivalent REST password on two process command lines,
- * where EDR/Sysmon/4688 command-line auditing and PowerShell transcription
- * persist it off-machine, outliving the site. Cursor and OpenCode were always
- * configured this way; this brings Claude in line.
- *
- * Not riskier than the CLI: `claude mcp add` is itself a separate process
- * doing read-modify-write on the same file. But that file holds a lot of
- * unrelated Claude Code state, so the write is atomic (temp + rename in the
- * same directory), keeps a backup only for the duration of the write,
- * preserves every unknown key, and reads back to confirm. An ABSENT file is
- * created here; only an unparseable file or a failed read-back falls back to
- * the CLI, and that fallback now says so out loud.
+ * `.mcp.json` carries the application password, so it must never reach a
+ * repo. The template `.gitignore` ships the entry for new sites; this
+ * re-ensures it on every wiring, because a site created before 1.10.0 keeps
+ * its original `.gitignore` until `update` runs — the same belt-and-braces
+ * as the snapshots folder's own marker.
  */
-async function writeClaudeConfig(creds) {
-  const path = join(homedir(), '.claude.json');
-  let raw = null;
+async function ensureMcpJsonIgnored(siteDir) {
+  const path = join(siteDir, '.gitignore');
+  let current = '';
   try {
-    raw = await readFile(path, 'utf8');
-  } catch (err) {
-    // ABSENT is not a reason to fall back. Claude Code installed but never
-    // launched has no ~/.claude.json, which is the ordinary state for a new
-    // user — and routing that through the CLI put the password on an argv for
-    // exactly the people least likely to notice. Creating the file ourselves is
-    // strictly safer and keeps the credential out of every process list.
-    if (err.code !== 'ENOENT') return false;
-  }
-  let config = {};
-  if (raw !== null) {
-    try {
-      config = JSON.parse(raw);
-    } catch {
-      return false; // never overwrite a file we cannot parse
-    }
-    if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
-  }
-
-  // Kept only for the duration of the write. It used to be left behind
-  // forever, rewritten on every scaffold — a full plaintext copy of the user's
-  // entire Claude config (every MCP server's env, so third-party API keys too)
-  // plus the PREVIOUS site's application password, which until v1.5.0 was
-  // never actually revoked. The temp+rename below is what makes the write
-  // safe; the backup only covers the moment before it.
-  const bak = `${path}.agentpress-bak`;
-  await writeFile(bak, raw, 'utf8').catch(() => {});
-  config.mcpServers = config.mcpServers || {};
-  config.mcpServers.wordpress = { type: 'stdio', command: WP_MCP_PROXY[0], args: WP_MCP_PROXY.slice(1), env: wordpressEnv(creds) };
-  config.mcpServers.playwright = { type: 'stdio', command: PLAYWRIGHT_MCP[0], args: PLAYWRIGHT_MCP.slice(1), env: {} };
-
-  const tmp = `${path}.agentpress-tmp-${randomBytes(4).toString('hex')}`;
-  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-  try {
-    await rename(tmp, path); // atomic on NTFS — no truncated-file window
-  } catch (err) {
-    // This temp file holds the ENTIRE Claude config plus the app password just
-    // minted. Leaving it behind on a failed rename (AV lock, permissions) would
-    // be a worse leak than the .agentpress-bak this release just stopped
-    // leaving around — the same cleanup updateJsonConfig already does.
-    await rm(tmp, { force: true }).catch(() => {});
-    throw err;
-  }
-
-  try {
-    const back = JSON.parse(await readFile(path, 'utf8'));
-    const ok = Boolean(back.mcpServers?.wordpress?.env?.WP_API_URL);
-    // Only once the new config is confirmed on disk — otherwise the backup is
-    // the only copy of the user's state and must survive.
-    if (ok) await rm(bak, { force: true }).catch(() => {});
-    return ok;
+    current = await readFile(path, 'utf8');
   } catch {
-    return false;
+    // no .gitignore at all — create one holding just this rule
   }
+  if (current.split(/\r?\n/).some((l) => l.trim() === '.mcp.json')) return;
+  const addition = '# Per-site MCP wiring for Claude Code — carries the application password.\n.mcp.json\n';
+  await writeFile(path, `${current}${current && !current.endsWith('\n') ? '\n' : ''}${addition}`, 'utf8');
 }
 
 /**
@@ -278,25 +221,35 @@ export async function readWiredHostnames() {
   return out;
 }
 
+/**
+ * Claude Code is wired PER SITE via a project-scoped `.mcp.json`, not the
+ * machine-global user scope the other CLIs still use. Spiked live 2026-08-12:
+ * project config connects once the user approves it (one prompt on first
+ * launch in the folder, both servers pre-selected), it beats a user-scope
+ * entry of the same name inside the site, and a folder without the file
+ * resolves nothing. That deletes the "newest scaffold silently steals every
+ * agent" class for Claude Code — most of what `rewire` existed to repair.
+ *
+ * Legacy user-scope entries written by pre-1.10.0 versions are deliberately
+ * left alone: the project file wins locally, and the global entry keeps
+ * serving sites that have not migrated yet (`rewire` in a site migrates it).
+ *
+ * updateJsonConfig gives this the same guarantees as the Cursor/OpenCode
+ * writers: a user's own servers in an existing `.mcp.json` survive, an
+ * unparseable file is refused untouched, and the write is temp+rename. No
+ * CLI fallback needed anymore — the old one existed for an unparseable
+ * ~/.claude.json full of unrelated state; a site's own `.mcp.json` has no
+ * such file to inherit, and if a user hand-broke theirs, refusing loudly
+ * beats putting the password on an argv.
+ */
 export async function configureClaude(creds) {
-  if (await writeClaudeConfig(creds)) return;
-  // Fallback: the CLI. Keeps working on a machine whose config we could not
-  // safely edit, at the cost of the argv exposure documented above — which is
-  // now DISCLOSED rather than silent, since SECURITY.md promises the direct
-  // write and a user is entitled to know when they did not get it.
-  console.log(
-    `${yellow(WARN)} ~/.claude.json could not be read as JSON, so this site's MCP entry is being written\n` +
-      "  via `claude mcp add` instead. That puts the application password on a command line,\n" +
-      '  where command-line auditing can persist it. Fix or move that file and run `rewire` to\n' +
-      '  get the direct write.',
-  );
-  const envArgs = Object.entries(wordpressEnv(creds)).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
-  await psRun('claude', ['mcp', 'remove', 'wordpress', '--scope', 'user']);
-  const wp = await psRun('claude', ['mcp', 'add', 'wordpress', '--scope', 'user', ...envArgs, '--', ...WP_MCP_PROXY]);
-  if (wp.code !== 0) throw new Error(`claude mcp add wordpress failed (exit ${wp.code}): ${redactSecrets((wp.stderr || wp.stdout).trim(), creds)}`);
-  await psRun('claude', ['mcp', 'remove', 'playwright', '--scope', 'user']);
-  const pw = await psRun('claude', ['mcp', 'add', 'playwright', '--scope', 'user', '--', ...PLAYWRIGHT_MCP]);
-  if (pw.code !== 0) throw new Error(`claude mcp add playwright failed (exit ${pw.code}): ${redactSecrets((pw.stderr || pw.stdout).trim(), creds)}`);
+  if (!creds.siteDir) throw new Error('configureClaude needs creds.siteDir — the site folder that owns .mcp.json');
+  await updateJsonConfig(join(creds.siteDir, '.mcp.json'), (config) => {
+    config.mcpServers = config.mcpServers || {};
+    config.mcpServers.wordpress = { type: 'stdio', command: WP_MCP_PROXY[0], args: WP_MCP_PROXY.slice(1), env: wordpressEnv(creds) };
+    config.mcpServers.playwright = { type: 'stdio', command: PLAYWRIGHT_MCP[0], args: PLAYWRIGHT_MCP.slice(1), env: {} };
+  });
+  await ensureMcpJsonIgnored(creds.siteDir);
 }
 
 export async function configureCodex(creds) {
