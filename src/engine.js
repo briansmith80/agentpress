@@ -364,11 +364,15 @@ async function confirmScaffold(name, hostname, rl) {
  * offers the enable inline — ONLY the mandatory half of setup (the wildcard
  * conf); the premium wizard stays setup's own business.
  *
- * The conf only takes effect after a full Stop All → Start All, so the offer
- * pauses for that and then PROVES activity with the same live probe setup
- * uses (conf-on-disk ≠ conf-in-Apache). Declining, --yes and non-TTY runs
- * keep the classic path exactly as before. Returns true when instant mode is
- * verified ACTIVE.
+ * This only WRITES the conf; the Stop All → Start All is deliberately
+ * deferred (returns 'deferred'). The first version restarted here, and the
+ * operator immediately asked the right question: a fresh machine then paid
+ * TWO restarts in one scaffold — this one, plus the one that makes https
+ * valid for the new site (Laragon only adds a site's name to its
+ * certificate on restart, and the folder does not exist yet at this point).
+ * Deferring until the folder exists lets ONE restart deliver both — see
+ * awaitCombinedRestart. Declining, --yes and non-TTY runs keep the classic
+ * path exactly as before.
  *
  * `rl` is the scaffold's SHARED prompt interface — this must not open its
  * own (see the comment where it is created for the freeze that rule fixes).
@@ -382,18 +386,46 @@ async function offerInstantMode(rl) {
           '  no Laragon reloads, no machine-wide Apache/MySQL blip, sites live the moment they exist.',
   );
   const answer = (await rl.question('? Enable it now? The one-time cost is a full Stop All → Start All in Laragon. [Y/n]: ')).trim();
-    // Default is YES — this prompt exists because the old opt-in tip was
-    // ignored, and Enter-through should land on the good path.
-    if (/^n(o)?$/i.test(answer)) return false;
-    if (!confAlready) {
-      const { suffix } = await installWildcardConf();
-      console.log(`${green(OK)} Wildcard vhost written (serves *${suffix} from www\\<name>\\public${sslCertPresent() ? ', http + https' : ''}).`);
-    }
-    // Probe-with-retry rather than trusting the user's Enter: Apache takes a
-    // few seconds to come back, and "you said it restarted" is exactly the
-    // kind of assertion this codebase has learned not to build on.
-    console.log(`${cyan(STEP)} In Laragon: ${bold('Stop All')}, then ${bold('Start All')}. Press Enter here once it is back up…`);
-    await rl.question('');
+  // Default is YES — this prompt exists because the old opt-in tip was
+  // ignored, and Enter-through should land on the good path.
+  if (/^n(o)?$/i.test(answer)) return false;
+  if (!confAlready) {
+    const { suffix } = await installWildcardConf();
+    console.log(`${green(OK)} Wildcard vhost written (serves *${suffix} from www\\<name>\\public${sslCertPresent() ? ', http + https' : ''}).`);
+  }
+  console.log(
+    `  ${dim('Not asking for the restart yet: it comes in a moment, once the site folder exists —')}\n` +
+      `  ${dim(`then one restart activates instant mode${sslCertPresent() ? ' AND makes the new site\'s https valid' : ''}.`)}\n`,
+  );
+  return 'deferred';
+}
+
+/**
+ * The single Stop All → Start All that a fresh machine's first scaffold
+ * needs, placed at the only point where one restart can deliver everything:
+ * the site folder now exists, so Laragon's restart both loads the wildcard
+ * conf (instant mode, machine-wide, forever) and regenerates its certificate
+ * with this site's name in it (browser-valid https). No [Y/n] — the user
+ * opted in at the offer; this is the restart they were promised.
+ *
+ * Probe-with-retry rather than trusting the user's Enter: Apache takes a few
+ * seconds to come back, and "you said it restarted" is exactly the kind of
+ * assertion this codebase has learned not to build on. Returns false when it
+ * never comes up, and the caller falls back to the classic flow rather than
+ * dying — the folder already exists, which is all the classic path needs.
+ *
+ * Own short-lived readline interface: the shared one closed after the
+ * premium picker (see the stdin freeze lore), and this runs seconds later.
+ */
+async function awaitCombinedRestart(hostname) {
+  const httpsToo = sslCertPresent();
+  console.log(
+    `${cyan(STEP)} Now the one-time restart. In Laragon: ${bold('Stop All')}, then ${bold('Start All')}.\n` +
+      `  This activates instant mode for every future scaffold${httpsToo ? `, and makes https://${hostname}\n  valid (the certificate regenerates to include the new site)` : ''}.`,
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    await rl.question('  Press Enter here once Laragon is back up… ');
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (await wildcardActive()) {
         console.log(`${green(OK)} Instant mode is ACTIVE — this scaffold needs no Laragon reload.\n`);
@@ -401,10 +433,9 @@ async function offerInstantMode(rl) {
       }
       if (attempt < 2) {
         console.log(`  ${yellow(WARN)} Not serving through the wildcard yet (Apache may still be starting). Press Enter to re-check…`);
-        // Field-observed on this flow's first real run (2026-08-12): Laragon's
-        // own window stopped responding during the Stop All, and closing and
-        // reopening it recovered. The advice belongs HERE, at the moment the
-        // user is staring at a wedged tray app wondering if they broke it.
+        // Field-observed (2026-08-12): Laragon's own window stopped responding
+        // during a Stop All, and closing and reopening it recovered. The advice
+        // belongs HERE, at the moment the user is staring at a wedged tray app.
         console.log(`  ${dim('If Laragon itself has stopped responding, close and reopen it, Start All, then press Enter.')}`);
         await rl.question('');
       }
@@ -414,6 +445,9 @@ async function offerInstantMode(rl) {
         `  scaffold. Run \`${CLI} setup\` afterwards; it verifies instant mode and says what is missing.\n`,
     );
     return false;
+  } finally {
+    rl.close();
+  }
 }
 
 /**
@@ -728,14 +762,10 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   let premiumSelection;
   try {
   if (!instant && prompts) {
+    // 'deferred' (truthy) when the user opts in: the conf is written but the
+    // restart waits until the site folder exists, where one restart delivers
+    // instant mode AND browser-valid https — see awaitCombinedRestart.
     instant = await offerInstantMode(prompts);
-    if (instant) {
-      // The Stop All → Start All the user just did restarted MySQL too, so
-      // the preflight snapshot from before it is stale — without this
-      // re-probe, a MySQL that was down pre-restart and up now would still
-      // trip the instant-mode hard block below.
-      state.mysqlUp = await mysqlUp();
-    }
   } else if (wildcardConfInstalled() && !instant) {
     // Non-interactive (--yes, pipes): no prompt, keep the classic path and
     // say why it is slower.
@@ -769,7 +799,11 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   // scaffold triggers can itself start MySQL, so refusing would reject a run that
   // would have worked — warn and let the confirmation carry the decision.
   if (!state.mysqlUp) {
-    if (instant) {
+    // Hard-block only when instant mode is ACTIVE (=== true): nothing ahead
+    // would start MySQL. 'deferred' means a full Stop All → Start All is
+    // coming before the database step, which starts MySQL too — same logic
+    // as the classic reload below, so both get the warn-and-continue path.
+    if (instant === true) {
       bail(
         `${red(BAD)} MySQL is not listening on :${MYSQL_PORT}, and this scaffold needs it to create the\n` +
           '  database. Click Start All in Laragon and try again.\n' +
@@ -778,8 +812,8 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       return;
     }
     console.log(
-      `${yellow(WARN)} MySQL is not listening on :${MYSQL_PORT} yet. The Laragon reload this scaffold\n` +
-        '  triggers may start it — if it does not, the run will stop at the database step and\n' +
+      `${yellow(WARN)} MySQL is not listening on :${MYSQL_PORT} yet. The ${instant === 'deferred' ? 'one-time restart coming up' : 'Laragon reload this scaffold'}\n` +
+        `  ${instant === 'deferred' ? 'should start it' : 'triggers may start it'} — if it does not, the run will stop at the database step and\n` +
         '  can be finished later with `resume`.\n',
     );
   }
@@ -827,6 +861,20 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       );
     });
 
+    // Resolve a deferred instant-mode enable now that the folder exists — the
+    // moment ONE restart can both load the wildcard conf and put this site's
+    // name into Laragon's regenerated certificate. If the restart never takes,
+    // fall back to the classic flow below rather than dying: the folder is in
+    // place, which is all the classic path needs.
+    if (instant === 'deferred') {
+      if (await awaitCombinedRestart(hostname)) {
+        instant = true;
+        // That restart bounced MySQL too — refresh the stale preflight answer.
+        state.mysqlUp = await mysqlUp();
+      } else {
+        instant = false;
+      }
+    }
     if (instant) {
       console.log(`${cyan(STEP)} Instant mode: no Laragon reload needed.`);
       // Kept, not discarded: every proof after this point uses loopback with an
