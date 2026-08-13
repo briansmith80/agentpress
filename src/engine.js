@@ -354,6 +354,64 @@ async function confirmScaffold(name, hostname) {
 }
 
 /**
+ * The missing-setup journey used to be one dim tip line, and everyone who
+ * sailed past it got the WORST version of the product first: the classic
+ * Laragon-reload flow, with its machine-wide Apache/MySQL blip, minutes of
+ * vhost polling, and the reload-staleness failures instant mode exists to
+ * delete. So an interactive scaffold that finds instant mode missing now
+ * offers the enable inline — ONLY the mandatory half of setup (the wildcard
+ * conf); the premium wizard stays setup's own business.
+ *
+ * The conf only takes effect after a full Stop All → Start All, so the offer
+ * pauses for that and then PROVES activity with the same live probe setup
+ * uses (conf-on-disk ≠ conf-in-Apache). Declining, --yes and non-TTY runs
+ * keep the classic path exactly as before. Returns true when instant mode is
+ * verified ACTIVE.
+ */
+async function offerInstantMode() {
+  const confAlready = wildcardConfInstalled();
+  console.log(
+    confAlready
+      ? `${cyan(STEP)} Instant mode is installed but not active yet (the running Apache predates its conf).`
+      : `${cyan(STEP)} Instant mode is not enabled. Enabling it makes this and every future scaffold instant:\n` +
+          '  no Laragon reloads, no machine-wide Apache/MySQL blip, sites live the moment they exist.',
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question('? Enable it now? The one-time cost is a full Stop All → Start All in Laragon. [Y/n]: ')).trim();
+    // Default is YES — this prompt exists because the old opt-in tip was
+    // ignored, and Enter-through should land on the good path.
+    if (/^n(o)?$/i.test(answer)) return false;
+    if (!confAlready) {
+      const { suffix } = await installWildcardConf();
+      console.log(`${green(OK)} Wildcard vhost written (serves *${suffix} from www\\<name>\\public${sslCertPresent() ? ', http + https' : ''}).`);
+    }
+    // Probe-with-retry rather than trusting the user's Enter: Apache takes a
+    // few seconds to come back, and "you said it restarted" is exactly the
+    // kind of assertion this codebase has learned not to build on.
+    console.log(`${cyan(STEP)} In Laragon: ${bold('Stop All')}, then ${bold('Start All')}. Press Enter here once it is back up…`);
+    await rl.question('');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (await wildcardActive()) {
+        console.log(`${green(OK)} Instant mode is ACTIVE — this scaffold needs no Laragon reload.\n`);
+        return true;
+      }
+      if (attempt < 2) {
+        console.log(`  ${yellow(WARN)} Not serving through the wildcard yet (Apache may still be starting). Press Enter to re-check…`);
+        await rl.question('');
+      }
+    }
+    console.log(
+      `${yellow(WARN)} Still not active — continuing with the classic Laragon-reload flow for this\n` +
+        `  scaffold. Run \`${CLI} setup\` afterwards; it verifies instant mode and says what is missing.\n`,
+    );
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+/**
  * Instant-mode reachability probe: serve a token from the site's public/
  * through the wildcard vhost, over the loopback with an explicit Host
  * header — no DNS, no hosts-entry dependency, no per-site vhost. Replaces
@@ -587,15 +645,26 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
   // convention, so this scaffold needs no Laragon reload at all. Activity
   // is PROVEN by a live probe (conf-on-disk ≠ conf-in-Apache until the
   // one-time restart happened).
-  const instant = wildcardConfInstalled() && (await wildcardActive());
-  if (wildcardConfInstalled() && !instant) {
+  let instant = wildcardConfInstalled() && (await wildcardActive());
+  if (!instant && process.stdin.isTTY && !yes) {
+    instant = await offerInstantMode();
+    if (instant) {
+      // The Stop All → Start All the user just did restarted MySQL too, so
+      // the preflight snapshot from before it is stale — without this
+      // re-probe, a MySQL that was down pre-restart and up now would still
+      // trip the instant-mode hard block below.
+      state.mysqlUp = await mysqlUp();
+    }
+  } else if (wildcardConfInstalled() && !instant) {
+    // Non-interactive (--yes, pipes): no prompt, keep the classic path and
+    // say why it is slower.
     console.log(
       `${yellow(WARN)} Instant mode is installed but not active yet (Apache has not restarted since setup).\n` +
         '  Falling back to the classic Laragon-reload flow for this scaffold. One-time fix:\n' +
         '  Stop All → Start All in Laragon, and every future scaffold skips reloads entirely.\n',
     );
-  } else if (!wildcardConfInstalled()) {
-    console.log(`  Tip: run \`${CLI} setup\` once to enable instant scaffolds (no more Laragon reloads).\n`);
+  } else if (!instant) {
+    console.log(`  ${dim(`Instant mode is not enabled — using the classic Laragon-reload flow (slower). Run \`${CLI} setup\` once to fix.`)}\n`);
   }
 
   if (!instant && !warnedAboutReloadThisSession) {
