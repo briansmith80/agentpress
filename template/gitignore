@@ -1,5 +1,7 @@
 .env
 .agentpress.lock
+# Per-site MCP wiring for Claude Code — carries the application password.
+.mcp.json
 # Database snapshots from the menu's "Snapshot the database" — a dump is the
 # whole site, password hashes included; it must never reach a repo.
 /snapshots/

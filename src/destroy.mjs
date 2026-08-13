@@ -57,9 +57,18 @@ function commandNeverRan(result) {
  * was uninstalled since scaffold — both are reported instead of being
  * counted as a successful removal.
  */
-async function removeMcpEntries(agents, siteHostname, onStep) {
+async function removeMcpEntries(agents, siteHostname, onStep, projectDir) {
   const removed = [];
   if (agents.includes('claude')) {
+    // 1.10.0+: claude's wiring is the site's own .mcp.json, which leaves with
+    // the folder — nothing global to clean. The user-scope path below stays
+    // for sites wired before 1.10.0, whose entry really is machine-global.
+    const hasProjectWiring = projectDir
+      ? await readFile(join(projectDir, '.mcp.json'), 'utf8').then(
+          (raw) => Boolean(JSON.parse(raw)?.mcpServers?.wordpress),
+          () => false,
+        )
+      : false;
     let currentUrl = null;
     try {
       const cfg = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf8'));
@@ -67,7 +76,10 @@ async function removeMcpEntries(agents, siteHostname, onStep) {
     } catch {
       // unreadable config — fall through to the conservative path below
     }
-    if (!urlBelongsToSite(currentUrl, siteHostname)) {
+    if (hasProjectWiring && !urlBelongsToSite(currentUrl, siteHostname)) {
+      onStep?.("  (claude's wiring is this site's own .mcp.json — it leaves with the folder)");
+      removed.push('claude');
+    } else if (!urlBelongsToSite(currentUrl, siteHostname)) {
       onStep?.(
         currentUrl
           ? `  (claude's wordpress MCP entry points at ${currentUrl} — another site's wiring, leaving it)`
@@ -159,7 +171,7 @@ export async function destroySite({ projectDir, onStep }) {
   const publicDir = join(projectDir, 'public');
 
   onStep?.('removing MCP registrations…');
-  const removedAgents = await removeMcpEntries(cfg.agents || [], env.SITE_HOST || null, onStep);
+  const removedAgents = await removeMcpEntries(cfg.agents || [], env.SITE_HOST || null, onStep, projectDir);
 
   let appPasswordRevoked = null;
   if (env.WP_ADMIN_USER) {

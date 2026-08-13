@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { verifyMcpEndpoint, configureCursor, configureOpenCode, readWiredHostnames } from '../src/mcp.mjs';
+import { verifyMcpEndpoint, configureClaude, configureCursor, configureOpenCode, readWiredHostnames } from '../src/mcp.mjs';
 
 const CREDS = { username: 'admin', password: 'pw-1234567890' };
 
@@ -198,6 +198,65 @@ test('config writes leave no temp files behind', async () => {
     const entries = await (await import('node:fs/promises')).readdir(join(home, '.cursor'));
     assert.equal(entries.filter((f) => f.includes('agentpress-tmp')).length, 0);
   });
+});
+
+/** A throwaway site folder for the per-site claude wiring tests. */
+async function withFakeSite(run) {
+  const site = await mkdtemp(join(tmpdir(), 'agentpress-site-'));
+  try {
+    return await run(site);
+  } finally {
+    await rm(site, { recursive: true, force: true });
+  }
+}
+
+test("configureClaude writes the site's own .mcp.json and gitignores it — never a global config", async () => {
+  await withFakeHome(async (home) => {
+    await withFakeSite(async (site) => {
+      await writeFile(join(site, '.gitignore'), '.env\n', 'utf8');
+      await configureClaude({ wpApiUrl: 'http://a.test/x', siteDir: site, ...CREDS });
+      const cfg = JSON.parse(await readFile(join(site, '.mcp.json'), 'utf8'));
+      assert.equal(cfg.mcpServers.wordpress.env.WP_API_URL, 'http://a.test/x');
+      assert.ok(cfg.mcpServers.playwright);
+      // The credential lives in this file — an unignored .mcp.json is a leak
+      // the moment the user pushes their site anywhere.
+      const gi = await readFile(join(site, '.gitignore'), 'utf8');
+      assert.ok(
+        gi.split(/\r?\n/).some((l) => l.trim() === '.mcp.json'),
+        '.mcp.json must be gitignored — it carries the application password',
+      );
+      // And nothing global was touched: per-site wiring is the whole point.
+      await assert.rejects(() => readFile(join(home, '.claude.json'), 'utf8'), /ENOENT/);
+    });
+  });
+});
+
+test('configureClaude is idempotent about the gitignore line and preserves user-owned project servers', async () => {
+  await withFakeSite(async (site) => {
+    await writeFile(join(site, '.gitignore'), '.env', 'utf8'); // no trailing newline, on purpose
+    await writeFile(join(site, '.mcp.json'), JSON.stringify({ mcpServers: { mine: { command: 'node' } } }), 'utf8');
+    await configureClaude({ wpApiUrl: 'http://a.test/x', siteDir: site, ...CREDS });
+    await configureClaude({ wpApiUrl: 'http://a.test/x', siteDir: site, ...CREDS });
+    const cfg = JSON.parse(await readFile(join(site, '.mcp.json'), 'utf8'));
+    assert.ok(cfg.mcpServers.mine, "the user's own project server must survive");
+    assert.ok(cfg.mcpServers.wordpress);
+    const gi = await readFile(join(site, '.gitignore'), 'utf8');
+    assert.equal(gi.split(/\r?\n/).filter((l) => l.trim() === '.mcp.json').length, 1, 'one ignore line, not one per rewire');
+    assert.ok(gi.startsWith('.env\n'), 'the missing trailing newline must be repaired, not glued onto');
+  });
+});
+
+test('configureClaude refuses an unparseable .mcp.json and leaves it byte-identical', async () => {
+  await withFakeSite(async (site) => {
+    const original = '{\n  // comment JSON.parse rejects\n  "mcpServers": {}\n}\n';
+    await writeFile(join(site, '.mcp.json'), original, 'utf8');
+    await assert.rejects(() => configureClaude({ wpApiUrl: 'http://a.test/x', siteDir: site, ...CREDS }), /refusing to rewrite/i);
+    assert.equal(await readFile(join(site, '.mcp.json'), 'utf8'), original);
+  });
+});
+
+test('configureClaude without a siteDir throws rather than guessing a location for a credential file', async () => {
+  await assert.rejects(() => configureClaude({ wpApiUrl: 'http://a.test/x', ...CREDS }), /siteDir/);
 });
 
 test('readWiredHostnames reports the site each readable agent config points at', async () => {

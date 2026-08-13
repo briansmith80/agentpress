@@ -624,8 +624,22 @@ function wiredHostFor(agentKey) {
   //   false   -> readable, but nothing is wired
   //   string  -> the hostname it points at
   let config;
-  if (agentKey === 'claude') config = read(join(home, '.claude.json'));
-  else if (agentKey === 'cursor') config = read(join(home, '.cursor', 'mcp.json'));
+  if (agentKey === 'claude') {
+    // Per-site first (1.10.0+): this site's own .mcp.json wins inside this
+    // folder — project scope beats user scope once approved, spiked live —
+    // so when it names a wordpress server it IS the answer. The global file
+    // remains the fallback for sites wired before 1.10.0.
+    const project = read(join(CWD, '.mcp.json'));
+    const projectUrl = project?.mcpServers?.wordpress?.env?.WP_API_URL;
+    if (projectUrl) {
+      try {
+        return new URL(String(projectUrl)).hostname.toLowerCase();
+      } catch {
+        return false;
+      }
+    }
+    config = read(join(home, '.claude.json'));
+  } else if (agentKey === 'cursor') config = read(join(home, '.cursor', 'mcp.json'));
   else if (agentKey === 'opencode') config = read(join(home, '.config', 'opencode', 'opencode.json'));
   else return null; // codex config is TOML we do not parse
   if (!config) return null;
