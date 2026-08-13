@@ -53,6 +53,14 @@ test('agent command names match src/agents.mjs', () => {
   const fromSrc = grab(agents, 'AGENT_COMMANDS');
   assert.ok(fromMenu, 'menu has AGENT_COMMANDS');
   assert.equal(fromMenu, fromSrc, 'the menu launches different binaries than the scaffolder detects');
+  // The rename fallbacks (cursor-agent → agent) are part of the same contract:
+  // detection accepting a name the menu never launches would strand the user
+  // with a wired agent and a dead menu button.
+  const fallbackMenu = grab(menu, 'AGENT_COMMAND_FALLBACKS');
+  const fallbackSrc = grab(agents, 'AGENT_COMMAND_FALLBACKS');
+  assert.ok(fallbackMenu, 'menu has AGENT_COMMAND_FALLBACKS');
+  assert.equal(fallbackMenu, fallbackSrc, 'the rename fallbacks drifted between the menu and the scaffolder');
+  assert.equal(fromSrc.includes('cursor=cursor-agent'), true, 'cursor primary should stay the unambiguous cursor-agent');
 });
 
 test('the menu reads the same agent config paths and JSON shapes as src/mcp.mjs', () => {
