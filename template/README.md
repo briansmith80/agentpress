@@ -35,6 +35,8 @@ day one, and again any time MCP starts returning 401.
 ## Files
 
 - `.env` — DB credentials, admin credentials, site hostname. Gitignored.
+- `.mcp.json` — this site's own Claude Code MCP wiring. Gitignored: it holds the site's
+  application password, so treat it like `.env`.
 - `public/wp-config.php` — also holds the DB credentials; also gitignored. If you change the
   ignore rules, keep both of these out of any repo you push.
 - `sandbox.config.json` — plugins/agents this site was scaffolded with.
@@ -74,13 +76,16 @@ Two things it writes under `public/`, and nothing else:
 
 ## When the AI agents can't see this site
 
-The MCP wiring is machine-wide: there is one `wordpress` server per agent CLI, and it points
-at whichever site was scaffolded (or rewired) most recently. So if you scaffold another site,
-or destroy the site that owned the wiring, your agents stop being able to reach **this** one.
-The menu warns you about that before it launches an agent, and offers **Point MCP here** to
-fix it on the spot.
+**Claude Code** uses this site's own `.mcp.json` (gitignored — it holds this site's
+credential), so its wiring survives other scaffolds; it just asks once, on first launch here,
+to enable this site's MCP servers. **Cursor, Codex and OpenCode** share one machine-wide
+`wordpress` server each, pointing at whichever site was scaffolded (or rewired) most
+recently — so scaffolding another site, or destroying the one that owned the wiring, takes
+those agents away from **this** one. The menu warns you before it launches an agent, and
+offers **Point MCP here** to fix it on the spot.
 
-To point them back here, from this directory:
+To point them back here (and to refresh this site's own Claude Code wiring), from this
+directory:
 
 ```bash
 npx create-agentpress@latest rewire
