@@ -398,6 +398,11 @@ async function offerInstantMode() {
       }
       if (attempt < 2) {
         console.log(`  ${yellow(WARN)} Not serving through the wildcard yet (Apache may still be starting). Press Enter to re-check…`);
+        // Field-observed on this flow's first real run (2026-08-12): Laragon's
+        // own window stopped responding during the Stop All, and closing and
+        // reopening it recovered. The advice belongs HERE, at the moment the
+        // user is staring at a wedged tray app wondering if they broke it.
+        console.log(`  ${dim('If Laragon itself has stopped responding, close and reopen it, Start All, then press Enter.')}`);
         await rl.question('');
       }
     }
