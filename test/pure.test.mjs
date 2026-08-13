@@ -11,6 +11,7 @@ import { validateSiteName } from '../src/names.mjs';
 import { parseDbHost, sanitizeDbIdentifier, escapeSqlString } from '../src/mysql.mjs';
 import { parseArgs, parseEnvFile } from '../src/engine.js';
 import { hostsContentEntryAddresses, isLoopbackAddress } from '../src/laragon.mjs';
+import { sanCoversHostname } from '../src/wildcard.mjs';
 import { zipMatchesSlug } from '../src/plugins.mjs';
 import { applyAgentSections } from '../src/templates.mjs';
 import { compareVersionsDesc } from '../src/wp.mjs';
@@ -231,4 +232,21 @@ test('the empty-state names a command the reader can actually run', () => {
   assert.doesNotMatch(empty, /checkout/i);
   assert.match(empty, /npx create-agentpress@latest <name>/, 'the default must be the documented route');
   assert.match(formatEnvironmentsTable([], { cli: 'node index.js' }), /node index\.js <name>/, 'and the caller can override it');
+});
+
+// REGRESSION (field, 2026-08-13): a fresh site's scaffold recorded https and
+// minted an https admin link, and Chrome refused it with
+// ERR_CERT_COMMON_NAME_INVALID. Laragon's certificate lists every site
+// EXPLICITLY (regenerated only when Laragon restarts) plus a trailing
+// `*.test` — and browsers reject TLD-level wildcards, so that entry covers
+// nothing. These pin the browser's rules, not the cert's contents.
+test('sanCoversHostname honours explicit entries and rejects the TLD-level wildcard', () => {
+  const laragonStyle = 'DNS:localhost, DNS:doncour.test, DNS:*.doncour.test, DNS:existing-site.test, DNS:*.existing-site.test, DNS:*.localhost, DNS:*.test';
+  assert.equal(sanCoversHostname(laragonStyle, 'existing-site.test'), true, 'an explicitly listed site is covered');
+  assert.equal(sanCoversHostname(laragonStyle, 'EXISTING-SITE.test'), true, 'hostname comparison is case-insensitive');
+  assert.equal(sanCoversHostname(laragonStyle, 'test3.test'), false, 'a NEW site is NOT covered — `*.test` is a TLD-level wildcard browsers reject');
+  assert.equal(sanCoversHostname(laragonStyle, 'sub.doncour.test'), true, 'a multi-label wildcard covers one extra label');
+  assert.equal(sanCoversHostname(laragonStyle, 'a.b.doncour.test'), false, 'but only ONE extra label');
+  assert.equal(sanCoversHostname('', 'anything.test'), false);
+  assert.equal(sanCoversHostname('DNS:*.test', ''), false);
 });

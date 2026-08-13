@@ -35,7 +35,7 @@ import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
-import { ensureHostsEntry, fetchViaLoopback, flushDnsCache, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
+import { certCoversHostname, ensureHostsEntry, fetchViaLoopback, flushDnsCache, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
 import { randomBytes } from 'node:crypto';
 
 const TEMPLATE_DIR = fileURLToPath(new URL('../template', import.meta.url));
@@ -441,7 +441,8 @@ async function probeInstant(hostname, projectDir, { timeoutMs = 12_000, tls = fa
 }
 
 /**
- * Does https serve THIS site, proven by a token rather than by any response at all?
+ * Does https serve THIS site in a way a BROWSER will accept — proven by a
+ * token AND by the certificate actually naming the site?
  *
  * The scheme recorded here is not cosmetic: it goes into `.env` as SITE_SCHEME,
  * into wp-config's per-request WP_HOME, into the admin login link and into the
@@ -450,9 +451,17 @@ async function probeInstant(hostname, projectDir, { timeoutMs = 12_000, tls = fa
  * welcome page — so a site would record `https` while https served something that
  * was not the site. One short attempt, because a false negative merely records
  * `http`, which is always safe and always true.
+ *
+ * The cert check exists because a healthy TLS socket is NOT browser-valid
+ * https: our probes skip validation, but Chrome refused a fresh site with
+ * ERR_CERT_COMMON_NAME_INVALID (field, 2026-08-13) — Laragon only adds a
+ * site's name to its certificate when IT restarts, and the `*.test` SAN
+ * browsers get instead is a TLD-level wildcard they reject. Without this
+ * gate the scaffold minted an https admin link the browser refused to open.
  */
 async function httpsServesSite(hostname, projectDir) {
   if (!sslCertPresent()) return false;
+  if (!(await certCoversHostname(hostname))) return false;
   return probeInstant(hostname, projectDir, { timeoutMs: 3000, tls: true });
 }
 
@@ -783,19 +792,25 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       }
       const scheme = (await httpsServesSite(hostname, projectDir)) ? 'https' : 'http';
       console.log(`${green(OK)} ${scheme}://${hostname} is live (served by the wildcard vhost)`);
-      // Say how to GET https when the machine plainly could serve it. A certificate on
-      // disk with :443 not answering for this site means the running Apache predates the
-      // wildcard conf's https half — the one-time Stop All → Start All that `setup`
-      // already explains for itself, and that a scaffold said nothing about. Reported by
-      // a user who had to work it out after a scaffold reported http.
-      //
-      // Only when the cert EXISTS: with no cert, http is the only option and there is
-      // nothing to act on, so mentioning it would be noise.
+      // Say how to GET https when the machine plainly could serve it — and say the RIGHT
+      // reason, because there are two distinct ones. New-site case (the common one):
+      // Laragon only writes a site's name into its certificate when IT restarts, and the
+      // `*.test` SAN browsers see instead is a TLD-level wildcard they reject — so a
+      // fresh site's https is browser-invalid (ERR_CERT_COMMON_NAME_INVALID, field
+      // 2026-08-13) until the next Stop All → Start All. Cert-covers-but-not-serving
+      // case: the running Apache predates the wildcard conf's https half; same remedy,
+      // different mechanism. Only when the cert EXISTS: with no cert, http is the only
+      // option and there is nothing to act on, so mentioning it would be noise.
       if (scheme === 'http' && sslCertPresent()) {
         scaffoldWarnings.push(
-          'https is available on this machine but not being served yet — in Laragon do a\n' +
-            '    one-time Stop All then Start All (not just Reload), approving any Windows\n' +
-            `    permission prompt. Then this site answers on https://${hostname}.`,
+          (await certCoversHostname(hostname))
+            ? 'https is available on this machine but not being served yet — in Laragon do a\n' +
+                '    one-time Stop All then Start All (not just Reload), approving any Windows\n' +
+                `    permission prompt. Then this site answers on https://${hostname}.`
+            : "https for this new site isn't valid yet: Laragon adds a site's name to its\n" +
+                '    certificate only when it restarts. Do a Stop All then Start All in Laragon\n' +
+                `    (approving any prompts) and https://${hostname} becomes valid. Every link\n` +
+                '    below uses http, which works right now.',
         );
       }
       await finishInstall({ name, hostname, projectDir, extraPlugins, premiumSelection, scheme, warnings: scaffoldWarnings });
