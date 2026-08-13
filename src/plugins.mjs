@@ -488,8 +488,13 @@ export async function patchOxygenHtmlToPage({ path, onStep }) {
 
   // Not the string we know: the vendor changed this file. Refuse and SAY SO —
   // guessing at a rewrite of someone else's code is how you corrupt an install.
+  // (The message used to point at PLANNING/TODO.md, a maintainer-local file that
+  // stopped shipping in 1.9.0 — a user can't follow that reference.)
   if (!source.includes(BROKEN_WRAPPER)) {
-    onStep?.('(Oxygen html-to-page looks different from the build we know — leaving it alone; see PLANNING/TODO.md)');
+    onStep?.(
+      '(Oxygen html-to-page looks different from the build this patch knows — leaving it alone. ' +
+        'If that tool fails on every input, a newer create-agentpress may know this build.)',
+    );
     return { status: 'unrecognised' };
   }
 

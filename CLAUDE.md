@@ -196,9 +196,16 @@ Prefer extending an existing seam over adding a call site: `doctor`'s `row()`/`b
 
 ## Known-broken, tracked but unfixed
 
-Oxygen's `html-to-page` MCP tool fails on **every** input on 6.2.0-beta.2 — the builder's
+Oxygen's `html-to-page` MCP tool fails on **every** input unpatched — the builder's
 `parse_fragment()` pairs a leading `<meta charset>` with `LIBXML_HTML_NOIMPLIED`, which trips
-a spurious "Memory allocation failed" on libxml ≥ 2.10. Workaround is `edit-post` +
-`insert-stylesheet`. The break ships from the **cached premium zip** in
-`~/.agentpress/premium-plugins/`, so every scaffold installs it. Candidate fixes and the
-full diagnosis are in `PLANNING/TODO.md`; this needs a scope decision, not a patch.
+a spurious "Memory allocation failed" on libxml ≥ 2.10. **Still unfixed upstream as of
+6.2.0-beta.3** (verified live 2026-08-12: beta 3's pristine file carries the same broken
+wrapper line — its changelog's "html-to-page" fix was a different, PHP 7.4 parse-error bug —
+and an MCP probe against a beta-3 site succeeded only because our patch was in place).
+`patchOxygenHtmlToPage` in `src/plugins.mjs` carries the tool: exact-line match only,
+original kept beside as `.agentpress-bak`, applied at scaffold after plugin updates and
+re-applied by `update` — which is how it survived the beta 2 → beta 3 jump. If the vendor
+ever edits that line the patch deliberately no-ops and says so; that is the moment to
+re-diagnose, never to loosen the match. The upstream report is still unfiled; beta 3 ships
+an in-band `report-bug` MCP tool that drafts the issue with environment attached — filing is
+outward-facing, so it waits for the operator's go-ahead.
