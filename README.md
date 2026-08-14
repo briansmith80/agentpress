@@ -10,6 +10,8 @@
 npx create-agentpress@latest my-site
 ```
 
+<img src="docs/hero.svg" alt="create-agentpress scaffolding a site: one command, live steps, then URLs and MCP wiring" width="720">
+
 That gives you a WordPress site at `my-site.test` with its own database and
 dedicated MySQL user, permalinks working, premium plugins installed and licensed — and
 **your AI agent already wired to it**, able to build pages through the
