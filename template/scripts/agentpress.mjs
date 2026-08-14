@@ -8,7 +8,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 const VERSION = '__AGENTPRESS_VERSION__';
@@ -400,6 +400,40 @@ function newestSnapshot() {
 }
 
 /**
+ * The debug-logging STATE, read from wp-config.php — never inferred from the
+ * log file's existence alone. WordPress creates debug.log only on the FIRST
+ * logged notice, so "file absent" conflated two opposite states, and a user
+ * who had just enabled debug was told logging was off (field report,
+ * 2026-08-14). Mirrors core's wp_debug_mode(): WP_DEBUG_LOG of true/'true'/1
+ * logs to wp-content/debug.log, any other non-false value IS the log path.
+ * Quoted string values count as on ('true' the string is what `wp config set
+ * WP_DEBUG true` writes when --raw is forgotten, and PHP treats it truthy).
+ * Returns { enabled: true|false|null (config unreadable), path }.
+ */
+function debugLogState() {
+  const fallback = join(CWD, 'public', 'wp-content', 'debug.log');
+  let config;
+  try {
+    config = readFileSync(join(CWD, 'public', 'wp-config.php'), 'utf8');
+  } catch {
+    return { enabled: null, path: fallback };
+  }
+  const value = (name) => {
+    const m = config.match(new RegExp(`define\\(\\s*['"]${name}['"]\\s*,\\s*([^)]+?)\\s*\\)`, 'i'));
+    if (!m) return null;
+    return m[1].trim().replace(/^['"]|['"]$/g, '').toLowerCase();
+  };
+  const isOn = (v) => v !== null && v !== '' && v !== 'false' && v !== '0';
+  const logValue = value('WP_DEBUG_LOG');
+  const enabled = isOn(value('WP_DEBUG')) && isOn(logValue);
+  let path = fallback;
+  if (enabled && logValue !== 'true' && logValue !== '1') {
+    path = isAbsolute(logValue) ? logValue : join(CWD, 'public', logValue);
+  }
+  return { enabled, path };
+}
+
+/**
  * Last lines of a file WITHOUT reading it whole — debug.log on a broken site
  * grows to hundreds of MB, and readFileSync of that inside an interactive
  * menu is a hang, not a feature.
@@ -729,7 +763,7 @@ for (;;) {
     return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
   });
   const latestSnapshot = newestSnapshot();
-  const debugLog = join(CWD, 'public', 'wp-content', 'debug.log');
+  const debug = debugLogState();
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
@@ -737,7 +771,11 @@ for (;;) {
     ...(wiringBroken ? [{ value: 'rewire', label: 'Point MCP here', hint: yellow('⚠ fixes the wiring above') }] : []),
     { value: 'snapshot', label: 'Snapshot the database', hint: 'rollback point before agent sessions' },
     ...(latestSnapshot ? [{ value: 'restore', label: 'Restore the latest snapshot', hint: latestSnapshot }] : []),
-    { value: 'errors', label: 'Show recent errors', hint: existsSync(debugLog) ? 'wp-content/debug.log' : 'debug logging is off' },
+    {
+      value: 'errors',
+      label: 'Show recent errors',
+      hint: existsSync(debug.path) ? 'wp-content/debug.log' : debug.enabled ? 'debug on — nothing logged yet' : 'debug logging is off',
+    },
     { value: 'shell', label: 'Open a terminal here' },
     ...(latestVersion ? [{ value: 'update', label: 'Update this site', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
@@ -838,14 +876,21 @@ for (;;) {
       }
     }
   } else if (choice === 'errors') {
-    if (!existsSync(debugLog)) {
+    if (!existsSync(debug.path)) {
+      // Two OPPOSITE states used to print the same "off" message: WordPress
+      // only creates debug.log on the first logged notice, so enabled-but-
+      // quiet looked identical to disabled. Field report: a user enabled
+      // debug and the menu told them it was off.
       console.log(
-        `\n  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
-          `  ${dim('Turn it on with:')} ${pink('npm run wp -- config set WP_DEBUG true --raw')}\n` +
-          `  ${dim('and:')}             ${pink('npm run wp -- config set WP_DEBUG_LOG true --raw')}\n`,
+        debug.enabled
+          ? `\n  ${dim('Debug logging is ON — nothing has been logged yet, which is a healthy sign.')}\n` +
+              `  ${dim('The log appears at wp-content/debug.log with the first error or notice.')}\n`
+          : `\n  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
+              `  ${dim('Turn it on with:')} ${pink('npm run wp -- config set WP_DEBUG true --raw')}\n` +
+              `  ${dim('and:')}             ${pink('npm run wp -- config set WP_DEBUG_LOG true --raw')}\n`,
       );
     } else {
-      const lines = tailFile(debugLog);
+      const lines = tailFile(debug.path);
       if (lines.length === 0) {
         console.log(`\n  ${dim('wp-content/debug.log exists but is empty — nothing has gone wrong yet.')}\n`);
       } else {
