@@ -226,6 +226,8 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
   two-keystroke rollback.
 - **Show recent errors** — the tail of `wp-content\debug.log`, or how to turn debug
   logging on when there isn't one.
+- **Open in VS Code** (or Cursor) — the site folder in your editor. Appears only when one
+  is actually installed.
 - **Open a terminal here** — Windows Terminal with your default profile, already in the
   site folder (a plain Command Prompt on machines without it).
 - **Update this site** — appears only when npm has a newer version, and runs the update

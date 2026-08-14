@@ -181,6 +181,29 @@ async function agentLaunchCommand(key) {
   return primary;
 }
 
+/**
+ * The code editor to offer, or null — the menu entry only appears when one is
+ * actually installed, like every other detection-driven item. The GUI exe is
+ * spawned directly (shell:false, real argv — live-verified with the spaces in
+ * "Microsoft VS Code") rather than the `code` .cmd shim, whose shell layer
+ * reintroduces the cmd.exe quoting hazards the terminal item already paid
+ * for. Standard user-scope and system install paths only; a custom install
+ * location simply hides the entry rather than risking a bare-name spawn,
+ * which searches the CURRENT DIRECTORY first — and this runs inside a site
+ * folder agents write to.
+ */
+function findCodeEditor() {
+  const candidates = [
+    process.env.LOCALAPPDATA && { label: 'VS Code', exe: join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code', 'Code.exe') },
+    { label: 'VS Code', exe: join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft VS Code', 'Code.exe') },
+    process.env.LOCALAPPDATA && { label: 'Cursor', exe: join(process.env.LOCALAPPDATA, 'Programs', 'cursor', 'Cursor.exe') },
+  ].filter(Boolean);
+  for (const c of candidates) {
+    if (existsSync(c.exe)) return c;
+  }
+  return null;
+}
+
 /** Fire-and-forget window spawn; resolves true only when the process actually started ('spawn' fires), so callers can fall back or name what opened. */
 function trySpawnDetached(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -742,6 +765,10 @@ const latestVersion = await checkUpdate();
 // prompt either way.
 if (!SHOW_BANNER) console.log(`Welcome to AgentPress v${VERSION}.\n`);
 
+// Static per session: editors do not appear mid-menu, and existsSync per
+// render would be pure waste.
+const codeEditor = findCodeEditor();
+
 for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
   // Detection-driven entries: an item appears only when its situation does.
@@ -776,6 +803,7 @@ for (;;) {
       label: 'Show recent errors',
       hint: existsSync(debug.path) ? 'wp-content/debug.log' : debug.enabled ? 'debug on — nothing logged yet' : 'debug logging is off',
     },
+    ...(codeEditor ? [{ value: 'editor', label: `Open in ${codeEditor.label}`, hint: 'this site folder' }] : []),
     { value: 'shell', label: 'Open a terminal here' },
     ...(latestVersion ? [{ value: 'update', label: 'Update this site', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
@@ -797,6 +825,9 @@ for (;;) {
   } else if (choice === 'site') {
     openBrowser(SITE);
     console.log(`  ${dim(`→ opened ${SITE} in your browser`)}\n`);
+  } else if (choice === 'editor') {
+    const ok = await trySpawnDetached(codeEditor.exe, [CWD], { shell: false });
+    console.log(ok ? `  ${dim(`→ opened ${codeEditor.label} in this folder`)}\n` : `  ${dim(`(could not launch ${codeEditor.label} — is it still installed?)`)}\n`);
   } else if (choice === 'shell') {
     const opened = await openTerminalHere();
     console.log(opened ? `  ${dim(`→ opened ${opened} in this folder`)}\n` : '');
