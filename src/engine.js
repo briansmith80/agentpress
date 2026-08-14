@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { banner, bold, cyan, dim, green, pink, red, yellow, BAD, INFO, OK, STEP, WARN } from './ansi.mjs';
 import { runDoctor } from './doctor.mjs';
@@ -129,18 +129,29 @@ export function parseArgs(argv) {
  * the lock. The returned release also detaches the SIGINT handler it
  * installs.
  */
-async function acquireScaffoldLock() {
-  await mkdir(AGENTPRESS_HOME, { recursive: true });
-  const contention = () =>
+export async function acquireScaffoldLock({ lockPath = SCAFFOLD_LOCK_PATH } = {}) {
+  await mkdir(dirname(lockPath), { recursive: true });
+  const contention = (holder) =>
     new Error(
-      `Another scaffold appears to be running (lock at ${SCAFFOLD_LOCK_PATH}).\n` +
+      `Another scaffold appears to be running${holder ? ` (pid ${holder.pid ?? '?'}, started ${holder.startedAt ?? 'unknown'})` : ''} — lock at ${lockPath}.\n` +
         `If nothing is actually running, delete that file and try again.`,
     );
   let handle;
   try {
-    handle = await open(SCAFFOLD_LOCK_PATH, 'wx');
+    handle = await open(lockPath, 'wx');
   } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
+    if (err.code !== 'EEXIST' && err.code !== 'EISDIR') throw err;
+    // A DIRECTORY at the lock path is not a lock and not ours to delete —
+    // observed live while forcing contention (a scaffold once sailed straight
+    // past one). Name it precisely instead of crashing on the rm below or
+    // pretending it is a stale lock file.
+    if (await stat(lockPath).then((st) => st.isDirectory()).catch(() => false)) {
+      throw new Error(
+        `A directory sits at the scaffold lock path (${lockPath}) — this tool only ever\n` +
+          'writes a small file there, so something else created it. Remove or rename that\n' +
+          'directory yourself, then retry.',
+      );
+    }
     // Steal ONLY when the recorded pid is dead. Age alone must not steal —
     // scaffolds legitimately exceed 30 minutes (unattended UAC stall on the
     // hosts write, slow WordPress/plugin downloads), and stealing a live
@@ -151,9 +162,11 @@ async function acquireScaffoldLock() {
     // that is only seconds old is a concurrent acquirer mid-write, not
     // debris — the open('wx')+writeFile pair isn't atomic.
     let stale = false;
+    let holder = null;
     try {
-      const raw = await readFile(SCAFFOLD_LOCK_PATH, 'utf8');
+      const raw = await readFile(lockPath, 'utf8');
       const lock = JSON.parse(raw);
+      holder = lock;
       let pidAlive;
       try {
         process.kill(lock.pid, 0);
@@ -166,16 +179,16 @@ async function acquireScaffoldLock() {
         console.log(`  ${dim(`(removing stale scaffold lock from pid ${lock.pid ?? '?'}, started ${lock.startedAt ?? 'unknown'})`)}`);
       }
     } catch {
-      const ageMs = Date.now() - (await stat(SCAFFOLD_LOCK_PATH).then((s) => s.mtimeMs).catch(() => 0));
+      const ageMs = Date.now() - (await stat(lockPath).then((s) => s.mtimeMs).catch(() => 0));
       stale = ageMs > 10_000; // unreadable AND older than the write window — debris
     }
-    if (!stale) throw contention();
-    await rm(SCAFFOLD_LOCK_PATH, { force: true });
+    if (!stale) throw contention(holder);
+    await rm(lockPath, { force: true });
     try {
-      handle = await open(SCAFFOLD_LOCK_PATH, 'wx');
+      handle = await open(lockPath, 'wx');
     } catch (retakeErr) {
       // Lost the steal race to another process — it holds the lock now.
-      if (retakeErr.code === 'EEXIST') throw contention();
+      if (retakeErr.code === 'EEXIST') throw contention(null);
       throw retakeErr;
     }
   }
@@ -185,7 +198,7 @@ async function acquireScaffoldLock() {
     // Sync best-effort: async cleanup isn't guaranteed to run once the
     // process is going down, and a leftover lock costs the next run a steal.
     try {
-      rmSync(SCAFFOLD_LOCK_PATH, { force: true });
+      rmSync(lockPath, { force: true });
     } catch {
       // nothing else to do on the way out
     }
@@ -194,7 +207,7 @@ async function acquireScaffoldLock() {
   process.on('SIGINT', onSigint);
   return async () => {
     process.removeListener('SIGINT', onSigint);
-    await rm(SCAFFOLD_LOCK_PATH, { force: true });
+    await rm(lockPath, { force: true });
   };
 }
 
