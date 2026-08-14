@@ -31,7 +31,12 @@ since bumping is not publishing.
      (`AGENTPRESS_LARAGON_ROOT=C:/nope node index.js doctor`) → must exit 1.
    - **Run a real scaffold** if anything on the scaffold path changed. Code review does not
      catch composed-output bugs — see "Live testing" below for the recipe and why.
-2. **Commit.** Branch, then merge to `main` with `--no-ff`.
+2. **Commit directly to `main` — one commit per ready piece of work, then push.** No
+   feature branches and no `--no-ff` merges for routine changes: the operator called out
+   (2026-08-14) that the branch-per-fix pattern doubled every change into a commit plus a
+   merge bubble and made the graph unreadable. Batch related edits into a single commit
+   rather than committing every micro-step. A branch is still fine for genuinely large,
+   multi-commit work you may need to abandon — that is the exception, not the routine.
 3. **Bump the version in `package.json`. This is mandatory, not optional.** npm refuses to
    republish an existing version with different content, so an unbumped version cannot ship
    at all. Minor for new user-visible behaviour or a new env var; patch for pure fixes.
