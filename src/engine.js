@@ -2432,6 +2432,7 @@ function printUsage() {
       `${bold('create-agentpress')} v${ENGINE_VERSION} — local WordPress + AI-agent dev environments on Laragon`,
       '',
       `${bold('Usage')}  ${CLI} ${pink('<command>')} ${dim('[flags]')}`,
+      `       ${dim('installed globally? the short form works too:')} ${pink('agentpress <command>')}`,
       '',
       `${bold('First time here?')} Three commands, in this order: ${pink('doctor')} ${dim(STEP)} ${pink('setup')} ${dim(STEP)} ${pink('<name>')}`,
       '',

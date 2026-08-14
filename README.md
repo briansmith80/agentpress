@@ -105,7 +105,9 @@ Getting the latest wiring shape is a side effect, so running it once per site co
 ## Usage
 
 `npx create-agentpress@latest <command>` from anywhere (or `node index.js <command>`
-from a git checkout):
+from a git checkout). After a global install (`npm i -g create-agentpress`) the short
+alias works for every command: `agentpress doctor`, `agentpress destroy`, and so on —
+`npx` users keep the full name, since npx resolves package names, not bin aliases.
 
 ```bash
 … <name>              # scaffold a WordPress site at <name>.test (or your Laragon suffix)

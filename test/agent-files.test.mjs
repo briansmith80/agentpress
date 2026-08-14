@@ -125,9 +125,17 @@ test('no frozen file tells the user to run `agentpress <cmd>`, which is not a co
   }
 });
 
-test('the CLI still declares exactly one bin, so the rule above stays true', async () => {
+test('the CLI declares exactly the two known bins — and the template rule above STILL holds', async () => {
+  // The `agentpress` alias was added 2026-08-14 by operator decision: after a
+  // GLOBAL install, `agentpress doctor` beats typing `npx create-agentpress
+  // doctor` for every maintenance command. The bare-`agentpress` ban on
+  // frozen site files is UNCHANGED by this: the alias only exists for global
+  // installs, `npx agentpress` resolves to a package that does not exist
+  // (verified 404 on npm), so templates keep the npx form that works for
+  // everyone. Revisit both tests together if the bin map changes again.
   const pkg = JSON.parse(await read('package.json'));
-  assert.deepEqual(Object.keys(pkg.bin), ['create-agentpress'], 'adding a bin alias means revisiting the templates');
+  assert.deepEqual(Object.keys(pkg.bin).sort(), ['agentpress', 'create-agentpress']);
+  assert.equal(pkg.bin['agentpress'], pkg.bin['create-agentpress'], 'both names must run the same entry point');
 });
 
 test('verify.md tells agents not to name the screenshot, which --output-dir alone does not cover', async () => {
