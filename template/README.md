@@ -1,8 +1,7 @@
 # __PROJECT_NAME__
 
 A local WordPress dev site on [Laragon](https://laragon.org), scaffolded by
-[create-agentpress](https://github.com/briansmith80/agentpress) — a Laragon-native
-port of [katalystwp](https://github.com/soflyy/katalystwp).
+[create-agentpress](https://github.com/briansmith80/agentpress).
 
 - **Site** — __SITE_SCHEME__://__SITE_HOST__
 - **Admin** — __SITE_SCHEME__://__SITE_HOST__/wp-admin (credentials in `.env`, gitignored — don't commit it)

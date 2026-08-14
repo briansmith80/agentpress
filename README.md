@@ -19,8 +19,7 @@ dedicated MySQL user, permalinks working, premium plugins installed and licensed
 in a real browser to check what it built.
 
 No Docker, no containers, nothing to `npm install`. Native [Laragon](https://laragon.org)
-on Windows: Apache + MySQL + PHP + Node. Started as a Laragon-native port of
-[katalystwp](https://github.com/soflyy/katalystwp).
+on Windows: Apache + MySQL + PHP + Node.
 
 ## Getting started (fresh machine)
 
@@ -218,6 +217,8 @@ are detected on the machine — MCP wiring for every one of them.
 ## The site menu
 
 Every site ships a small interactive menu — `npm run agentpress` from the site folder:
+
+<img src="docs/menu.svg" alt="The per-site menu: one-click admin login, database snapshot and restore, recent errors, editor and terminal launchers" width="720">
 
 - **Open WP Admin** — a fresh one-click, already-logged-in link every time (they're
   single-use), falling back to the normal login form with a note when it can't mint one.
