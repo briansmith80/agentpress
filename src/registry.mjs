@@ -4,6 +4,7 @@
 // here are hostname-addressed, not port-addressed.
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
+import { bold, dim, pink } from './ansi.mjs';
 import { AGENTPRESS_HOME, REGISTRY_PATH } from './paths.mjs';
 
 /**
@@ -86,7 +87,7 @@ export async function forgetEnvironment(dir) {
  */
 export function formatEnvironmentsTable(environments, { cli = 'npx create-agentpress@latest', current = null, mcpTarget = null } = {}) {
   if (environments.length === 0) {
-    return `No environments yet. Create one with:  ${cli} <name>`;
+    return `No environments yet. Create one with:  ${pink(`${cli} <name>`)}`;
   }
   // Defensive fallbacks — a nameless entry (older format, hand-edited file)
   // used to crash the exact command whose prune self-heals the registry.
@@ -111,7 +112,9 @@ export function formatEnvironmentsTable(environments, { cli = 'npx create-agentp
     version: Math.max(7, ...rows.map((r) => r.version.length)),
     agents: Math.max(6, ...rows.map((r) => r.agents.length)),
   };
-  const header = `    ${'NAME'.padEnd(widths.name)}  ${'HOST'.padEnd(widths.host)}  ${'VERSION'.padEnd(widths.version)}  ${'AGENTS'.padEnd(widths.agents)}  DIR`;
+  // Padded RAW, then dimmed as one piece — ANSI escapes count toward
+  // String.length, so per-cell colouring would eat the column alignment.
+  const header = dim(`    ${'NAME'.padEnd(widths.name)}  ${'HOST'.padEnd(widths.host)}  ${'VERSION'.padEnd(widths.version)}  ${'AGENTS'.padEnd(widths.agents)}  DIR`);
   const lines = rows.map(
     (r) =>
       `  ${r.mark} ${r.name.padEnd(widths.name)}  ${r.host.padEnd(widths.host)}  ${r.version.padEnd(widths.version)}  ${r.agents.padEnd(widths.agents)}  ${r.dir}`,
@@ -125,12 +128,12 @@ export function formatEnvironmentsTable(environments, { cli = 'npx create-agentp
   const footer = [];
   // Only when a row actually carries the marker. The wired site may not be in the
   // registry at all, and a legend for a symbol that appears nowhere is noise.
-  if (rows.some((r) => r.mark === '→')) footer.push('', `  → = the site your agents' MCP connection points at`);
+  if (rows.some((r) => r.mark === '→')) footer.push('', dim(`  → = the site your agents' MCP connection points at`));
   if (current && (behind.length || unknown.length)) {
     const parts = [];
     if (behind.length) parts.push(`${behind.length} site${behind.length === 1 ? '' : 's'} not on v${current}`);
     if (unknown.length) parts.push(`${unknown.length} of unknown version`);
-    footer.push(`  ${parts.join(', ')} — refresh with:  ${cli} update --all`);
+    footer.push(`  ${parts.join(', ')} — refresh with:  ${pink(`${cli} update --all`)}`);
   }
-  return [`Environments (${REGISTRY_PATH}):`, '', header, ...lines, ...footer].join('\n');
+  return [`${bold('Environments')} ${dim(`(${REGISTRY_PATH})`)}`, '', header, ...lines, ...footer].join('\n');
 }

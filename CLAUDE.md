@@ -167,6 +167,33 @@ non-blocking warning / red ✖ blocker / cyan → next action / dim · informati
 stays uncoloured so a ✓ still means something. Never mark a row `warn` whose own text says
 "normal", "harmless", or "ignore".
 
+**The output theme — every user-facing surface speaks this one language** (help, setup,
+doctor, the scaffold, destroy, the site menu; audit 2026-08-14). All helpers live in
+`src/ansi.mjs` (the frozen menu carries its own copies):
+
+- **Glyphs are semantic, never decoration**: green `✓` done / yellow `⚠` real warning /
+  red `✖` blocker / cyan `→` the user's next action / dim `·` information. The crying-wolf
+  rule above governs all of them, not just doctor.
+- **pink** is the single accent: things the user types (commands, flags, site names in
+  prompts), the wordmark, selected menu items, section numbers. One accent, used sparingly —
+  if everything is pink, nothing is.
+- **bold** for section headers (`Commands`, `Setup`) and for the rare critical action phrase
+  inside prose (`Stop All → Start All`). Not for emphasis of ordinary words.
+- **dim** for meta and secondary text: hints, receipts, "you can do this later" notes,
+  parentheticals. A receipt after an action is `  → past-tense line`, dim. Under NO_COLOR a
+  receipt `→` and a next-action `→` are told apart by TENSE and position, not colour: a
+  receipt is past-tense directly under its action, a next-action is imperative. (The registry
+  table's `→` marker is a third use, allowed because its printed legend defines it in plain
+  text.)
+- **Prompts**: `? question [Y/n]: ` — capital = the Enter default; destructive defaults are
+  always the safe option (Cancel first / [y/N]). Step lines mid-flow are `  … doing thing…`;
+  progress belongs there, results belong in the summary.
+- **Layout**: pad the RAW string, then colour (ANSI counts toward `String.length` — the rule
+  doctor's columns live by). Two-space indent for body text under a glyph line. The banner
+  prints once, from `create()`, never per-command.
+- **Degrade**: every helper is an identity function under NO_COLOR/non-TTY, so all output
+  must read correctly as plain text — colour may reinforce meaning, never carry it alone.
+
 **`template/scripts/agentpress.mjs` is frozen into every scaffolded site and must stay
 import-free.** It cannot import from `src/` (that doesn't exist beside a scaffolded site), so
 it carries deliberate duplicated copies (`ADMIN_LOGIN_PHP`, `BANNER_LINES`, the colour gate).
