@@ -64,7 +64,7 @@ const red = (s) => (COLOR ? `\x1b[31m${s}\x1b[39m` : s);
 const yellow = (s) => (COLOR ? `\x1b[33m${s}\x1b[39m` : s);
 
 if (!existsSync(ENV_PATH)) {
-  console.error(`${red('✖')} No .env here — run this from your agentpress site directory.`);
+  console.error(`${red('✖')} No .env here — run this from your AgentPress site directory.`);
   process.exit(1);
 }
 
@@ -223,7 +223,7 @@ async function openTerminalHere() {
     return 'Windows Terminal';
   }
   if (await trySpawnDetached('cmd', ['/c', 'start', 'cmd'])) return 'a Command Prompt';
-  console.log(`  ${dim('(could not open a terminal — run this yourself:)')} cd ${CWD}`);
+  console.log(`  ${dim('(could not open a terminal — run this yourself:)')} ${pink(`cd ${CWD}`)}`);
   return null;
 }
 
@@ -447,7 +447,7 @@ try {
   const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
   const age = Date.now() - (existing.startedAt ? Date.parse(existing.startedAt) : 0);
   if (existing.pid !== process.pid && isPidAlive(existing.pid) && age < LOCK_MAX_AGE_MS) {
-    console.error(`${red('✖')} Another agentpress menu (pid ${existing.pid}) already appears to be running here.`);
+    console.error(`${red('✖')} Another AgentPress menu (pid ${existing.pid}) already appears to be running here.`);
     process.exit(1);
   }
 } catch {
@@ -706,7 +706,7 @@ const latestVersion = await checkUpdate();
 // would print the version nowhere at all. Kept for exactly that case. The
 // Password row's own trailing newline supplies the blank line before the menu
 // prompt either way.
-if (!SHOW_BANNER) console.log(`Welcome to agentpress v${VERSION}.\n`);
+if (!SHOW_BANNER) console.log(`Welcome to AgentPress v${VERSION}.\n`);
 
 for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
@@ -751,7 +751,7 @@ for (;;) {
   // had landed. The receipt never includes the admin URL: the one-click link
   // carries a single-use login token, and tokens are never echoed.
   if (choice === null || choice === 'exit') {
-    console.log(`\n${dim('cd')} ${CWD} ${dim('&& npm run agentpress')} to come back.\n`);
+    console.log(`\n${pink(`cd ${CWD} && npm run agentpress`)} ${dim('to come back.')}\n`);
     process.exit(0);
   } else if (choice === 'admin') {
     openBrowser(await adminUrl());
@@ -841,8 +841,8 @@ for (;;) {
     if (!existsSync(debugLog)) {
       console.log(
         `\n  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
-          `  ${dim('Turn it on with:')} npm run wp -- config set WP_DEBUG true --raw\n` +
-          `  ${dim('and:')}             npm run wp -- config set WP_DEBUG_LOG true --raw\n`,
+          `  ${dim('Turn it on with:')} ${pink('npm run wp -- config set WP_DEBUG true --raw')}\n` +
+          `  ${dim('and:')}             ${pink('npm run wp -- config set WP_DEBUG_LOG true --raw')}\n`,
       );
     } else {
       const lines = tailFile(debugLog);
@@ -889,7 +889,7 @@ for (;;) {
               ? 'Destroying a site removes the wiring machine-wide, which is the usual cause.'
               : 'MCP wiring is machine-wide, so the most recently scaffolded site owns it.',
           )}\n` +
-          `  ${dim('Point it at this site with:')} npx create-agentpress@latest rewire\n` +
+          `  ${dim('Point it at this site with:')} ${pink('npx create-agentpress@latest rewire')}\n` +
           `  ${dim('Launching anyway — the agent will have no WordPress tools for THIS site.')}\n`,
       );
       await pressAnyKey();

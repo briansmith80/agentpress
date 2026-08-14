@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { banner, bold, cyan, dim, green, pink, red, yellow, BAD, OK, STEP, WARN } from './ansi.mjs';
+import { banner, bold, cyan, dim, green, pink, red, yellow, BAD, INFO, OK, STEP, WARN } from './ansi.mjs';
 import { runDoctor } from './doctor.mjs';
 import { AGENTPRESS_HOME, HOSTS_PATH, LARAGON_ROOT, REGISTRY_PATH, SCAFFOLD_LOCK_PATH, WWW_DIR } from './paths.mjs';
 import { findCollisions, validateSiteName } from './names.mjs';
@@ -163,7 +163,7 @@ async function acquireScaffoldLock() {
       }
       stale = !pidAlive;
       if (stale) {
-        console.log(`  (removing stale scaffold lock from pid ${lock.pid ?? '?'}, started ${lock.startedAt ?? 'unknown'})`);
+        console.log(`  ${dim(`(removing stale scaffold lock from pid ${lock.pid ?? '?'}, started ${lock.startedAt ?? 'unknown'})`)}`);
       }
     } catch {
       const ageMs = Date.now() - (await stat(SCAFFOLD_LOCK_PATH).then((s) => s.mtimeMs).catch(() => 0));
@@ -220,7 +220,7 @@ function resumeCommandLine(name, extraPlugins = [], premiumSelection = null) {
 
 /** The one-liner every interrupted-scaffold failure path must end with — resume exists precisely for these states, but nobody finds it in the README mid-failure. */
 function resumeHint(name, extraPlugins = [], premiumSelection = null) {
-  return `\n  When the site responds again, finish the install with: ${resumeCommandLine(name, extraPlugins, premiumSelection)}`;
+  return `\n  When the site responds again, finish the install with: ${pink(resumeCommandLine(name, extraPlugins, premiumSelection))}`;
 }
 
 /**
@@ -309,7 +309,7 @@ async function choosePremiumPlugins({ flagValue, yes, prompts = null }) {
   }
 
   if (!available.length) {
-    console.log(`  (no premium plugin zips on this machine — run \`${CLI} setup\` to add them; continuing without)`);
+    console.log(`  ${dim(`(no premium plugin zips on this machine — run \`${CLI} setup\` to add them; continuing without)`)}`);
     return [];
   }
 
@@ -322,10 +322,13 @@ async function choosePremiumPlugins({ flagValue, yes, prompts = null }) {
   try {
     for (const plugin of availability) {
       if (!plugin.available) {
-        console.log(`  ${red(BAD)} ${plugin.label} — no zip on this machine (run setup to add it), skipping`);
+        // dim ·, never red ✖: a commercial plugin the user simply does not own
+        // is not a failure — the same crying-wolf rule printAvailabilityTable
+        // already follows for the identical fact.
+        console.log(`  ${dim(INFO)} ${plugin.label} — no zip on this machine (run setup to add it), skipping`);
         continue;
       }
-      const answer = (await rl.question(`  Install ${plugin.label}? [Y/n]: `)).trim();
+      const answer = (await rl.question(`? Install ${plugin.label}? [Y/n]: `)).trim();
       if (answer === '' || /^y(es)?$/i.test(answer)) selection.push(plugin.slug);
     }
   } finally {
@@ -334,7 +337,7 @@ async function choosePremiumPlugins({ flagValue, yes, prompts = null }) {
   if (selection.some((s) => s.startsWith('breakdance-')) && !selection.includes('oxygen')) {
     const oxygen = available.find((p) => p.slug === 'oxygen');
     if (oxygen) {
-      console.log('  (adding Oxygen Builder — the selected extensions need it)');
+      console.log(`  ${dim('(adding Oxygen Builder — the selected extensions need it)')}`);
       selection.unshift('oxygen');
     }
   }
@@ -347,7 +350,7 @@ async function confirmScaffold(name, hostname, rl) {
     bail(`${red(BAD)} Not scaffolding: confirm with --yes when running non-interactively.`);
     return false;
   }
-  const answer = await rl.question(`? Scaffold a new WordPress site "${name}" at http://${hostname}? [y/N]: `);
+  const answer = await rl.question(`? Scaffold a new WordPress site "${pink(name)}" at http://${hostname}? [y/N]: `);
   if (!/^y(es)?$/i.test(answer.trim())) {
     console.log('Cancelled.');
     return false;
@@ -385,7 +388,7 @@ async function offerInstantMode(rl) {
       : `${cyan(STEP)} Instant mode is not enabled. Enabling it makes this and every future scaffold instant:\n` +
           '  no Laragon reloads, no machine-wide Apache/MySQL blip, sites live the moment they exist.',
   );
-  const answer = (await rl.question('? Enable it now? The one-time cost is a full Stop All → Start All in Laragon. [Y/n]: ')).trim();
+  const answer = (await rl.question(`? Enable it now? The one-time cost is a full ${bold('Stop All → Start All')} in Laragon. [Y/n]: `)).trim();
   // Default is YES — this prompt exists because the old opt-in tip was
   // ignored, and Enter-through should land on the good path.
   if (/^n(o)?$/i.test(answer)) return false;
@@ -420,7 +423,7 @@ async function offerInstantMode(rl) {
 async function awaitCombinedRestart(hostname) {
   const httpsToo = sslCertPresent();
   console.log(
-    `${cyan(STEP)} Now the one-time restart. In Laragon: ${bold('Stop All')}, then ${bold('Start All')}.\n` +
+    `${cyan(STEP)} Now the one-time restart. In Laragon: ${bold('Stop All → Start All')}.\n` +
       `  This activates instant mode for every future scaffold${httpsToo ? `, and makes https://${hostname}\n  valid (the certificate regenerates to include the new site)` : ''}.`,
   );
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -528,9 +531,9 @@ async function offerHttpsForNewSite(hostname, projectDir) {
   );
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await rl.question('? Do the one-time Stop All → Start All now, for a fully-https site? [Y/n]: ')).trim();
+    const answer = (await rl.question(`? Do the one-time ${bold('Stop All → Start All')} now, for a fully-https site? [Y/n]: `)).trim();
     if (/^n(o)?$/i.test(answer)) return false;
-    console.log(`${cyan(STEP)} In Laragon: ${bold('Stop All')}, then ${bold('Start All')}. Press Enter here once it is back up…`);
+    console.log(`${cyan(STEP)} In Laragon: ${bold('Stop All → Start All')}. Press Enter here once it is back up…`);
     await rl.question('');
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if ((await certCoversHostname(hostname)) && (await probeInstant(hostname, projectDir, { timeoutMs: 5000, tls: true }))) {
@@ -624,7 +627,7 @@ async function reportApacheStillDown(name, hostname, extraPlugins = [], premiumS
     `${red(BAD)} Apache is still down.${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
       `  Start it in Laragon (Start All), then check http://${hostname} — the folder,\n` +
       '  vhost, and hosts entry this run already produced are left in place.\n' +
-      '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
+      `  ${dim('(A blank page is normal at this stage — WordPress is not installed yet.)')}` +
       resumeHint(name, extraPlugins, premiumSelection),
   );
 }
@@ -679,14 +682,14 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         const hasVhost = Boolean(await findVhostForProject(projectDir));
         console.log(
           hasVhost
-            ? `\n  This looks like an interrupted scaffold — try: ${CLI} resume ${name}`
-            : `\n  This looks like an interrupted scaffold with no vhost yet — open Laragon, click\n  Reload, wait for it to settle, then run: ${CLI} resume ${name}`,
+            ? `\n  This looks like an interrupted scaffold — try: ${pink(`${CLI} resume ${name}`)}`
+            : `\n  This looks like an interrupted scaffold with no vhost yet — open Laragon, click\n  Reload, wait for it to settle, then run: ${pink(`${CLI} resume ${name}`)}`,
         );
       }
     } else if (hasFolder && hasEnv && !hasSandbox) {
-      console.log(`\n  This looks like a scaffold that failed near the end — try: ${CLI} resume ${name}`);
+      console.log(`\n  This looks like a scaffold that failed near the end — try: ${pink(`${CLI} resume ${name}`)}`);
     } else if (hasFolder && hasEnv) {
-      console.log(`\n  This site already exists. To remove it: cd ${projectDir} then ${CLI} destroy`);
+      console.log(`\n  This site already exists. To remove it: ${pink(`cd ${projectDir}`)} then ${pink(`${CLI} destroy`)}`);
     } else {
       // No folder, so none of the resume/destroy advice applies. Offer ONLY the
       // remedies whose surface actually fired: a blanket "delete the conf named
@@ -716,7 +719,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     bail(
       `${red(BAD)} No laragon.exe found under the resolved Laragon root. If Laragon is installed somewhere\n` +
         '  unusual, set AGENTPRESS_LARAGON_ROOT to its folder (e.g. D:\\laragon) and retry.\n' +
-        `  (\`${CLI} doctor\` shows what was resolved.)`,
+        `  ${dim(`(\`${CLI} doctor\` shows what was resolved.)`)}`,
     );
     return;
   }
@@ -772,7 +775,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     console.log(
       `${yellow(WARN)} Instant mode is installed but not active yet (Apache has not restarted since setup).\n` +
         '  Falling back to the classic Laragon-reload flow for this scaffold. One-time fix:\n' +
-        '  Stop All → Start All in Laragon, and every future scaffold skips reloads entirely.\n',
+        `  ${bold('Stop All → Start All')} in Laragon, and every future scaffold skips reloads entirely.\n`,
     );
   } else if (!instant) {
     console.log(`  ${dim(`Instant mode is not enabled — using the classic Laragon-reload flow (slower). Run \`${CLI} setup\` once to fix.`)}\n`);
@@ -807,7 +810,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       bail(
         `${red(BAD)} MySQL is not listening on :${MYSQL_PORT}, and this scaffold needs it to create the\n` +
           '  database. Click Start All in Laragon and try again.\n' +
-          `  (If you moved MySQL, set AGENTPRESS_MYSQL_PORT. \`${CLI} doctor\` shows what was resolved.)`,
+          `  ${dim(`(If you moved MySQL, set AGENTPRESS_MYSQL_PORT. \`${CLI} doctor\` shows what was resolved.)`)}`,
       );
       return;
     }
@@ -856,8 +859,8 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
       // costs more than the plugin choices: if the run then dies before .env
       // exists, the folder may carry no marker at all and resume will refuse it.
       console.log(
-        `  (could not record this run's plugin choices: ${err.message}\n` +
-          '   to resume, pass --premium= explicitly, and add --adopt if resume says the folder is not ours)',
+        `  ${dim(`(could not record this run's plugin choices: ${err.message}`)}\n` +
+          `  ${dim(' to resume, pass --premium= explicitly, and add --adopt if resume says the folder is not ours)')}`,
       );
     });
 
@@ -916,10 +919,10 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
         scaffoldWarnings.push(
           (await certCoversHostname(hostname))
             ? 'https is available on this machine but not being served yet — in Laragon do a\n' +
-                '    one-time Stop All then Start All (not just Reload), approving any Windows\n' +
+                `    one-time ${bold('Stop All → Start All')} (not just Reload), approving any Windows\n` +
                 `    permission prompt. Then this site answers on https://${hostname}.`
             : "https for this new site isn't valid yet: Laragon adds a site's name to its\n" +
-                '    certificate only when it restarts. Do a Stop All then Start All in Laragon\n' +
+                `    certificate only when it restarts. Do a ${bold('Stop All → Start All')} in Laragon\n` +
                 `    (approving any prompts) and https://${hostname} becomes valid. Every link\n` +
                 '    below uses http, which works right now.',
         );
@@ -933,7 +936,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
     // hosts file or a full backups dir must not sink a scaffold whose project
     // folder is already in place.
     await snapshotHosts().catch((err) => {
-      console.log(`  (could not back up the hosts file first: ${err.message} — continuing)`);
+      console.log(`  ${dim(`(could not back up the hosts file first: ${err.message} — continuing)`)}`);
     });
     console.log(`${cyan(STEP)} Reloading Laragon (this can take a while, and may need you to approve a Windows permission prompt)…`);
     triggerReload();
@@ -956,7 +959,7 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
           '  Open Laragon and click Reload yourself, then check http://' +
           hostname +
           ' once it settles.\n' +
-          '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
+          `  ${dim('(A blank page is normal at this stage — WordPress is not installed yet.)')}` +
           resumeHint(name, extraPlugins, premiumSelection),
       );
       return;
@@ -1000,11 +1003,9 @@ async function scaffoldSite(name, { flags = {}, yes = false } = {}) {
           `${red(BAD)} Still not verifiable after a retry (outcome: ${verify.outcome}).${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
             `  The vhost conf is correct on disk at ${pollResult.vhost.file}, but the running Apache\n` +
             '  process hasn\'t picked it up — confirmed live: `reload` alone doesn\'t reliably force a\n' +
-            '  real restart once Apache has been up for a while. In Laragon, do a full Stop All then\n' +
-            '  Start All (not just Reload), then check http://' +
-            hostname +
-            '.\n' +
-            '  (A blank page is normal at this stage — WordPress is not installed yet.)' +
+            '  real restart once Apache has been up for a while. In Laragon, do a full\n' +
+            `  ${bold('Stop All → Start All')} (not just Reload), then check http://${hostname}.\n` +
+            `  ${dim('(A blank page is normal at this stage — WordPress is not installed yet.)')}` +
             resumeHint(name, extraPlugins, premiumSelection),
         );
         return;
@@ -1063,7 +1064,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
   const db = await provisionDatabase(name, cred);
   console.log(`${green(OK)} Database ${db.dbName} + user ${db.dbUser} ready`);
   if (db.dbName !== sanitizeDbIdentifier(name, 64)) {
-    console.log(`  (note: a previous attempt left a database named ${sanitizeDbIdentifier(name, 64)} — this run uses ${db.dbName}; the old one is unused and safe to drop by hand)`);
+    console.log(`  ${dim(`(note: a previous attempt left a database named ${sanitizeDbIdentifier(name, 64)} — this run uses ${db.dbName}; the old one is unused and safe to drop by hand)`)}`);
   }
 
   const adminUser = 'admin';
@@ -1182,7 +1183,9 @@ async function wireMcpForSite({ publicDir, hostname, adminUser, onStep = () => {
   if (configuredAgents.length) {
     onStep('checking the MCP endpoint answers…');
     verification = await verifyMcpEndpoint(creds);
-    onStep(verification.ok ? `MCP endpoint answered (${verification.tools} tools)` : `⚠ the MCP endpoint did not answer: ${verification.detail}`);
+    // No glyph in a step line: progress lines narrate, the summary judges —
+    // reportMcpOutcome prints the real yellow ⚠ for this same fact.
+    onStep(verification.ok ? `MCP endpoint answered (${verification.tools} tools)` : `the MCP endpoint did not answer: ${verification.detail}`);
     // A rejected credential is the one failure with a knowable cause, and the
     // probe that just failed used a password minted seconds ago — so "restart
     // your agent session" cannot be the explanation. Ask the site why.
@@ -1235,7 +1238,7 @@ function reportMcpOutcome({ detectedKeys, configuredAgents, failedAgents, verifi
   for (const f of failedAgents) {
     lines.push(`${yellow(WARN)} MCP wiring ${f.key === 'all' ? 'failed' : `failed for ${f.key}`}: ${f.reason}`);
   }
-  if (failedAgents.length) lines.push(`  Retry with:  ${CLI} rewire   (from this site's folder)`);
+  if (failedAgents.length) lines.push(`  ${cyan(STEP)} Retry with:  ${pink(`${CLI} rewire`)}   ${dim("(from this site's folder)")}`);
   return lines;
 }
 
@@ -1343,15 +1346,17 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       // absent from this panel whenever nothing was wired, whether that was
       // because no agent CLI exists or because every one of them failed.
       `${reportMcpOutcome(mcp).map((l) => `${l}\n`).join('')}` +
-      `  Site   ${siteUrl}\n` +
+      // Labels dim, values plain: the values are what gets copied, and a dim
+      // label column reads as structure without stealing attention from them.
+      `  ${dim('Site ')}  ${siteUrl}\n` +
       // The TTL was never mentioned to the human. A one-click link that has quietly
       // expired looks exactly like a broken site, and the menu can mint a fresh one.
-      `  Admin  ${admin.url}\n` +
+      `  ${dim('Admin')}  ${admin.url}\n` +
       (admin.oneClick ? `         ${dim('one-time link, valid ~5 min — `npm run agentpress` mints a fresh one')}\n` : '') +
-      `  User   ${adminUser}\n` +
-      `  Pass   ${adminPassword}\n\n` +
-      `  cd ${projectDir}\n` +
-      '  npm run agentpress   # open the menu\n' +
+      `  ${dim('User ')}  ${adminUser}\n` +
+      `  ${dim('Pass ')}  ${adminPassword}\n\n` +
+      `  ${pink(`cd ${projectDir}`)}\n` +
+      `  ${pink('npm run agentpress')}   ${dim('# open the menu')}\n` +
       // Only when something is actually wired: /verify tests the MCP path, so
       // suggesting it with no agent configured would send the user at a check
       // that cannot pass. This is the one moment they are looking at the
@@ -1367,7 +1372,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
       // the file instead — which is why AGENTS.md describes it that way too.
       (mcp.configuredAgents?.length
         ? `\n  Then open this folder in ${AGENT_LABELS[mcp.configuredAgents[0]] || 'your agent'} and ` +
-          (mcp.configuredAgents.includes('claude') ? `run ${cyan('/verify')} —\n` : `ask it to\n  follow ${cyan('.claude/commands/verify.md')} —\n`) +
+          (mcp.configuredAgents.includes('claude') ? `run ${pink('/verify')} —\n` : `ask it to\n  follow ${pink('.claude/commands/verify.md')} —\n`) +
           (premiumPlugins.includes('oxygen')
             ? '  it exercises both MCP servers and Oxygen end to end, and builds the site a\n  holding page recording what passed.\n'
             : '  it exercises both MCP servers end to end. (No holding page: that is built with\n  Oxygen, which this site was scaffolded without.)\n')
@@ -1500,7 +1505,7 @@ async function resumeCommand(name, { flags = {} } = {}) {
       const test = await testApacheConfig();
       bail(
         `${red(BAD)} Not reachable yet (outcome: ${verify.outcome}).${test.ok === false ? `\n  Config test failed:\n  ${test.output}` : ''}\n` +
-          '  In Laragon, do a full Stop All then Start All, then retry resume.',
+          `  In Laragon, do a full ${bold('Stop All → Start All')}, then retry resume.`,
       );
       return;
     }
@@ -1523,7 +1528,7 @@ async function resumeCommand(name, { flags = {} } = {}) {
   });
   if (parkedPremium !== undefined && typeof flags.premium !== 'string') {
     console.log(
-      `  (premium plugins: reusing this scaffold's original choice — ${premiumSelection.length ? premiumSelection.join(', ') : 'none'}; override with --premium=)`,
+      `  ${dim(`(premium plugins: reusing this scaffold's original choice — ${premiumSelection.length ? premiumSelection.join(', ') : 'none'}; override with --premium=)`)}`,
     );
   }
 
@@ -1637,7 +1642,7 @@ async function rewireCommand() {
     bail(
       `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\agentpress.mjs — it does\n` +
         '  not look like a site this tool created, so rewire will not touch it.\n' +
-        `  (Currently in: ${cwd})`,
+        `  ${dim(`(Currently in: ${cwd})`)}`,
     );
     return;
   }
@@ -1706,7 +1711,7 @@ async function rewireCommand() {
     console.log(
       `${cyan(STEP)} If an agent session is already open, restart it (or reconnect its MCP\n` +
         '  servers) — it is still holding the previous application password.\n' +
-        `  Then run ${cyan('/verify')} in the agent to confirm the wiring end to end.`,
+        `  Then run ${pink('/verify')} in the agent to confirm the wiring end to end.`,
     );
   }
   // Exit non-zero when it did not work. This printed a ⚠ panel and exited 0, so
@@ -1785,8 +1790,8 @@ async function updateProject({ yes, dir = process.cwd(), announce = true }) {
     bail(
       `${red(BAD)} This site was last touched by AgentPress v${siteVersion}, which is NEWER than the\n` +
         `  v${ENGINE_VERSION} you are running. Updating would replace its tooling with older files.\n` +
-        `  Update the tool first:  npm i -g create-agentpress@latest\n` +
-        '  (or re-run through `npx create-agentpress@latest update`, which always fetches the newest.)',
+        `  Update the tool first:  ${pink('npm i -g create-agentpress@latest')}\n` +
+        `  ${dim('(or re-run through `npx create-agentpress@latest update`, which always fetches the newest.)')}`,
     );
     return false;
   }
@@ -1936,7 +1941,7 @@ async function destroyCommand({ yes }) {
     bail(
       `${red(BAD)} This folder has a .env but no sandbox.config.json or scripts\\agentpress.mjs — it does\n` +
         '  not look like a site this tool created, so destroy will not touch it.\n' +
-        `  (Currently in: ${cwd})`,
+        `  ${dim(`(Currently in: ${cwd})`)}`,
     );
     return;
   }
@@ -1951,14 +1956,14 @@ async function destroyCommand({ yes }) {
     return;
   }
   console.log(
-    `This permanently removes ${cwd}:\n` +
+    `${bold(`This permanently removes ${cwd}`)}:\n` +
       '  - the database and its dedicated user\n' +
       '  - the WordPress application password this tool minted\n' +
       '  - MCP registrations for any agents this site configured\n' +
       '  - the vhost conf, the hosts entry this tool added, and this project directory\n' +
-      'Removing the hosts entry needs a Windows permission prompt, like adding it did.\n' +
-      'Declining it is fine — the leftover line is printed at the end instead.\n' +
-      'This cannot be undone.',
+      `  ${dim('Removing the hosts entry needs a Windows permission prompt, like adding it did.')}\n` +
+      `  ${dim('Declining it is fine — the leftover line is printed at the end instead.')}\n` +
+      `${bold('This cannot be undone.')}`,
   );
   if (!yes) {
     if (!process.stdin.isTTY) {
@@ -1966,7 +1971,7 @@ async function destroyCommand({ yes }) {
       return;
     }
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await rl.question('? Type the site name to confirm: ');
+    const answer = await rl.question(`? Type the site name (${pink(basename(cwd))}) to confirm: `);
     rl.close();
     if (answer.trim() !== basename(cwd)) {
       console.log('Cancelled.');
@@ -2006,10 +2011,10 @@ async function destroyCommand({ yes }) {
             '  indexing the WordPress tree, or a virus scanner mid-pass — a race, not a\n' +
             '  permanent lock, which is why the retries above may simply need another go.\n' +
             '\n' +
-            `  The folder is all that is left. Try again first:   ${CLI} destroy\n` +
+            `  The folder is all that is left. Try again first:   ${pink(`${CLI} destroy`)}\n` +
             '  If it still refuses, close any editor open on the folder, then remove it\n' +
             '  from a shell that is NOT inside it:\n' +
-            `    Remove-Item -Recurse -Force ${cwd}\n` +
+            `    ${pink(`Remove-Item -Recurse -Force ${cwd}`)}\n` +
             '  Deleting the entries one at a time works when a whole-tree delete will not.\n' +
             `  \`${CLI} list\` prunes the entry once the folder is gone.\n`
           : `  Re-running \`${CLI} destroy\` here is safe — every step re-checks before acting,\n` +
@@ -2089,13 +2094,13 @@ async function destroyCommand({ yes }) {
         ? `\nHosts ${result.hostsEntry.removed > 1 ? 'entries' : 'entry'} removed.\n`
         : '') +
       (result.hostsEntry?.ok && result.hostsEntry.remaining.length > 0
-        ? `\nRemaining trace: a hosts line still maps ${result.hostname}, and it is not one this\n` +
-          '  tool may remove (it only removes single-hostname loopback lines tagged by itself\n' +
-          '  or Laragon). It was left alone — remove it by hand if it is unwanted.\n'
+        ? `\n${dim(INFO)} ${dim(`Remaining trace: a hosts line still maps ${result.hostname}, and it is not one this`)}\n` +
+          `  ${dim('tool may remove (it only removes single-hostname loopback lines tagged by itself')}\n` +
+          `  ${dim('or Laragon). It was left alone — remove it by hand if it is unwanted.')}\n`
         : '') +
       (result.hostsEntry && !result.hostsEntry.ok && result.hostname
-        ? `\nRemaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.\n` +
-          `  (not removed automatically: ${result.hostsEntry.reason})\n`
+        ? `\n${dim(INFO)} ${dim(`Remaining trace: a hosts entry for ${result.hostname} — safe to leave, or remove by hand.`)}\n` +
+          `  ${dim(`(not removed automatically: ${result.hostsEntry.reason})`)}\n`
         : ''),
   );
   if (!result.dbDropped && result.dbSkipReason !== 'no database recorded in .env') process.exitCode = 1;
@@ -2226,7 +2231,7 @@ async function setupPreferences() {
       console.log(`\n  To make a plugin available, drop your licensed zip into:\n    ${pink(dir)}`);
       console.log(`  ${dim(`Expected filenames: ${missing.map((p) => `${p.slug}[-*].zip`).join(', ')}`)}`);
       console.log(`  ${dim('(Or keep them in your own private GitHub releases repo — premiumPluginsRepo in config.json, see the README.)')}`);
-      const open = (await rl.question('  Open that folder in Explorer now so you can drop zips in? [y/N]: ')).trim();
+      const open = (await rl.question('? Open that folder in Explorer now so you can drop zips in? [y/N]: ')).trim();
       if (/^y(es)?$/i.test(open)) {
         const { spawn } = await import('node:child_process');
         await mkdir(dir, { recursive: true });
@@ -2243,11 +2248,11 @@ async function setupPreferences() {
 
     const existing = config.licenses?.oxygen || null;
     const hint = existing ? `Enter keeps the saved key (${existing.slice(0, 4)}…)` : 'Enter to skip — you can activate in wp-admin instead';
-    const answer = (await rl.question(`\n  Oxygen license key (one key covers all the extensions; ${hint}): `)).trim();
+    const answer = (await rl.question(`\n? Oxygen license key (one key covers all the extensions; ${hint}): `)).trim();
     if (answer) {
       config.licenses = { ...(config.licenses || {}), oxygen: answer };
       if (!/^[a-f0-9]{32}$/i.test(answer)) {
-        console.log('  (saved — note it does not look like the usual 32-character key, double-check if activation fails)');
+        console.log(`  ${dim('(saved — note it does not look like the usual 32-character key, double-check if activation fails)')}`);
       }
     }
 
@@ -2316,7 +2321,7 @@ async function setupCommand() {
     console.log(`${green(OK)} Wildcard vhost already current at ${WILDCARD_CONF_PATH}`);
   }
   if (!sslCertPresent()) {
-    console.log("  (no Laragon SSL cert found — https will light up if you enable SSL in Laragon's menu and re-run setup)");
+    console.log(`  ${dim("(no Laragon SSL cert found — https will light up if you enable SSL in Laragon's menu and re-run setup)")}`);
   }
 
   // Optional half, and it must stay AFTER the wildcard install above and BEFORE the
@@ -2338,7 +2343,8 @@ async function setupCommand() {
       `\n${green(OK)} Instant mode is ACTIVE${httpsLive ? ' (http + https)' : ''}. Scaffolds no longer trigger Laragon reloads —\n` +
         '  no machine-wide blips, no reload-staleness failures, sites are live instantly.\n' +
         (httpsLive
-          ? "  (https uses Laragon's own certificate — if the browser warns about trust, enable\n   SSL once in Laragon's menu, which registers the cert with Windows.)\n"
+          ? `  ${dim("(https uses Laragon's own certificate — if the browser warns about trust, enable")}\n` +
+            `   ${dim("SSL once in Laragon's menu, which registers the cert with Windows.)")}\n`
           : '') +
         '\n  Setup is done — you never need to run it again on this machine (unless you\n' +
         '  want to add plugin zips or change the license key).\n' +
@@ -2367,15 +2373,15 @@ async function setupCommand() {
 async function registerQuickAppCommand() {
   const result = await registerQuickApp();
   if (!result.added) {
-    console.log(`Not added: ${result.reason}.`);
+    console.log(`${dim(INFO)} Not added: ${result.reason}.`);
     return;
   }
   console.log(
-    `${green(OK)} Added a "AgentPress" entry to sites.conf (backed up to ${result.backup}).\n` +
-      'Reopen Laragon\'s tray menu (Quick app) to see it. Note: Quick app\'s own AutoCreateDatabase\n' +
-      "will also create a plain DB named after the project — this tool's own DB (a differently-\n" +
-      'named, dedicated user) is what the site actually uses; the Quick-app-created one is unused\n' +
-      'and safe to drop by hand.',
+    `${green(OK)} Added an "AgentPress" entry to sites.conf (backed up to ${result.backup}).\n` +
+      "  Reopen Laragon's tray menu (Quick app) to see it.\n" +
+      `  ${dim("Note: Quick app's own AutoCreateDatabase will also create a plain DB named after the")}\n` +
+      `  ${dim("project — this tool's own DB (a differently-named, dedicated user) is what the site")}\n` +
+      `  ${dim('actually uses; the Quick-app-created one is unused and safe to drop by hand.')}`,
   );
 }
 

@@ -370,7 +370,7 @@ asks for a UAC prompt.
 - **Without `setup` (instant mode), `laragon.exe reload` is not fully reliable** once Apache
   has been running a while. Confirmed live, repeatedly, on two machines: it can leave Apache
   serving a stale in-memory config (or crash it outright) — see the file header comments in
-  `laragon.mjs` for the full story. When it happens: full Stop All → Start All in Laragon,
+  `laragon.mjs` for the full story. When it happens: full **Stop All → Start All** in Laragon,
   then the `resume <name>` command the failure message prints. **Instant mode removes this
   entire failure class** — run `setup` once.
 - **Cursor, Codex and OpenCode get one MCP connection each, machine-wide** — see "How the
