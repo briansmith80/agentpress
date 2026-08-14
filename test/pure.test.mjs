@@ -12,7 +12,7 @@ import { parseDbHost, sanitizeDbIdentifier, escapeSqlString } from '../src/mysql
 import { parseArgs, parseEnvFile } from '../src/engine.js';
 import { hostsContentEntryAddresses, isLoopbackAddress } from '../src/laragon.mjs';
 import { sanCoversHostname } from '../src/wildcard.mjs';
-import { zipMatchesSlug } from '../src/plugins.mjs';
+import { classifyHtmlToPage, zipMatchesSlug } from '../src/plugins.mjs';
 import { applyAgentSections } from '../src/templates.mjs';
 import { compareVersionsDesc } from '../src/wp.mjs';
 import { formatEnvironmentsTable } from '../src/registry.mjs';
@@ -249,4 +249,18 @@ test('sanCoversHostname honours explicit entries and rejects the TLD-level wildc
   assert.equal(sanCoversHostname(laragonStyle, 'a.b.doncour.test'), false, 'but only ONE extra label');
   assert.equal(sanCoversHostname('', 'anything.test'), false);
   assert.equal(sanCoversHostname('DNS:*.test', ''), false);
+});
+
+// The one judgment of Oxygen's html-to-page.php, shared by the patcher, the
+// scaffold panel and doctor — the day the vendor edits the matched line, the
+// 'unrecognised' outcome is how it surfaces in output instead of as a
+// /verify failing on every input (upstream bug #3686, still open at beta 3).
+test('classifyHtmlToPage distinguishes patched, still-broken, and vendor-changed builds', () => {
+  const broken = `$wrapped = '<meta charset="utf-8"><div id="__bdmcp_root__">' . $html . '</div>';`;
+  const patched = `$wrapped = '<?xml encoding="utf-8"?><div id="__bdmcp_root__">' . $html . '</div>';`;
+  assert.equal(classifyHtmlToPage(broken), 'broken-line-present');
+  assert.equal(classifyHtmlToPage(patched), 'patched');
+  assert.equal(classifyHtmlToPage(`$wrapped = '<div id="__bdmcp_root__">' . $html . '</div>';`), 'unrecognised', 'a vendor rewrite is neither');
+  assert.equal(classifyHtmlToPage(''), 'unrecognised');
+  assert.equal(classifyHtmlToPage(patched + broken), 'patched', 'patched wins when the backup text also appears (comments quoting the old line)');
 });

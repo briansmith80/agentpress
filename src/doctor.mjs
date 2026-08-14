@@ -18,6 +18,7 @@ import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight, sslP
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
 import { psCapture, resolveOnPath } from './win.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
+import { classifyHtmlToPage, OXYGEN_HTML_TO_PAGE_REL } from './plugins.mjs';
 import { readWiredHostnames } from './mcp.mjs';
 import { sslCertPresent, wildcardActive, wildcardConfInstalled } from './wildcard.mjs';
 import { HTACCESS_AUTH_MARKER } from './wordpress.mjs';
@@ -186,7 +187,9 @@ export async function runDoctor({ cli = 'node index.js', version = null } = {}) 
     let value = `v${version}`;
     let status = 'ok';
     if (delta !== null && delta < 0) {
-      value = `v${version} — v${latest} is available. Update with:  npm i -g create-agentpress@latest`;
+      // The pinned form is not decoration: right after a release, npx can
+      // serve @latest from a stale cache — the exact moment people update.
+      value = `v${version} — v${latest} is available. Update with:  npm i -g create-agentpress@latest  (or run it immediately: npx create-agentpress@${latest})`;
       status = 'warn';
     } else if (delta !== null && delta > 0) {
       value = `v${version} (ahead of npm, which has v${latest} — a local checkout or an unpublished build)`;
@@ -464,6 +467,26 @@ export async function runDoctor({ cli = 'node index.js', version = null } = {}) 
       : `not found — optional; premium plugins fall back to zips in ${PREMIUM_PLUGINS_DIR}`,
     gh.code === 0 ? 'ok' : 'info',
   );
+
+  // Only when doctor runs INSIDE a site that has Oxygen: the html-to-page
+  // compatibility patch is an exact-line match that is load-bearing (upstream
+  // is still broken as of 6.2.0-beta.3 — issue #3686), and the day the vendor
+  // edits that line the patch silently no-ops. This row is where that day
+  // surfaces, instead of as a /verify that fails on every input.
+  // 'unrecognised' is info, not warn: it may equally mean the vendor FIXED
+  // the bug, and a warning for a possibly-good state cries wolf.
+  const htpFile = join(process.cwd(), 'public', OXYGEN_HTML_TO_PAGE_REL);
+  const htpSource = await readFile(htpFile, 'utf8').catch(() => null);
+  if (htpSource !== null) {
+    const kind = classifyHtmlToPage(htpSource);
+    if (kind === 'patched') {
+      row('Oxygen html-to-page', 'compatibility patch applied (upstream bug #3686 still open)', 'ok');
+    } else if (kind === 'broken-line-present') {
+      row('Oxygen html-to-page', 'UNPATCHED — fails on every input on libxml ≥ 2.10. Run `update` in this site (issue #3686)', 'warn');
+    } else {
+      row('Oxygen html-to-page', 'a build the compatibility patch does not know — the vendor changed the file. If the tool fails on every input, update this tool (issue #3686)', 'info');
+    }
+  }
 
   if (state.mysqlUp) {
     try {

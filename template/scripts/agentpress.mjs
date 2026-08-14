@@ -932,15 +932,18 @@ for (;;) {
     }
     await pressAnyKey();
   } else if (choice === 'update') {
-    // @latest, never @<the version we happened to see>: pinning a number here means
-    // a stale menu hands out a stale command long after that version stopped being
-    // current, and it was the mechanism that turned a false "update available" into
-    // an actual downgrade instruction. Runs it rather than printing it — the
+    // Pinned to the version the LIVE npm check returned this session — not
+    // @latest, which npx can serve from a stale cache right after a release,
+    // i.e. the exact moment people pick this item. This is NOT the old
+    // frozen-pin downgrade trap (a stale number baked into printed docs):
+    // latestVersion is fetched fresh each menu start and this item only
+    // exists when it is strictly newer than VERSION, so the pin cannot hand
+    // out a stale or older command. Runs it rather than printing it — the
     // operator's ask: the menu already detected the update, so offering a
     // command to retype was friction, not safety (update itself still asks
     // before overwriting files).
     console.log('');
-    await runInherit('npx', ['create-agentpress@latest', 'update']);
+    await runInherit('npx', [`create-agentpress@${latestVersion}`, 'update']);
     // This running menu IS one of the files update refreshes, so the new
     // version only shows after a relaunch. The item stays in the list — a
     // second pick is harmless, and dropping it here would fake certainty this

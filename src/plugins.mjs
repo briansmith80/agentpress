@@ -438,9 +438,27 @@ export async function installAgentConnector({ path, onStep }) {
 // The third is why this is not just "delete the meta tag": that swaps a loud
 // failure for quiet corruption. The <meta charset> carried the encoding; the
 // XML declaration is what still does while keeping NOIMPLIED semantics.
-const OXYGEN_HTML_TO_PAGE_REL = join('wp-content', 'plugins', 'oxygen', 'plugin', 'mcp', 'design', 'html-to-page.php');
+export const OXYGEN_HTML_TO_PAGE_REL = join('wp-content', 'plugins', 'oxygen', 'plugin', 'mcp', 'design', 'html-to-page.php');
 const BROKEN_WRAPPER = `'<meta charset="utf-8"><div id="__bdmcp_root__">'`;
 const FIXED_WRAPPER = `'<?xml encoding="utf-8"?><div id="__bdmcp_root__">'`;
+
+/**
+ * One judgment of an html-to-page.php source, shared by the patcher, the
+ * scaffold panel and doctor — three surfaces disagreeing about the same file
+ * is the presence-check drift this codebase keeps paying for. Pure so it is
+ * testable. The 'unrecognised' outcome is the one that matters long-term:
+ * the vendor patch is an exact-line match that carried the tool across the
+ * beta 2 → beta 3 jump (upstream is still broken — issue #3686), and the day
+ * the vendor edits that line, the patch deliberately no-ops — this
+ * classification is how that day shows up in output instead of as a broken
+ * /verify.
+ */
+export function classifyHtmlToPage(source) {
+  const text = String(source || '');
+  if (text.includes(FIXED_WRAPPER)) return 'patched';
+  if (text.includes(BROKEN_WRAPPER)) return 'broken-line-present';
+  return 'unrecognised';
+}
 const PATCH_NOTE = [
   '// PATCHED BY AGENTPRESS: a leading <meta charset> combined with',
   '// LIBXML_HTML_NOIMPLIED trips a spurious "Memory allocation failed" in',
@@ -484,13 +502,14 @@ export async function patchOxygenHtmlToPage({ path, onStep }) {
     return { status: 'absent' }; // no Oxygen on this site — nothing to say
   }
 
-  if (source.includes(FIXED_WRAPPER)) return { status: 'already-patched' };
+  const kind = classifyHtmlToPage(source);
+  if (kind === 'patched') return { status: 'already-patched' };
 
   // Not the string we know: the vendor changed this file. Refuse and SAY SO —
   // guessing at a rewrite of someone else's code is how you corrupt an install.
   // (The message used to point at PLANNING/TODO.md, a maintainer-local file that
   // stopped shipping in 1.9.0 — a user can't follow that reference.)
-  if (!source.includes(BROKEN_WRAPPER)) {
+  if (kind === 'unrecognised') {
     onStep?.(
       '(Oxygen html-to-page looks different from the build this patch knows — leaving it alone. ' +
         'If that tool fails on every input, a newer create-agentpress may know this build.)',

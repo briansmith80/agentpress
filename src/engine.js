@@ -1298,7 +1298,25 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
   await updateAllPlugins({ path: publicDir, onStep });
   // AFTER the update, never before: that step pulls the vendor's current build
   // and would undo the patch. See plugins.mjs for what this is and why.
-  await patchOxygenHtmlToPage({ path: publicDir, onStep });
+  // Any state where html-to-page may be broken and we proceeded anyway
+  // belongs in the PANEL, not just a step line that scrolls past — the patch
+  // is load-bearing (it carried the tool across the vendor's beta 2 → beta 3
+  // jump; upstream is still broken, issue #3686), so its absence is the
+  // difference between the flagship build path working and failing on every
+  // input.
+  const patch = await patchOxygenHtmlToPage({ path: publicDir, onStep });
+  if (patch.status === 'unrecognised') {
+    warnings.push(
+      "Oxygen's html-to-page is a build this tool's compatibility patch does not know —\n" +
+        '    if that tool fails on every input, update this tool and re-run `update` here\n' +
+        '    (upstream bug: soflyy/oxygen-bugs-and-features#3686)',
+    );
+  } else if (patch.status === 'unknown-libxml' || patch.status === 'failed') {
+    warnings.push(
+      `Oxygen's html-to-page compatibility patch was skipped (${patch.status === 'failed' ? patch.error : 'libxml version unreadable'}) —\n` +
+        '    if that tool fails on every input, this is why (issue #3686)',
+    );
+  }
 
   const mcp = await wireMcpForSite({ publicDir, hostname, adminUser, onStep });
   const { configuredAgents } = mcp;
