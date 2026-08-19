@@ -94,9 +94,23 @@ quoted one. Budget for the live run.
 ```
 node index.js aptestNNN --yes --premium=none    # --premium=none unless testing premium
 curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/hello-world/   # 200 = permalinks + .htaccess
-curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/.env           # 404 = docroot correct
+curl -sk -o /dev/null -w "%{http_code}" https://aptestNNN.test/package.json   # 404 = docroot is public/
 cd C:/laragon/www/aptestNNN && node <repo>/index.js destroy --yes
 ```
+
+**Do not put `/.env` back in that docroot check.** It was the recipe's check until
+2026-08-19 and it had stopped testing anything. This machine carries a hand-written
+server-scope deny (`C:\laragon\etc\apache2\alias\000-security-deny-secrets.conf`, with
+`C:\laragon\www\.htaccess` as its primary copy, neither of them written by this tool)
+whose `<FilesMatch>` matches `.env` by NAME, so Apache answers **403 before it looks at
+whether the file exists**. Live-verified 2026-08-19: a `.pem` probe returned 403 while it
+existed inside `public/` and 403 again after deletion, and a dotfile the pattern does not
+match (`/.nonexistent-xyz`) returns 404, so there is no blanket dotfile rule. A WRONG
+docroot answers 403 too, which is why the check could not fail. `package.json` is sound
+because it exists only in the project root and no deny rule covers it: 404 means Apache is
+serving `public/`, and 200 would mean it is serving the project root with the site's `.env`
+and `.mcp.json` exposed. Any replacement needs that property, so check it against the deny
+patterns above before trusting it.
 
 **Back up `~/.claude.json` first.** MCP wiring is `--scope user` (machine-global), so
 scaffolding **repoints the live `wordpress` MCP connection** at the test site, and destroying
