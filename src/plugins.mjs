@@ -4,7 +4,7 @@
 // carries over unchanged except for dropping the exec prefix.
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { resolvePhpExe, runWp, spawnCapture } from './wp.mjs';
+import { runPhpCode, runWp, spawnCapture } from './wp.mjs';
 import { resolveOnPath } from './win.mjs';
 import { CONFIG_PATH, PREMIUM_PLUGINS_DIR } from './paths.mjs';
 import { loadConfig } from './config.mjs';
@@ -476,8 +476,7 @@ function formatLibxml(v) {
 /** LIBXML_VERSION as an int (21100 = 2.11.0), or null if PHP can't be asked. */
 async function libxmlVersion() {
   try {
-    const php = await resolvePhpExe();
-    const { code, stdout } = await spawnCapture(php, ['-r', 'echo LIBXML_VERSION;']);
+    const { code, stdout } = await runPhpCode('echo LIBXML_VERSION;');
     if (code !== 0) return null;
     const n = Number.parseInt(stdout.trim(), 10);
     return Number.isFinite(n) ? n : null;

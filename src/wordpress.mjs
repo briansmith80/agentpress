@@ -5,7 +5,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { runWp, spawnCapture } from './wp.mjs';
+import { runWp, spawnCapture, stripPhpDiagnostics } from './wp.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 import { psCapture } from './win.mjs';
 import { yellow, WARN } from './ansi.mjs';
@@ -504,8 +504,28 @@ export async function diagnoseAppPasswordAuth({ publicDir }) {
     path: publicDir,
   });
   if (probe.code === 0) {
-    const [envType, available] = probe.stdout.trim().split('|');
-    if (envType && envType !== 'local') {
+    const out = stripPhpDiagnostics(probe.stdout).trim();
+    const [envType, available] = out.split('|');
+    // Only believe a reading that has the shape we asked for. In 1.10.0 this
+    // compared "Deprecated: …\nlocal" against "local" and told the user their
+    // wp-config.php was missing define('WP_ENVIRONMENT_TYPE', 'local') when the
+    // define was present and correct — the most misdirecting line in issue #1,
+    // precisely because "app passwords need a local environment over http" IS a
+    // real failure mode, so the user chased it. PHP's own diagnostics are
+    // filtered out above and no longer reach stdout at all; anything still
+    // misshapen here is something ELSE writing to it (a plugin echoing in a
+    // hook, an mu-plugin debug line), and the honest answer is to say so rather
+    // than name a cause we did not measure. The test stays permissive about the
+    // environment name itself, which is filterable and can be any string.
+    const wellFormed = !out.includes('\n') && /\|[01]$/.test(out);
+    if (!wellFormed) {
+      hints.push(
+        'the environment-type probe came back in an unreadable shape, so this check was\n' +
+          "    skipped rather than guessed at — something is writing to WP-CLI's stdout ahead\n" +
+          '    of the value.\n' +
+          '    Fix: run `wp eval \'echo wp_get_environment_type();\'` in public/ to see what.',
+      );
+    } else if (envType && envType !== 'local') {
       hints.push(
         `public/wp-config.php is missing define('WP_ENVIRONMENT_TYPE', 'local') — it\n` +
           `    reports "${envType}". WordPress refuses application passwords over plain http\n` +

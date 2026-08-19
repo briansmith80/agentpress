@@ -24,7 +24,7 @@
 //   - ENFORCED BELOW: the hostname must be loopback/local-dev
 //     (.test/.local/.localhost/localhost/127.x), so this cannot be pointed
 //     at a public site even by a future caller inside this codebase.
-import { runWpEvalFile } from './wp.mjs';
+import { runWpEvalFile, stripPhpDiagnostics } from './wp.mjs';
 
 /** Local-dev hostnames only — see the security model above. Keep this the single gate; do not add a bypass flag. */
 function isLocalDevHost(hostname) {
@@ -67,7 +67,7 @@ export async function mintAdminLoginUrl({ path, hostname, scheme = 'http' }) {
     return { url: `${scheme}://${hostname}/wp-admin`, oneClick: false, reason: `"${hostname}" is not a local dev hostname` };
   }
   const result = await runWpEvalFile(ADMIN_LOGIN_PHP, { path });
-  const out = result.stdout.trim();
+  const out = stripPhpDiagnostics(result.stdout).trim();
   if (result.code === 0 && /acfw_login=/.test(out)) {
     try {
       const url = new URL(out);

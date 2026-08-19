@@ -7,11 +7,15 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { runWp } from './wp.mjs';
+import { firstPhpDiagnostic, runWp, stripPhpDiagnostics } from './wp.mjs';
 import { psRun } from './win.mjs';
 import { LARAGON_ROOT } from './paths.mjs';
 
 const APP_PASSWORD_NAME = 'agentpress';
+// WordPress mints these as wp_generate_password( 24, false ) — alphanumerics
+// only, no separators, one line. The range is loose on purpose: the point is to
+// reject prose and multi-line buffers, not to pin core's current PW_LENGTH.
+const APP_PASSWORD_SHAPE = /^[A-Za-z0-9]{16,64}$/;
 // Both spellings are ours: pre-rename sites carry the old name, and destroy
 // used to try to remove it separately. One list means revocation covers both.
 export const APP_PASSWORD_NAMES = [APP_PASSWORD_NAME, 'katalyst-laragon'];
@@ -72,7 +76,7 @@ export async function revokeAppPasswords({ path, adminUser }) {
   if (list.code !== 0) return null;
   let entries;
   try {
-    entries = JSON.parse(list.stdout.trim() || '[]');
+    entries = JSON.parse(stripPhpDiagnostics(list.stdout).trim() || '[]');
   } catch {
     return null;
   }
@@ -97,7 +101,37 @@ export async function mintAppPassword({ path, adminUser, onStep }) {
   }
   const result = await runWp(['user', 'application-password', 'create', adminUser, APP_PASSWORD_NAME, '--porcelain'], { path });
   if (result.code !== 0) throw new Error(`Failed to mint application password: ${(result.stderr || result.stdout).trim()}`);
-  return result.stdout.trim();
+  return parseMintedAppPassword(result.stdout);
+}
+
+/**
+ * The password out of `--porcelain`'s stdout, or a throw naming why not.
+ *
+ * Separate from mintAppPassword, and exported, so the check that guards a
+ * credential is directly testable without Laragon: it is the whole of the fix
+ * for issue #1 and must not be the untested part of it.
+ *
+ * 1.10.0 wrote this buffer into .mcp.json's WP_API_PASSWORD verbatim. On PHP 8.5
+ * the real 24 characters were on the END — correct, and authenticating fine in
+ * isolation — behind a PHP deprecation notice that turned every MCP request into
+ * a 401 with zero tools and no clue why. A credential read out of a stream that
+ * can also carry prose has to be checked where it is created, not discovered as
+ * an opaque 401 an hour later.
+ */
+export function parseMintedAppPassword(stdout) {
+  const password = stripPhpDiagnostics(stdout).trim();
+  if (APP_PASSWORD_SHAPE.test(password)) return password;
+  const cause = firstPhpDiagnostic(stdout);
+  // Never echo the buffer itself: on the failure this exists for it still holds
+  // a live credential right behind the prose. Name the CAUSE instead.
+  throw new Error(
+    'WordPress returned an application password of an unexpected shape, so nothing was written.\n' +
+      (cause
+        ? `  Cause: PHP wrote a diagnostic to WP-CLI's stdout, which is where the password is read from:\n    ${cause}\n` +
+          "  Fix: set display_errors=stderr in the CLI PHP's php.ini, then run `rewire` again.\n"
+        : `  Got ${password.length} character(s); expected 16-64 alphanumerics on one line.\n`) +
+      '  (The value itself is deliberately not printed — the buffer may hold a live credential.)',
+  );
 }
 
 /** Never let a captured stdout/stderr echo a credential into the console (or an AI agent's uploaded session transcript). */

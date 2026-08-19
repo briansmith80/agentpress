@@ -13,7 +13,7 @@
 // loses 9 columns of alignment. `row()` is the only place that does either.
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { LARAGON_ROOT, HOSTS_PATH, WWW_DIR, PREMIUM_PLUGINS_DIR } from './paths.mjs';
-import { WP_CLI_PHAR, compareVersionsDesc, phpVersion, resolvePhpExe, spawnCapture, wpCliPresent } from './wp.mjs';
+import { WP_CLI_PHAR, compareVersionsDesc, phpVersion, resolvePhpExe, runPhpCode, spawnCapture, wpCliPresent } from './wp.mjs';
 import { apacheUp, inferHostnameSuffix, laragonRunning, mysqlUp, preflight, sslPortUp } from './laragon.mjs';
 import { MYSQL_PORT, resolveMysqlClientExe, resolveRootCredential } from './mysql.mjs';
 import { psCapture, resolveOnPath } from './win.mjs';
@@ -70,10 +70,9 @@ async function hostsMagicCount() {
 }
 
 async function phpIniSummary() {
-  const php = await resolvePhpExe();
   const code =
     "echo json_encode(['memory_limit'=>ini_get('memory_limit'),'upload_max_filesize'=>ini_get('upload_max_filesize'),'post_max_size'=>ini_get('post_max_size'),'SMTP'=>ini_get('SMTP'),'smtp_port'=>ini_get('smtp_port'),'exif'=>extension_loaded('exif')?1:0,'ini_path'=>php_ini_loaded_file()]);";
-  const { code: exitCode, stdout } = await spawnCapture(php, ['-r', code]);
+  const { code: exitCode, stdout } = await runPhpCode(code);
   if (exitCode !== 0) return null;
   try {
     return JSON.parse(stdout.trim());

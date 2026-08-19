@@ -18,6 +18,7 @@ const mcp = await read('src/mcp.mjs');
 const agents = await read('src/agents.mjs');
 const adminLogin = await read('src/admin-login.mjs');
 const engine = await read('src/engine.js');
+const wp = await read('src/wp.mjs');
 
 test('the frozen menu imports nothing from src/ (src does not exist beside a scaffolded site)', () => {
   const bad = [...menu.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]).filter((s) => !s.startsWith('node:'));
@@ -120,6 +121,25 @@ test('BANNER_WIDTH is identical in both copies (it right-aligns the subtitle)', 
   const grab = (src) => src.match(/const BANNER_WIDTH = (\d+);/)?.[1];
   assert.ok(grab(menu), 'the menu must define BANNER_WIDTH');
   assert.equal(grab(menu), grab(ansi), 'BANNER_WIDTH drifted, so the subtitle no longer lines up');
+});
+
+test('the PHP-diagnostics filter is identical in both copies', () => {
+  // Issue #1: on PHP 8.5 the pinned WP-CLI phar prints a deprecation to STDOUT
+  // before every value, and this filter is what keeps it out of the credential
+  // and out of the one-click login URL. The menu's copy protects already-
+  // scaffolded sites, where the scaffolder's copy is not present at all — so
+  // drift here reads as "fixed" while a whole class of user stays broken.
+  const grabFn = (src) => src.match(/function stripPhpDiagnostics\(text\) \{[\s\S]*?\n\}/)?.[0]?.replace(/\s+/g, ' ');
+  assert.ok(grabFn(menu), 'the frozen menu must carry stripPhpDiagnostics');
+  assert.ok(grabFn(wp), 'src/wp.mjs must define stripPhpDiagnostics');
+  assert.equal(grabFn(menu), grabFn(wp), 'stripPhpDiagnostics drifted between its two copies');
+  // The two patterns it depends on, compared separately: an equal function body
+  // over different regexes would filter different things.
+  for (const name of ['PHP_DIAGNOSTIC_LINE', 'PHP_DIAGNOSTIC_CONT']) {
+    const grab = (src) => src.match(new RegExp(`const ${name} =\\s*([^;]+);`))?.[1]?.replace(/\s+/g, '');
+    assert.ok(grab(menu), `the menu must define ${name}`);
+    assert.equal(grab(menu), grab(wp), `${name} drifted between its two copies`);
+  }
 });
 
 test('every AGENTPRESS_* env read in the frozen menu goes through envOn', () => {

@@ -366,6 +366,41 @@ async function runWp(args) {
   });
 }
 
+// Deliberate duplicated copy of src/wp.mjs's stripPhpDiagnostics — this file is
+// frozen into every scaffolded site and cannot import from src/. Kept identical
+// programmatically (test/parity.test.mjs), not by eye.
+//
+// PHP's CLI SAPI sends display_errors output to STDOUT, the same stream values
+// are read from. WP-CLI 2.12.0 bundles a react/promise that writes `case X;`,
+// which PHP 8.5 deprecated, so on 8.5 every `wp` call prints a Deprecated notice
+// ahead of its real output — and `2>/dev/null` cannot help. Issue #1: that
+// notice went into .mcp.json as the application password (every MCP request
+// 401'd) and made this file's one-click login link unparseable, degrading it to
+// the plain form with no explanation.
+const PHP_DIAGNOSTIC_LINE =
+  /^(PHP )?(Deprecated|Notice|Warning|Strict Standards|Fatal error|Parse error|Recoverable fatal error|Catchable fatal error|Unhandled exception):\s/;
+const PHP_DIAGNOSTIC_CONT = /^(Stack trace:\s*$|#\d+\s|\s+thrown in .+ on line \d+\s*$)/;
+
+function stripPhpDiagnostics(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const kept = [];
+  let inDiagnostic = false;
+  for (const line of lines) {
+    if (PHP_DIAGNOSTIC_LINE.test(line)) {
+      inDiagnostic = true;
+      continue;
+    }
+    if (inDiagnostic) {
+      // A blank line or a trace continuation still belongs to the diagnostic;
+      // anything else is the command's real output resuming.
+      if (!line.trim() || PHP_DIAGNOSTIC_CONT.test(line)) continue;
+      inDiagnostic = false;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
 function runWpEvalFile(phpCode) {
   const tmpFile = join(tmpdir(), `agentpress-eval-${randomBytes(6).toString('hex')}.php`);
   // eval-file needs an actual <?php tag (unlike `wp eval`) — content
@@ -384,7 +419,7 @@ function runWpEvalFile(phpCode) {
 /** Links are one-time — mint fresh on every pick, never cache. Falls back to the plain login form if anything's off (matches the scaffolder's own admin-login.mjs), saying so instead of degrading silently. */
 async function adminUrl() {
   const { code, stdout } = await runWpEvalFile(ADMIN_LOGIN_PHP);
-  const out = stdout.trim();
+  const out = stripPhpDiagnostics(stdout).trim();
   if (code === 0 && /acfw_login=/.test(out)) {
     try {
       const u = new URL(out);

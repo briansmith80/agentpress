@@ -31,6 +31,86 @@ const WP_CLI_SHA512 = 'be928f6b8ca1e8dfb9d2f4b75a13aa4aee0896f8a9a0a1c45cd5d2c98
 
 export { LARAGON_ROOT, WP_CLI_CACHE_DIR };
 
+// PHP's CLI SAPI sends display_errors output to STDOUT, not stderr — so every
+// diagnostic PHP emits lands in the exact buffer we read VALUES out of, and
+// `2>/dev/null` cannot help. Live-verified here with the pinned phar on PHP
+// 8.5.1: `wp --version` prints a blank line, then
+//   Deprecated: Case statements followed by a semicolon (;) are deprecated…
+//   WP-CLI 2.12.0
+// because WP-CLI 2.12.0 bundles a react/promise that writes `case X;` and PHP
+// 8.5 deprecated that spelling. 2.12.0 is the latest release, so there is no
+// version to upgrade to, and the phar is SHA-pinned so a hand-swap is reverted.
+//
+// Reported as issue #1 against 1.10.0, with two symptoms and one cause: the
+// whole buffer became .mcp.json's WP_API_PASSWORD (so every MCP request 401'd
+// and the server came up with zero tools), and the same pollution made the
+// WP_ENVIRONMENT_TYPE probe compare "Deprecated: …\nlocal" against "local" and
+// report a correct wp-config.php as missing the define — actively misdirecting
+// diagnosis, since "app passwords need a local environment over http" is a
+// real failure mode.
+//
+// `stderr` is a CLI-SAPI-only value for display_errors and it is the whole
+// point: diagnostics stay visible to a human running `wp` by hand, they just
+// stop contaminating machine-read output.
+const PHP_DISPLAY_ERRORS = 'stderr';
+
+// PHP's own diagnostic line shapes, as display_errors renders them with
+// html_errors off (the CLI default). The `PHP ` prefix appears when the same
+// text arrives via log_errors instead.
+const PHP_DIAGNOSTIC_LINE =
+  /^(PHP )?(Deprecated|Notice|Warning|Strict Standards|Fatal error|Parse error|Recoverable fatal error|Catchable fatal error|Unhandled exception):\s/;
+// Continuation lines of a multi-line diagnostic (an uncaught throwable).
+const PHP_DIAGNOSTIC_CONT = /^(Stack trace:\s*$|#\d+\s|\s+thrown in .+ on line \d+\s*$)/;
+
+/**
+ * Drop PHP's diagnostics from a captured stdout buffer, keeping everything
+ * else line-for-line.
+ *
+ * Second line of defence behind PHP_DISPLAY_ERRORS, deliberately: that flag
+ * fixes the source for calls we spawn, but display_errors is not the only way
+ * text reaches stdout ahead of a value (a plugin echoing inside a hook, a
+ * stray var_dump in wp-config.php, an mu-plugin's debug line), and reading a
+ * value — above all a credential — out of a stream that can also carry prose
+ * is unsafe regardless of PHP version. Never widen this to "take the last
+ * line": `wp eval` output is legitimately multi-line and JSON formatters are
+ * one long line, so a positional rule would corrupt exactly the reads this
+ * protects.
+ */
+export function stripPhpDiagnostics(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const kept = [];
+  let inDiagnostic = false;
+  for (const line of lines) {
+    if (PHP_DIAGNOSTIC_LINE.test(line)) {
+      inDiagnostic = true;
+      continue;
+    }
+    if (inDiagnostic) {
+      // A blank line or a trace continuation still belongs to the diagnostic;
+      // anything else is the command's real output resuming.
+      if (!line.trim() || PHP_DIAGNOSTIC_CONT.test(line)) continue;
+      inDiagnostic = false;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+/**
+ * The first PHP diagnostic in a buffer, or null. Exists so an error message can
+ * name the CAUSE of a polluted read without echoing the buffer itself — which
+ * may hold a live credential right after the prose (that is precisely the shape
+ * of the app-password bug).
+ */
+export function firstPhpDiagnostic(text) {
+  return (
+    String(text ?? '')
+      .split(/\r?\n/)
+      .find((l) => PHP_DIAGNOSTIC_LINE.test(l))
+      ?.trim() ?? null
+  );
+}
+
 let cachedPhpExe = null;
 
 async function exists(p) {
@@ -86,9 +166,21 @@ export function compareVersionsDesc(a, b) {
 }
 
 export async function phpVersion() {
-  const php = await resolvePhpExe();
-  const { stdout } = await spawnCapture(php, ['-r', 'echo PHP_VERSION;']);
+  const { stdout } = await runPhpCode('echo PHP_VERSION;');
   return stdout.trim();
+}
+
+/**
+ * `php -r <code>`, with both stdout guards applied once instead of at each call
+ * site. Every caller reads a SCALAR out of the result (a version string, a JSON
+ * blob), which is exactly the read that broke in issue #1 — see
+ * stripPhpDiagnostics. Returns the same {code, stdout, stderr} shape as
+ * spawnCapture, so it never throws: check `.code`.
+ */
+export async function runPhpCode(code) {
+  const php = await resolvePhpExe();
+  const result = await spawnCapture(php, ['-d', `display_errors=${PHP_DISPLAY_ERRORS}`, '-r', code]);
+  return { ...result, stdout: stripPhpDiagnostics(result.stdout) };
 }
 
 /** `opts.input`, if given, is written to stdin and the stream closed — e.g. `wp config create --extra-php` reads its PHP block from STDIN. Stdin is always closed (written or not) so a command that unexpectedly waits on it can't hang the caller. */
@@ -179,7 +271,7 @@ export async function ensureWpCli() {
     verifiedPharThisProcess = true;
   }
   const php = await resolvePhpExe();
-  const batContent = `@echo off\r\n"${php}" -d memory_limit=512M "${WP_CLI_PHAR}" %*\r\n`;
+  const batContent = `@echo off\r\n"${php}" -d memory_limit=512M -d display_errors=${PHP_DISPLAY_ERRORS} "${WP_CLI_PHAR}" %*\r\n`;
   const current = await readFile(WP_CLI_BAT, 'utf8').catch(() => '');
   if (current !== batContent) {
     await writeFile(WP_CLI_BAT, batContent, 'utf8');
@@ -195,7 +287,7 @@ export async function runWp(args, { path, cwd, env, input } = {}) {
   const php = await resolvePhpExe();
   const phar = await ensureWpCli();
   await mkdir(WP_CLI_CACHE_DIR, { recursive: true }).catch(() => {});
-  const fullArgs = ['-d', 'memory_limit=512M', phar];
+  const fullArgs = ['-d', 'memory_limit=512M', '-d', `display_errors=${PHP_DISPLAY_ERRORS}`, phar];
   if (path) fullArgs.push(`--path=${path}`);
   fullArgs.push(...args);
   return spawnCapture(php, fullArgs, {
