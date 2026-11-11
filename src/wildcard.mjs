@@ -22,7 +22,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes, X509Certificate } from 'node:crypto';
+import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import { HOSTS_PATH, SITES_ENABLED_APACHE, WWW_DIR } from './paths.mjs';
 import { psCapture, psQuote } from './win.mjs';
 import { hostsContentEntryAddresses, inferHostnameSuffix, snapshotHosts } from './laragon.mjs';
@@ -256,21 +256,88 @@ function assertScriptSafeHostname(hostname) {
   }
 }
 
+/**
+ * The UNELEVATED wrapper that asks Windows to run a script file as
+ * administrator. Exported so tests run these bytes (with `elevate: false`,
+ * which is the same line minus `-Verb RunAs`).
+ *
+ * The script sits in %TEMP%, which every program running as the user can
+ * write, for as long as the permission prompt is on screen. Launched by bare
+ * path, anything could overwrite it in that time and be run as administrator
+ * on a prompt the user was expecting (security review, 2026-11-11; read, not
+ * exploited). So before the prompt: the file is opened with a lock that
+ * refuses writers, renames and deletes (FileShare.Read), its SHA-256 is taken
+ * THROUGH that locked handle and compared with the digest of the bytes this
+ * tool wrote, and the lock is held until the elevated run has ended. What
+ * runs elevated is still the same file by `-File`, so the two hosts scripts
+ * and how they execute are byte-for-byte what they were.
+ *
+ * This does not make UAC a wall: a program already running as the user can
+ * do worse than swap a file. It removes the cheap way.
+ *
+ * - psQuote for the path, not bare quotes: %TEMP% holds the account name, and
+ *   an apostrophe in it ("O'Brien") once closed the string early and broke
+ *   the hosts write for that user, reported, wrongly, as "the elevation
+ *   prompt was declined".
+ * - The path is wrapped in double quotes for the child ([char]34, so no
+ *   double quote has to survive this script's own command line):
+ *   Start-Process joins its arguments with spaces and quotes nothing.
+ * - PowerShell by absolute path, not by name.
+ * - `$code` is deliberately not pre-set: a declined prompt leaves $p empty
+ *   and exits as it always has, and the callers read the hosts file itself
+ *   as the ground truth.
+ */
+export function elevatedLauncherScript(scriptPath, sha256Hex, { elevate = true } = {}) {
+  if (!/^[0-9a-f]{64}$/.test(String(sha256Hex))) throw new Error('elevatedLauncherScript needs the SHA-256 of the script as 64 hex characters');
+  return [
+    `$tmp = ${psQuote(scriptPath)}`,
+    '$lock = $null',
+    'try {',
+    '  $lock = [System.IO.File]::Open($tmp, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)',
+    '} catch {',
+    "  [Console]::Error.WriteLine('could not lock the hosts script before running it: ' + $_.Exception.Message)",
+    '  exit 96',
+    '}',
+    'try {',
+    '  $sha = [System.Security.Cryptography.SHA256]::Create()',
+    "  $hex = -join ($sha.ComputeHash($lock) | ForEach-Object { $_.ToString('x2') })",
+    `  if ($hex -ne '${sha256Hex}') {`,
+    "    [Console]::Error.WriteLine('the hosts script was changed after it was written, so it was not run')",
+    '    exit 97',
+    '  }',
+    "  $ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
+    `  $p = Start-Process -FilePath $ps ${elevate ? '-Verb RunAs ' : ''}-Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',([char]34 + $tmp + [char]34)`,
+    '  $code = $p.ExitCode',
+    '} finally {',
+    '  $lock.Close()',
+    '}',
+    'exit $code',
+  ].join('\r\n');
+}
+
 /** Runs a script elevated (one UAC prompt) and returns psCapture's result — the child's exit code flows through Start-Process. */
 async function runElevated(script) {
   const tmp = join(tmpdir(), `agentpress-hosts-${randomBytes(6).toString('hex')}.ps1`);
-  await writeFile(tmp, script, 'utf8');
+  const bytes = Buffer.from(script, 'utf8');
+  await writeFile(tmp, bytes);
   try {
-    // psQuote, not a bare '${tmp}'. %TEMP% contains the Windows account name, so an
-    // apostrophe in it ("O'Brien") closed the PowerShell string early and broke the
-    // hosts write permanently for that user — reported to them, wrongly, as "the
-    // elevation prompt was declined", which no retry could fix.
-    return await psCapture(
-      `$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',${psQuote(tmp)}; exit $p.ExitCode`,
-    );
+    return await psCapture(elevatedLauncherScript(tmp, createHash('sha256').update(bytes).digest('hex')));
   } finally {
     await rm(tmp, { force: true }).catch(() => {});
   }
+}
+
+/**
+ * A name this tool may map to 127.0.0.1: one that ends in Laragon's own
+ * suffix, or in a TLD reserved for local use. `resume` takes SITE_HOST from
+ * `.env`, and before this check a `.env` naming `github.com` would have had
+ * that pointed at this machine, with the user approving the prompt.
+ */
+export function isLocalDevHostname(hostname, suffix = '.test') {
+  const host = String(hostname).toLowerCase();
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host)) return false;
+  const allowed = new Set(['.test', '.localhost', String(suffix || '.test').toLowerCase()]);
+  return [...allowed].some((tld) => /^\.[a-z0-9.-]+$/.test(tld) && host.endsWith(tld) && host.length > tld.length);
 }
 
 /**
@@ -327,6 +394,10 @@ export async function ensureHostsEntry(hostname) {
   const current = await readFile(HOSTS_PATH, 'utf8').catch(() => '');
   if (hostsHas(current, hostname)) return { ok: true, already: true };
   if (!/^[a-z0-9.-]+$/i.test(hostname)) return { ok: false, reason: `refusing to write suspicious hostname "${hostname}"` };
+  const { suffix } = await inferHostnameSuffix().catch(() => ({ suffix: '.test' }));
+  if (!isLocalDevHostname(hostname, suffix)) {
+    return { ok: false, reason: `"${hostname}" is not a local development name (this Laragon uses ${suffix}), so it was not pointed at this machine` };
+  }
 
   await snapshotHosts().catch(() => {});
   const result = await runElevated(hostsAppendScript(hostname));

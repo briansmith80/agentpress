@@ -47,38 +47,30 @@ and use `node index.js …` instead of the npx form. Zero dependencies, no `npm 
 
 `setup` does two one-time things:
 
-1. **Gets your premium plugins in place** — shows which ones (Oxygen / the Breakdance
-   extensions) already have a licensed zip available on this machine, opens the drop
-   folder for you and re-scans after you add zips, and captures your Oxygen license key
-   (one key covers the extensions too; saved to `~/.agentpress/config.json`).
-   Setup makes plugins **available** — you choose which ones each individual project
-   actually gets when you scaffold it.
+1. **Gets your premium plugins in place.** It shows which licensed zips (Oxygen / the
+   Breakdance extensions) are on this machine, opens the drop folder for you, and saves
+   your Oxygen license key (one key covers the extensions too). Setup only makes plugins
+   **available**; you choose per project which ones a site gets.
 2. **Installs a single wildcard vhost** into Laragon's Apache. This needs one
-   **Stop All → Start All** in Laragon (the only restart it will ever ask for) — run
-   `setup` again afterwards to confirm it's active. From then on, scaffolding a site
-   involves **no Laragon reload at all**: no machine-wide Apache/MySQL blip, no
-   multi-minute vhost polling, and none of Laragon's reload-staleness failures. A new site
-   is live the instant its folder exists; the only prompt left is one Windows UAC prompt
+   **Stop All → Start All** in Laragon, the only restart it will ever ask for. Run `setup`
+   again afterwards to confirm it is active. From then on a new site is live the instant
+   its folder exists: no Laragon reload, and the only prompt left is one Windows UAC prompt
    per site for its hosts entry.
 
-Without `setup`, everything still works through the classic Laragon-reload flow — it's just
-slower and occasionally needs `resume` after Laragon's flaky reload (the failure message
+Without `setup`, everything still works through the classic Laragon-reload flow. It is
+slower and sometimes needs `resume` after Laragon's flaky reload (the failure message
 walks you through it).
 
 **https, and why a site can show `http://`**
 
-A scaffolded site's **WordPress Address** may read `http://<name>.test`. That is not hardcoded
-and not something to fix by hand: `wp-config.php` derives `WP_HOME`/`WP_SITEURL` per request
-from the connection the site was reached over, so once an https vhost exists, loading
-`https://<name>.test` makes WordPress emit https URLs by itself — no search-replace, no config
-edit. What `http://` actually tells you is that SSL was not live at scaffold time, because
-`setup` only adds the https half of the wildcard vhost when Laragon's certificate pair exists
-(a vhost pointing at a missing certificate file is a hard Apache startup failure, which would
-take every site on the machine down with it).
+A site's **WordPress Address** may read `http://<name>.test`. Nothing is wrong, and there
+is nothing to fix by hand: `wp-config.php` works out the address per request, so once SSL
+is on, loading `https://<name>.test` gives https URLs by itself. `http://` only means SSL
+was not live when the site was scaffolded.
 
-To turn it on: enable SSL in Laragon's menu, re-run `setup`, then — if it says the running
-Apache predates the conf — do the one-time **Stop All → Start All**. `doctor` reports TCP :443
-and whether the certificate pair is present, so this is visible rather than guesswork.
+To turn it on: enable SSL in Laragon's menu, re-run `setup`, then do the one-time
+**Stop All → Start All** if it says the running Apache predates the conf. `doctor` reports
+TCP :443 and whether the certificate pair is present.
 
 **First scaffold — what to expect**
 
@@ -98,10 +90,6 @@ Three things move independently, so it is worth knowing which is which:
 Newly scaffolded sites always get everything current. Existing sites keep the copies they
 were built with until you run `update` in them, which is deliberate: it overwrites files you
 may have edited, so it asks first.
-
-`rewire` refreshes *this* site's own Claude Code wiring (`.mcp.json`) and points the
-machine-global wiring (Cursor, Codex, OpenCode) here — see "How the wiring is scoped" below.
-Getting the latest wiring shape is a side effect, so running it once per site covers both.
 
 ## Usage
 
@@ -137,25 +125,15 @@ alias works for every command: `agentpress doctor`, `agentpress destroy`, and so
 Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install folder if not
 auto-detected), `AGENTPRESS_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
 `AGENTPRESS_MYSQL_PORT` (when MySQL isn't on 3306), `AGENTPRESS_PREMIUM_PLUGINS_REPO` (see
-below). Legacy `KATALYST_*` names from before the rename are still honored.
-
-Output appearance: `AGENTPRESS_NO_BANNER=1` hides the wordmark header, and the standard
-`NO_COLOR=1` / `FORCE_COLOR=1` turn colour off / on. Colour and the banner are suppressed
-automatically when output isn't a terminal, so piping or redirecting any command gives you
-clean plain text.
+below). Legacy `KATALYST_*` names are still honored. `AGENTPRESS_NO_BANNER=1` hides the
+wordmark, and `NO_COLOR=1` / `FORCE_COLOR=1` turn colour off / on. Both are off by
+themselves when output isn't a terminal, so piping any command gives clean plain text.
 
 ## Push to live, pull from live
 
-New in 1.11.0, and **lightly proven**: one real server so far (cPanel with LiteSpeed,
-PHP 8.4). Connect, status, the preview, the first full copy, a design push and its undo
-have run there. A pull, and the undo of a full copy, have only run between local sites. Treat your first run as a
-test: use a fresh WordPress install on the server, and keep the host's own backup
-switched on.
-
-A push clears the server's page cache when it finishes, and a cache plugin the live site
-already runs (LiteSpeed Cache, WP Rocket and the like) stays switched on with its own
-settings. If the home page still shows the old site after a push, purge the cache in
-that plugin or in the hosting panel.
+New in 1.11.0. Send a site to a real server, then keep pushing design changes without
+touching what the editor writes there. It works over plain HTTPS, so shared hosting with
+no SSH (most cPanel accounts) is fine.
 
 One rule decides what travels:
 
@@ -166,8 +144,13 @@ One rule decides what travels:
   the editor uploaded.
 
 So after launch you keep designing locally and `push`, while the editor keeps writing on
-live, and neither wipes the other. It works over plain HTTPS, so shared hosting with no SSH
-(most cPanel accounts) is fine.
+live, and neither wipes the other.
+
+**Lightly proven.** One real server so far (cPanel with LiteSpeed, PHP 8.4). Every command
+has run there at least once, and that one server found four bugs no local run had shown.
+The newest safety checks (plugin 0.1.5) have run in full only between local sites. Treat
+your first run as a test: use a fresh WordPress install on the server, and keep the host's
+own backup switched on.
 
 **Set up, once per site:**
 
@@ -178,6 +161,10 @@ live, and neither wipes the other. It works over plain HTTPS, so shared hosting 
 1. On the live site: Plugins → Add Plugin → Upload Plugin, choose that zip, activate it.
 2. Tools → AgentPress Push → **Create a connection key**. It shows one long line, once.
 3. Back in the local site folder: `… push connect <that line>`
+
+Both ends must run the same plugin version. After you update AgentPress, run `push plugin`
+again and upload the new zip on the live site (choose "Replace current with uploaded").
+Your connection key stays valid, and the command tells you when this is needed.
 
 **Day to day:**
 
@@ -196,9 +183,23 @@ Add `--dry-run` to `push`, `push --full` or `pull` to see the plan and send noth
 All of it is also in the site menu: `npm run agentpress`, then **Live site**. Run `update`
 in a site scaffolded before 1.11.0 to get that entry.
 
-**What each end keeps through a full copy or a pull:** its own address, its administrators'
-logins, its search-engine visibility setting, its admin email and its Oxygen license. Sign-in
-sessions and application passwords never travel.
+**Good to know:**
+
+- **Passwords do not travel up.** `push --full` copies your accounts, but everyone it
+  brings, apart from the live site's own administrators, gets a random password there.
+  The push ends by naming who needs one set.
+- **Each end keeps what is its own** through a full copy or a pull: its address, its
+  administrators' logins, its search-engine visibility setting, its admin email and its
+  Oxygen license. Sign-in sessions and application passwords never travel.
+- **The page cache is cleared for you** when a push finishes, and a cache plugin the live
+  site already runs (LiteSpeed Cache, WP Rocket and the like) stays on with its own
+  settings. If the home page still shows the old site, purge the cache in that plugin or
+  in the hosting panel.
+- **A design push sends upload files live has never had**, such as an image you placed in
+  a template. It does not put back a file that was deleted on live: the plan shows a
+  `leave media` line instead. The tool remembers what it has seen there in
+  `.agentpress-push-seen.json` in the project folder (gitignored). Delete that file to
+  send them anyway.
 
 **Built to be hard to hurt yourself with:**
 
@@ -214,6 +215,9 @@ sessions and application passwords never travel.
 - **The agent plugins stay local.** `agent-connector-for-wp` and
   `universal-abilities-plugin` give AI agents shell and PHP access. A push never sends
   them and never switches them on at the other end.
+- **A pull checks what the live site hands it.** It takes content and uploads only. Files
+  that would run as code are left out and named, and your local theme and upload folder
+  settings are kept. [SECURITY.md](SECURITY.md) lists what this does not cover.
 
 **Not covered yet:**
 
@@ -224,7 +228,9 @@ sessions and application passwords never travel.
   on live first and pull.
 - `undo --full` and `pull undo` roll back the database, not files.
 - Both sites need the same Oxygen version. The command checks and stops if they differ.
-- Sites with different table prefixes: the code handles it, but no test has exercised it.
+- Different table prefixes on the two sites: tested between local sites only. Some hosting
+  panels rename the prefix as a "security measure". If the undo of a full copy seems to
+  vanish after that, the kept tables still carry the old prefix.
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
@@ -264,18 +270,15 @@ zips. Two ways, use either or both:
    Requires `gh` installed and `gh auth login` done. When GitHub is unreachable the tool
    falls back to whatever's already in the local cache.
 
-**License auto-activation:** put your Oxygen license key in
-`~/.agentpress/config.json` once and every scaffold activates it automatically (via
-Oxygen's own `wp oxygen license` command; the Elements/Forms extensions are covered by the
-same key):
+**License auto-activation:** put your Oxygen license key in `~/.agentpress/config.json`
+once (`setup` does this for you) and every scaffold activates it, extensions included:
 
 ```json
 { "licenses": { "oxygen": "your-32-char-license-key" } }
 ```
 
-Without a configured key, the scaffold prints a reminder and you activate once in wp-admin
-instead. Keep any repo holding licensed zips **private**, and treat `config.json` as
-private too — it holds your license key.
+Without a key, the scaffold prints a reminder and you activate once in wp-admin. Keep any
+repo holding licensed zips **private**, and treat `config.json` as private too.
 
 ## What gets scaffolded
 
@@ -304,7 +307,7 @@ are detected on the machine — MCP wiring for every one of them.
 
 Every site ships a small interactive menu — `npm run agentpress` from the site folder:
 
-<img src="docs/menu.svg" alt="The per-site menu: one-click admin login, database snapshot and restore, recent errors, editor and terminal launchers" width="720">
+<img src="docs/menu.svg" alt="The per-site menu, one screen at a time: pick Live site, preview a design push, read the plan it would send" width="720">
 
 - **Open WP Admin** — a fresh one-click, already-logged-in link every time (they're
   single-use), falling back to the normal login form with a note when it can't mint one.
@@ -328,11 +331,10 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
 - **Update this site** — appears only when npm has a newer version, and runs the update
   for you.
 
-The menu draws one clean screen at a time, like a full-screen app, and gives your terminal
-back exactly as it was when you exit. Anything a command prints (a push, the error log) is
-shown in your normal terminal instead, so you can scroll it and it is still there afterwards.
-
-The menu is dependency-free and frozen into the site at scaffold time; `update` refreshes it.
+The menu draws one clean screen at a time and gives your terminal back as it was when you
+exit. Anything a command prints (a push, the error log) is shown in your normal terminal, so
+you can scroll it and it is still there afterwards. The menu is dependency-free and frozen
+into the site at scaffold time; `update` refreshes it.
 
 ## Two MCP servers, wired automatically (one of them a browser)
 
@@ -355,44 +357,32 @@ Confirm both after your first scaffold with `claude mcp list` (or your agent's e
 
 Every scaffolded site gets an `AGENTS.md` and a `/verify` command. Open the folder in your
 agent and run it: it calls the WordPress MCP tools, drives Playwright to load the site, and
-checks the Agent Connector abilities.
-
-On a site with Oxygen it also builds a holding page recording exactly what passed and when.
-Without Oxygen there is no `html-to-page` to build it with, so `/verify` reports the MCP legs
-and says plainly that the page was skipped rather than faking one.
+checks the Agent Connector abilities. With Oxygen it also builds a holding page recording
+what passed and when; without Oxygen it says the page was skipped rather than faking one.
 
 That is worth more than a green tick in a config listing, because **only the agent can test
-the agent's path**. `claude mcp list` says an entry exists; `/verify` says the credential still
-works, the endpoint answers, and the browser really opened the page. It is also the fastest
-way to diagnose the common failure below — if MCP has been repointed at another site, `/verify`
-stops immediately and tells you to run `rewire`.
+the agent's path**: `claude mcp list` says an entry exists, `/verify` says the credential
+still works, the endpoint answers and the browser really opened the page. If MCP has been
+repointed at another site, it stops immediately and tells you to run `rewire`.
 
-`AGENTS.md` is the other half, and it earns its place between verifications: it carries the
-handful of Oxygen behaviours that otherwise fail *silently* (bare CSS tag selectors are
-dropped, `@media` queries must match `get-breakpoints` verbatim, and a class is kept only if
-your `<style>` defines it *or* it is already registered on the site).
-
-It also carries the one that surprises people most: a `<style>` block passed to
-`html-to-page` is **not page-scoped**. Every class in it becomes a global, site-wide Oxygen
-selector that outlives the page it came from, so `/verify`'s holding page leaves 11
-`agentpress-verify-*` classes behind and later pages can reuse them. Removing them is a
-deliberate act in Oxygen's selector list, not something an agent should tidy up: elements
-bind to selectors by id, so deleting one strips the class from every page using it, and
-re-importing the CSS mints a new id rather than repairing the old reference.
-
-Both files are plain markdown in the site, yours to edit.
+`AGENTS.md` carries the Oxygen behaviours that otherwise fail *silently*: bare CSS tag
+selectors are dropped, `@media` queries must match `get-breakpoints` verbatim, a class is
+kept only if your `<style>` defines it *or* it is already registered on the site, and a
+`<style>` block passed to `html-to-page` is **not page-scoped** (its classes become
+site-wide Oxygen selectors that outlive the page, and deleting one strips it from every
+page using it). Both files are plain markdown in the site, yours to edit.
 
 **How the wiring is scoped** (this matters the day you scaffold a second site):
 
-- **Claude Code: per site, since 1.10.0.** Each site carries its own `.mcp.json` (gitignored —
-  it holds the site's credential), so every site keeps its wiring forever and scaffolding
-  another site changes nothing. The one cost: Claude Code asks once, on your first launch in
-  each site, whether to enable that site's MCP servers — approve both. Sites wired by older
-  versions still use the old machine-global entry until you run `rewire` in them once.
-- **Cursor, Codex, OpenCode: machine-global** (one `wordpress` entry per agent CLI), pointing
+- **Claude Code: per site, since 1.10.0.** Each site carries its own `.mcp.json` (gitignored,
+  it holds the site's credential), so scaffolding another site changes nothing. Claude Code
+  asks once, on your first launch in each site, whether to enable that site's MCP servers:
+  approve both. Sites wired by older versions use the old machine-global entry until you
+  run `rewire` in them once.
+- **Cursor, Codex, OpenCode: machine-global**, one `wordpress` entry per agent CLI, pointing
   at the **most recently scaffolded** site. Scaffolding a second site re-points them;
-  destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever URL
-  it is given, so it never needs re-pointing.)
+  destroying an old site leaves a newer site's wiring alone. (`playwright` drives whatever
+  URL it is given, so it never needs re-pointing.)
 
 **To point agents back at a site**, run `rewire` from inside it:
 
@@ -401,12 +391,10 @@ cd <laragon>\www\my-site
 npx create-agentpress@latest rewire
 ```
 
-For Claude Code that refreshes the site's own `.mcp.json` (and migrates a pre-1.10.0 site to
-per-site wiring); for the other CLIs it re-points the global entry here. It checks the
-endpoint actually answers (printing the number of MCP tools it found) and mints a fresh
-application password, which invalidates the site's previous one. The site's own
-`npm run agentpress` menu warns you when an agent's wiring points elsewhere — with a one-key
-**Point MCP here** fix — and `doctor` shows which site owns the global entry.
+It checks the endpoint actually answers (printing the number of MCP tools it found) and
+mints a fresh application password, which invalidates the site's previous one. The site's
+own `npm run agentpress` menu warns you when an agent's wiring points elsewhere, with a
+one-key **Point MCP here** fix, and `doctor` shows which site owns the global entry.
 
 ## Architecture
 
@@ -426,15 +414,14 @@ Source lives in `src/`, one module per concern:
 | `doctor.mjs` / `ansi.mjs`        | the environment report, and the colour/glyph/wordmark layer it prints through                            |
 | `registry.mjs` / `templates.mjs` | the environments registry, the scaffold-time template engine                                             |
 | `destroy.mjs` / `quickapp.mjs`   | teardown, the Laragon Quick app registration                                                             |
+| `push.mjs` + `push/agentpress-push/` | push and pull: the Node side carries files, and one PHP plugin does the work on both ends            |
 
-`template/` is the payload copied into every scaffolded project: the per-site menu, `AGENTS.md`,
-and the `/verify` command. `template/scripts/agentpress.mjs` is **frozen at scaffold time** and
-both dependency-free *and* import-free by design — `src/` does not exist beside a scaffolded
-site, so it cannot import from it. It therefore carries deliberate duplicated copies of a few
-small pieces (the admin-login PHP and its `eval-file` invocation, the colour gate, the wordmark
-art), the same reasoning the original project documented for its own three-copy pattern. That
-duplication is intentional; `test/parity.test.mjs` and `test/agent-files.test.mjs` are what stop
-the copies drifting.
+`template/` is the payload copied into every scaffolded project: the per-site menu,
+`AGENTS.md` and the `/verify` command. `template/scripts/agentpress.mjs` is **frozen at
+scaffold time** and import-free by design, because `src/` does not exist beside a scaffolded
+site. So it carries deliberate copies of a few small pieces (the admin-login PHP, the colour
+gate, the wordmark art); `test/parity.test.mjs` and `test/agent-files.test.mjs` stop the
+copies drifting.
 
 ## Uninstalling the tool
 
@@ -444,16 +431,13 @@ Nothing here runs in the background; removing it is deleting things. In order:
    DB, vhost, MCP entries, hosts entry, and folder for that site — the hosts entry needs
    a UAC prompt, and declining it just leaves that one line for you).
 2. Delete this checkout.
-3. Optional leftovers, harmless if kept: `~/.agentpress\` (registry, hosts backups,
-   premium plugin zips — note those zips are your licensed property),
-   `<laragon>\usr\bin\wp-cli-<version>.phar` + `wp.bat` (shared WP-CLI install — the
-   filename is version-scoped, so a bare `wp-cli.phar` there is either a pre-1.2.0
-   leftover or your own and is not ours to delete), the `AgentPress` line in
-   `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and any leftover hosts
-   entries for sites destroyed by versions before 1.9.0 — since 1.9.0 `destroy` removes
-   both its own `#agentpress` line and Laragon's `#laragon magic!` line for that site
-   (Laragon only clears those itself when a new site folder appears in www, so after
-   your last site they would linger). A hosts line you added by hand is never touched.
+3. Optional leftovers, harmless if kept: `~/.agentpress\` (registry, hosts backups, premium
+   plugin zips, which are your licensed property), `<laragon>\usr\bin\wp-cli-<version>.phar`
+   + `wp.bat` (the shared WP-CLI install; a bare `wp-cli.phar` there is not ours to delete),
+   the `AgentPress` line in `<laragon>\usr\sites.conf` if you ran `register-quick-app`, and
+   hosts entries for sites destroyed by versions before 1.9.0. Since 1.9.0 `destroy` removes
+   its own `#agentpress` line and Laragon's `#laragon magic!` line for that site. A hosts
+   line you added by hand is never touched.
 
 ## Security
 
@@ -465,16 +449,25 @@ site you connect yourself with `push connect`), and lists the
 limitations we would rather disclose than hide. Worth two minutes before you run any tool that
 asks for a UAC prompt.
 
+Tightened in 1.11.0, after a full review of the tool:
+
+- **`destroy` checks that `.env` describes the folder it runs in.** Run inside a copy of a
+  site folder, it used to remove the original site's database. It now refuses.
+- **The hosts-file script is locked and fingerprinted** before the UAC prompt, so it cannot
+  be swapped while the prompt is on screen.
+- **A request that comes through a tunnel** (Laragon Share, ngrok, cloudflared) is refused
+  on the agent routes. Not every tunnel is caught, so do not share a site that has the
+  agent plugins switched on. Existing sites get this with `update`.
+
 ## Known limitations
 
 - **Apache only.** Nginx mode is detected and refused with a clear message rather than
   supported. Switch Laragon to Apache to use this tool.
 - **Without `setup` (instant mode), `laragon.exe reload` is not fully reliable** once Apache
-  has been running a while. Confirmed live, repeatedly, on two machines: it can leave Apache
-  serving a stale in-memory config (or crash it outright) — see the file header comments in
-  `laragon.mjs` for the full story. When it happens: full **Stop All → Start All** in Laragon,
-  then the `resume <name>` command the failure message prints. **Instant mode removes this
-  entire failure class** — run `setup` once.
+  has been running a while: it can leave Apache serving a stale config, or crash it (the
+  header comments in `laragon.mjs` have the full story). When it happens: full
+  **Stop All → Start All** in Laragon, then the `resume <name>` command the failure message
+  prints. **Instant mode removes this entire failure class.** Run `setup` once.
 - **Cursor, Codex and OpenCode get one MCP connection each, machine-wide** — see "How the
   wiring is scoped" above. `rewire` moves it between sites; those CLIs cannot have two sites
   wired at once. Claude Code is exempt since 1.10.0: every site keeps its own wiring.
@@ -490,22 +483,16 @@ your own version before assuming what's below still applies.
 
 - **Oxygen 6.2.0-beta.2: `html-to-page` cannot parse any input — AgentPress patches this for
   you.** The builder wraps your HTML with a leading `<meta charset>` and parses it with
-  `LIBXML_HTML_NOIMPLIED`; on libxml 2.10 and newer that combination raises a spurious
-  "Memory allocation failed", so the parse returns nothing and *every* input fails, including
-  plain text with no tags. Since the WordPress MCP server names `html-to-page` as the
-  preferred way to build a page, it is the first thing an agent reaches for.
+  `LIBXML_HTML_NOIMPLIED`; on libxml 2.10 and newer that raises a spurious "Memory
+  allocation failed", so *every* input fails, plain text included. It matters because the
+  WordPress MCP server names `html-to-page` as the preferred way to build a page.
 
-  Each scaffold applies a one-line fix (an XML encoding declaration instead of the meta tag),
-  after the plugin update step so a vendor build cannot undo it. `update` applies it to
-  existing sites too. It only ever touches the exact known-broken line, keeps the original as
-  `html-to-page.php.agentpress-bak`, and leaves the file alone entirely once Oxygen ships
-  their own fix. To skip it, use `--premium=none` or remove Oxygen.
+  Each scaffold applies a one-line fix after the plugin update step, and `update` applies
+  it to existing sites. It only touches the exact known-broken line, keeps the original as
+  `html-to-page.php.agentpress-bak`, and leaves the file alone once Oxygen ships their own
+  fix. To skip it, use `--premium=none` or remove Oxygen.
 
-  Worth knowing regardless: you can land on a beta without opting in to one. Every scaffold
-  ends with `wp plugin update --all` (see `src/plugins.mjs`), which takes whatever the
-  vendor's licensed update feed is serving for the Oxygen family at that moment. Check what
-  you actually have from the site's folder (or in wp-admin ▸ Plugins):
-
-  ```bash
-  wp plugin list --name=oxygen
-  ```
+  You can land on a beta without opting in: every scaffold ends with
+  `wp plugin update --all`, which takes whatever the vendor's update feed is serving for
+  the Oxygen family. Check what you have with `wp plugin list --name=oxygen` from the
+  site's folder, or in wp-admin ▸ Plugins.

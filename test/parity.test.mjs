@@ -208,3 +208,44 @@ test('every menu question is drawn on a fresh screen', () => {
     assert.match(before, /menuScreen\(\);/, `choose() at line ${i + 1} is not preceded by menuScreen()`);
   });
 });
+
+test('the chooser never draws a row wider than the window, at any width', async () => {
+  // A wrapped row is two rows on screen but one in the repaint's count, so
+  // each keypress left the question line behind: eight "? Live site …" lines
+  // after eight keypresses in a 75-column pane (operator screenshot,
+  // 2026-11-11). This RUNS the real chooser against a fake terminal.
+  const src = menu.replace(/\r\n/g, '\n');
+  const start = src.indexOf('async function choose(message, options) {');
+  assert.ok(start >= 0, 'chooser not found');
+  const body = src.slice(start, src.indexOf('\n}\n', start) + 3);
+  const strip = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const options = [
+    { label: 'Check status', hint: 'compare this site with live', value: 'a' },
+    { label: 'Pull content from live', hint: 'asks first; this local site becomes a copy of live', value: 'b' },
+    { label: 'A label that is itself far too long to fit in a narrow window at all', hint: 'and a hint', value: 'c' },
+    { label: 'Back', value: 'back' },
+  ];
+  for (const columns of [30, 60, 75, 120]) {
+    const writes = [];
+    const listeners = [];
+    const fake = {
+      stdout: { columns, write: (s) => writes.push(s) },
+      stdin: { setRawMode() {}, resume() {}, pause() {}, on: (_e, fn) => listeners.push(fn), removeListener() {} },
+    };
+    const choose = new Function('process', 'emitKeypressEvents', 'pink', 'dim', `${body}; return choose;`)(fake, () => {}, (s) => `\x1b[35m${s}\x1b[0m`, (s) => `\x1b[2m${s}\x1b[0m`);
+    const picked = choose('Live site somesite.example with a rather long question line', options);
+    for (let i = 0; i < 5; i++) listeners[0](undefined, { name: 'down' });
+    listeners[0]('\r', { name: 'return' });
+    assert.equal(await picked, 'b', 'five downs over four options lands on the second');
+    for (const w of writes) {
+      for (const row of strip(w).split('\n')) assert.ok(row.length < columns, `${columns} columns: a ${row.length}-wide row would wrap: "${row}"`);
+    }
+    // And the climb before each repaint equals the rows the previous paint drew.
+    let drawn = 0;
+    for (const w of writes) {
+      const up = /^\x1b\[(\d+)A/.exec(w);
+      if (up) assert.equal(Number(up[1]), drawn, 'repaint climbs exactly what was drawn');
+      else drawn = strip(w).split('\n').length - 1;
+    }
+  }
+});

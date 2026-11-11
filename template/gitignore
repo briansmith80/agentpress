@@ -7,6 +7,10 @@
 /snapshots/
 # Only exists while a scaffold is unfinished (resume reads it, completion deletes it).
 .agentpress-pending.json
+# Push and pull: which upload files this site has seen on its live site, and
+# the push plugin's own folder (key hash, job files, saved design backups).
+.agentpress-push-seen.json
+/public/wp-content/agentpress-push-data/
 # wp-config.php holds the same DB credentials .env does — pushing a scaffolded
 # site to your own repo must not leak either.
 /public/wp-config.php

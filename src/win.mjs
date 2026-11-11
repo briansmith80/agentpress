@@ -51,9 +51,15 @@ export function psCapture(command) {
  * Exported because callers that build a command string by hand need it too:
  * `%TEMP%` contains the Windows account name, so an apostrophe in it silently
  * terminated a quoted path and broke the elevated hosts write for that user.
+ *
+ * PowerShell reads FOUR more characters as a single quote: the curly ones
+ * (U+2018, U+2019, U+201A, U+201B). Doubling only the straight one let
+ * `a’ + ‘b` reach PowerShell as three arguments (security review, 2026-11-11,
+ * shown with a harmless value). Each is doubled with itself, which is how
+ * PowerShell spells that character inside a quoted string.
  */
 export function psQuote(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
+  return `'${String(value).replace(/['‘’‚‛]/g, '$&$&')}'`;
 }
 
 /**

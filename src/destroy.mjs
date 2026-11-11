@@ -5,7 +5,7 @@
 // cost of not having it.
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { findVhostForProject } from './laragon.mjs';
 import { removeHostsEntries } from './wildcard.mjs';
 import { removeDirSafely } from './junctions.mjs';
@@ -100,7 +100,18 @@ async function removeMcpEntries(agents, siteHostname, onStep, projectDir) {
   }
   if (agents.includes('codex')) {
     const probe = await psRun('codex', ['mcp', 'get', 'wordpress']);
-    const belongsHere = probe.code === 0 && siteHostname && probe.stdout.toLowerCase().includes(siteHostname.toLowerCase());
+    // Codex prints its env values as ***** (seen 2026-11-11: `WP_API_URL=*****`),
+    // so looking for the hostname in that output could never match, and every
+    // destroy "left" an entry that then pointed at a site that no longer
+    // existed. Found by a live scaffold-and-destroy, not by reading: the
+    // message it printed ("doesn't point at this site") was simply false.
+    // The address is read from Codex's own config file instead; the printed
+    // output is still checked for a Codex that shows it.
+    const codexUrl = codexWordpressUrl(await readFile(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml'), 'utf8').catch(() => ''));
+    const belongsHere =
+      probe.code === 0 &&
+      Boolean(siteHostname) &&
+      (hostOf(codexUrl) === siteHostname.toLowerCase() || probe.stdout.toLowerCase().includes(siteHostname.toLowerCase()));
     if (commandNeverRan(probe)) {
       onStep?.('  (codex CLI not runnable — MCP entries left in place)');
     } else if (!belongsHere) {
@@ -160,8 +171,83 @@ async function removeMcpEntries(agents, siteHostname, onStep, projectDir) {
  * checkout (Phase 6) is unlinked before the recursive delete rather than
  * followed through.
  */
-export async function destroySite({ projectDir, onStep }) {
+/**
+ * The address Codex's `wordpress` MCP entry points at, read out of its
+ * config.toml. Not a TOML parser: it knows the two shapes `codex mcp add`
+ * and a hand edit produce, a `[mcp_servers.wordpress.env]` table and an
+ * inline `env = { … }` under `[mcp_servers.wordpress]`. Anything else is
+ * null, which callers read as "not ours, leave it".
+ */
+export function codexWordpressUrl(toml) {
+  const lines = String(toml ?? '').split(/\r?\n/);
+  const value = (text) => /WP_API_URL\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/.exec(text);
+  let table = '';
+  for (const raw of lines) {
+    const line = raw.trim();
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header) {
+      table = header[1].trim();
+      continue;
+    }
+    const inTable = table === 'mcp_servers.wordpress.env' && /^WP_API_URL\s*=/.test(line);
+    const inline = table === 'mcp_servers.wordpress' && /^env\s*=\s*\{/.test(line);
+    if (inTable || inline) {
+      const m = value(line);
+      if (m) return m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[2];
+    }
+  }
+  return null;
+}
+
+/** Lowercased host of a URL, or '' when it is not one. Exact, so `shop.test` is never found inside `myshop.test`. */
+function hostOf(url) {
+  try {
+    return new URL(String(url)).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Does `.env` describe THIS folder's site? Everything destroy removes outside
+ * the folder (the database and its user, the application password, the hosts
+ * line, agent wiring) is named by `.env`, and `.env` is a file: it travels
+ * with a copy. Before this check, `destroy` run inside a COPY of a site
+ * (a backup, a duplicate to experiment in) passed every gate, because the
+ * gates looked at the folder, and then dropped the ORIGINAL's database,
+ * revoked its application password and removed its hosts line. And DB_HOST
+ * was used as written, so root credentials were tried against whatever
+ * server it named (security review, 2026-11-11; read end to end, not run).
+ *
+ * Two rules, both enforced under --yes:
+ *  - the database server is this machine. This tool only ever creates
+ *    databases on 127.0.0.1.
+ *  - SITE_HOST is this folder's name plus a suffix (how a scaffold names it),
+ *    or the hostname the registry holds for this exact folder (for a site
+ *    Laragon named differently).
+ *
+ * Returns the reasons to refuse, in plain words; empty means go ahead.
+ */
+export function destroyTargetProblems({ projectDir, env, registeredHostname = null }) {
+  const problems = [];
+  const folder = basename(projectDir).toLowerCase();
+  const dbHost = String(parseDbHost(env.DB_HOST).host).toLowerCase();
+  if (!/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost)$/.test(dbHost)) {
+    problems.push(`.env says the database is on ${dbHost}, which is not this machine. This tool only creates databases on 127.0.0.1.`);
+  }
+  const host = String(env.SITE_HOST || '').toLowerCase();
+  if (host && host.split('.')[0] !== folder && host !== String(registeredHostname || '').toLowerCase()) {
+    problems.push(`.env says this site is ${host}, but the folder is called ${folder}. A copied or renamed folder still carries the original site's .env, and destroy would remove the ORIGINAL's database (${env.DB_NAME || 'unnamed'}).`);
+  }
+  return problems;
+}
+
+export async function destroySite({ projectDir, onStep, registeredHostname = null }) {
   const env = parseEnvFile(await readFile(join(projectDir, '.env'), 'utf8'));
+  // Checked here as well as in the command, so no future caller can reach
+  // the steps below without it.
+  const problems = destroyTargetProblems({ projectDir, env, registeredHostname });
+  if (problems.length) throw new Error(`Refusing to destroy: ${problems.join(' ')}`);
   let cfg = { agents: [] };
   try {
     cfg = JSON.parse(await readFile(join(projectDir, 'sandbox.config.json'), 'utf8'));

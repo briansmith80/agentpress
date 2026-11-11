@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AgentPress Push
  * Description: Receives a site pushed from a local AgentPress install, and hands this site's content back for a pull. Driven by `agentpress push` / `agentpress pull`; does nothing until a connection key is created under Tools > AgentPress Push.
- * Version: 0.1.3
+ * Version: 0.1.5
  * Author: AgentPress
  * License: GPL-2.0-or-later
  * Requires PHP: 7.4
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-const AGENTPRESS_PUSH_VERSION = '0.1.3';
+const AGENTPRESS_PUSH_VERSION = '0.1.5';
 const AGENTPRESS_PUSH_FORMAT = 1;
 const AGENTPRESS_PUSH_STEP_SECONDS = 8;
 const AGENTPRESS_PUSH_UID = '_agentpress_uid';
@@ -154,7 +154,9 @@ function agentpress_push_is_local_host()
         return true;
     }
     $host = strtolower((string) wp_parse_url(site_url(), PHP_URL_HOST));
-    return (bool) preg_match('/(\.test|\.local|\.localhost)$|^localhost$|^127\.\d+\.\d+\.\d+$/', $host);
+    // Not .local: that is mDNS, i.e. some OTHER device on the network, and
+    // "the traffic never leaves this machine" is the whole reason for the exemption.
+    return (bool) preg_match('/(\.test|\.localhost)$|^localhost$|^127\.\d+\.\d+\.\d+$/', $host);
 }
 
 /**
@@ -206,16 +208,21 @@ function agentpress_push_rest_permission($request)
     if (!is_ssl() && !agentpress_push_is_local_host()) {
         return agentpress_push_fail('needs_https', 'AgentPress Push only answers over https on a public site.', 403);
     }
+    // The key is compared FIRST. Checked after the throttle, as it was, ten
+    // wrong guesses from an address the owner shares (an office NAT, a proxy
+    // that hides the real client) locked the owner's own pushes out for ten
+    // minutes at a time, in the middle of a job too. The throttle is there to
+    // slow guessing, and a correct key is not a guess.
+    $given = (string) $request->get_header('x_agentpress_key');
+    if ($given !== '' && hash_equals($record['hash'], hash('sha256', $given))) {
+        return true;
+    }
     $throttle = 'agentpress_push_fail_' . md5((string) ($_SERVER['REMOTE_ADDR'] ?? ''));
     if ((int) get_transient($throttle) >= 10) {
         return agentpress_push_fail('throttled', 'Too many wrong keys from this address. Wait ten minutes.', 429);
     }
-    $given = (string) $request->get_header('x_agentpress_key');
-    if ($given === '' || !hash_equals($record['hash'], hash('sha256', $given))) {
-        set_transient($throttle, (int) get_transient($throttle) + 1, 10 * MINUTE_IN_SECONDS);
-        return agentpress_push_fail('bad_key', 'That connection key is not the one this site holds.', 403);
-    }
-    return true;
+    set_transient($throttle, (int) get_transient($throttle) + 1, 10 * MINUTE_IN_SECONDS);
+    return agentpress_push_fail('bad_key', 'That connection key is not the one this site holds.', 403);
 }
 
 /* ------------------------------------------------------------------------
@@ -248,13 +255,76 @@ function agentpress_push_oxygen_version()
 /** Where each root a file may travel under lives on THIS site. */
 function agentpress_push_roots()
 {
-    $uploads = wp_upload_dir(null, false);
-    return [
-        'uploads' => untrailingslashit(wp_normalize_path($uploads['basedir'])),
+    // Asked once per file in a pack; the answer cannot change inside one request.
+    static $cached = null;
+    if ($cached !== null) {
+        return $cached;
+    }
+    $roots = [
         'plugins' => untrailingslashit(wp_normalize_path(WP_PLUGIN_DIR)),
         'mu-plugins' => untrailingslashit(wp_normalize_path(WPMU_PLUGIN_DIR)),
         'themes' => untrailingslashit(wp_normalize_path(get_theme_root())),
     ];
+    // WordPress builds the uploads folder from the `upload_path` OPTION, and
+    // an option is data: it arrives inside a copied database. Without this
+    // check a pull from a site that had been tampered with could set
+    // upload_path to `../scripts` (or a Startup folder) and the files that
+    // follow would be written THERE, on the developer's machine (security
+    // review, 2026-11-11; read end to end against core, never exploited).
+    // db_swap also keeps this site's own upload_path; this is the half that
+    // holds if anything else ever changes it.
+    $uploads = untrailingslashit(wp_normalize_path(wp_upload_dir(null, false)['basedir']));
+    if (agentpress_push_is_inside($uploads, WP_CONTENT_DIR)) {
+        $roots['uploads'] = $uploads;
+    }
+    $cached = $roots;
+    return $roots;
+}
+
+/**
+ * True when $path is $base or sits under it, judged on REAL paths: `..`,
+ * symlinks, doubled slashes, letter case and Windows 8.3 short names
+ * (`AGENTP~1`) all resolve before the comparison. $path need not exist yet;
+ * its deepest existing folder is resolved and the rest is appended.
+ */
+function agentpress_push_is_inside($path, $base)
+{
+    $base = realpath($base);
+    if ($base === false) {
+        return false;
+    }
+    $path = wp_normalize_path((string) $path);
+    $tail = '';
+    $probe = $path;
+    while ($probe !== '' && !file_exists($probe)) {
+        $parent = dirname($probe);
+        if ($parent === $probe) {
+            return false;
+        }
+        $tail = '/' . basename($probe) . $tail;
+        $probe = $parent;
+    }
+    $real = realpath($probe);
+    if ($real === false || strpos($tail, '/..') !== false) {
+        return false;
+    }
+    $full = wp_normalize_path($real . $tail);
+    $base = untrailingslashit(wp_normalize_path($base));
+    $same = DIRECTORY_SEPARATOR === '\\' ? 'strcasecmp' : 'strcmp';
+    return $same($full, $base) === 0 || $same(substr($full, 0, strlen($base) + 1), $base . '/') === 0;
+}
+
+/**
+ * Files that could run as code if they landed under uploads/. A pull asks
+ * for these to be left out (`refuse_code`): what comes down from a live site
+ * is content, and content is pictures and documents. Trailing dots and
+ * spaces are trimmed first because Windows drops them on write, so
+ * `shell.php.` would land as `shell.php`.
+ */
+function agentpress_push_runs_as_code($rel)
+{
+    $name = rtrim((string) $rel, ". \t");
+    return (bool) preg_match('#(^|/)(\.htaccess|\.user\.ini)$|\.(php[0-9]?|phtml|pht|phar|phps)$#i', $name);
 }
 
 /**
@@ -300,10 +370,20 @@ function agentpress_push_resolve_path($rel)
     if ($rel === '' || strpos($rel, "\0") !== false || strpos($rel, '\\') !== false || preg_match('#(^|/)\.\.?(/|$)#', $rel) || $rel[0] === '/') {
         return agentpress_push_fail('bad_path', 'Refused an unsafe file path: ' . $rel);
     }
+    // An empty segment (`plugins//agentpress-push/...`) names the same file
+    // to the filesystem and a different one to every prefix check here. On
+    // Windows a colon opens an alternate data stream: `shell.php::$DATA`
+    // writes shell.php.
+    if (strpos($rel, '//') !== false || (DIRECTORY_SEPARATOR === '\\' && strpos($rel, ':') !== false)) {
+        return agentpress_push_fail('bad_path', 'Refused an unsafe file path: ' . $rel);
+    }
     $slash = strpos($rel, '/');
     $root = $slash === false ? '' : substr($rel, 0, $slash);
     $roots = agentpress_push_roots();
     if (!isset($roots[$root])) {
+        if ($root === 'uploads') {
+            return agentpress_push_fail('bad_root', "This site's uploads folder is not inside wp-content, so AgentPress Push will not read or write it. Check Settings > Media, or the upload_path option.");
+        }
         return agentpress_push_fail('bad_root', 'Refused a file outside uploads, plugins, mu-plugins and themes: ' . $rel);
     }
     return $roots[$root] . substr($rel, $slash);
@@ -316,6 +396,7 @@ function agentpress_push_resolve_path($rel)
 function agentpress_push_op_info()
 {
     global $wpdb;
+    agentpress_push_sweep_sessions();
     $counts = [];
     foreach (['post', 'page', 'attachment'] as $type) {
         $counts[$type] = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = %s AND post_status NOT IN ('auto-draft','trash')", $type));
@@ -361,14 +442,35 @@ function agentpress_push_op_session_new()
     if (is_wp_error($dir)) {
         return $dir;
     }
-    // Sweep sessions abandoned more than a day ago: a crashed push must not
-    // leave a database dump sitting in wp-content for good.
+    agentpress_push_sweep_sessions($dir);
+    return ['session' => $session, 'dir' => wp_normalize_path($dir)];
+}
+
+/**
+ * Removes job folders nothing has written to for six hours. A job that was
+ * killed (Ctrl+C, a closed terminal, a dropped connection) cannot clean up
+ * after itself, and what it leaves is a database export: every user's email
+ * and password hash. The sweep used to wait a day and ran only when a NEW
+ * job started, so a site pushed to once kept that file until the next push,
+ * possibly for good. Now it also runs on every `info`, which every command
+ * begins with. Age is judged by the newest file inside, not the folder: a
+ * long upload appends to one file and never touches the folder's own time.
+ */
+function agentpress_push_sweep_sessions($except = '')
+{
+    $cutoff = time() - 6 * HOUR_IN_SECONDS;
     foreach (glob(agentpress_push_data_dir() . '/s-*', GLOB_ONLYDIR) ?: [] as $old) {
-        if ($old !== $dir && filemtime($old) < time() - DAY_IN_SECONDS) {
+        if ($old === $except) {
+            continue;
+        }
+        $newest = (int) @filemtime($old);
+        foreach (glob($old . '/*') ?: [] as $inside) {
+            $newest = max($newest, (int) @filemtime($inside));
+        }
+        if ($newest < $cutoff) {
             agentpress_push_rrmdir($old);
         }
     }
-    return ['session' => $session, 'dir' => wp_normalize_path($dir)];
 }
 
 function agentpress_push_op_session_end($args)
@@ -752,6 +854,15 @@ function agentpress_push_op_db_import($args)
                 fclose($in);
                 return agentpress_push_fail('import_name', "Table name $table is longer than MySQL allows.", 422);
             }
+            // The definition is run as SQL, so it has to BE a definition of
+            // this table and nothing else. Unchecked, the one statement here
+            // could be `DROP TABLE` or `UPDATE ...users` against the tables the
+            // site is running on, before anything was made current - breaking
+            // the promise that a failed upload leaves the site as it was.
+            if (!preg_match('/^CREATE TABLE `\{\{P\}\}' . preg_quote((string) $record['name'], '/') . '` \(/', (string) $record['create'])) {
+                fclose($in);
+                return agentpress_push_fail('import_corrupt', 'The uploaded database export is damaged (' . $record['name'] . ' is not a plain table definition). Views do not travel.', 422);
+            }
             $sql = str_replace('`{{P}}', '`' . $new_prefix, (string) $record['create']);
             if (!mysqli_query($wpdb->dbh, $sql)) {
                 // MySQL 8's default collation does not exist on MariaDB or
@@ -903,6 +1014,20 @@ function agentpress_push_op_db_swap($args)
             $kept_options[$name] = $row;
         }
     }
+    // Options that are this INSTALL's, where "the copy had none" must also
+    // win: an upload path names a folder on this machine (see
+    // agentpress_push_roots for what a copied one could do), and on a pull
+    // the theme named by the copy is not here, because theme files only ever
+    // travel up. WordPress includes <template>/functions.php from that option
+    // without checking it, so a copied value is a file the copy chose.
+    $own_names = ['upload_path', 'upload_url_path'];
+    if (!empty($args['keep_theme'])) {
+        $own_names = array_merge($own_names, ['template', 'stylesheet', 'current_theme']);
+    }
+    $own_options = [];
+    foreach ($own_names as $name) {
+        $own_options[$name] = $wpdb->get_row($wpdb->prepare("SELECT option_value, autoload FROM {$wpdb->options} WHERE option_name = %s", $name), ARRAY_A);
+    }
     $active_here = (array) get_option('active_plugins', []);
     // A page-cache plugin this site is running keeps its own settings too, or
     // it would come back switched on with none (see agentpress_push_page_cache_plugins).
@@ -962,6 +1087,13 @@ function agentpress_push_op_db_swap($args)
     foreach ($kept_options as $name => $row) {
         $put_option($name, $row['option_value'], $row['autoload']);
     }
+    foreach ($own_options as $name => $row) {
+        if ($row) {
+            $put_option($name, $row['option_value'], $row['autoload']);
+        } else {
+            $wpdb->delete($wpdb->options, ['option_name' => $name]);
+        }
+    }
     // Plugins: the copy's own list, plus this plugin (or the job could not
     // finish itself), plus the few the caller names in `keep_plugin_dirs` when
     // they were active here - a pull uses that for the local agent wiring.
@@ -979,7 +1111,10 @@ function agentpress_push_op_db_swap($args)
     $keep_dirs = array_filter(array_map('strval', (array) ($args['keep_plugin_dirs'] ?? [])));
     $keep_dirs = array_merge($keep_dirs, array_keys(agentpress_push_page_cache_plugins()));
     $drop_dirs = array_filter(array_map('strval', (array) ($args['drop_plugin_dirs'] ?? [])));
-    $active_copy = maybe_unserialize($wpdb->get_var("SELECT option_value FROM {$wpdb->options} WHERE option_name = 'active_plugins'"));
+    // Never maybe_unserialize() here: this value arrived in the copy, and a
+    // plain unserialize builds whatever object the data names.
+    $active_copy = @unserialize((string) $wpdb->get_var("SELECT option_value FROM {$wpdb->options} WHERE option_name = 'active_plugins'"), ['allowed_classes' => false]);
+    $active_copy = is_array($active_copy) ? $active_copy : [];
     $active_copy = array_filter((array) $active_copy, function ($file) use ($drop_dirs) {
         return is_string($file) && !in_array(strtok($file, '/'), $drop_dirs, true);
     });
@@ -1020,9 +1155,35 @@ function agentpress_push_op_db_swap($args)
     // administrators were put back above and are left alone.
     $not_kept = $kept_ids ? ' AND user_id NOT IN (' . implode(',', array_map('intval', $kept_ids)) . ')' : '';
     $wpdb->query("DELETE FROM {$wpdb->usermeta} WHERE meta_key IN ('_application_passwords', 'session_tokens')" . $not_kept);
+
+    // A password does not travel to a live site either. The first real full
+    // copy (2026-11-11) left the dev site's `admin` on the live server as an
+    // administrator with its dev password - the one the site menu prints in
+    // its header and .env holds in the clear - beside a REST API that lists
+    // usernames to anyone. Every account the copy brought, and that is not
+    // one of this site's own administrators (put back above with their own
+    // password), gets a random one nobody knows. The account stays, so its
+    // stories keep their author; its owner sets a password by email or an
+    // administrator sets it. Asked for by the sender, and only a push asks:
+    // a pull leaves the copied accounts as they came.
+    $scrambled = [];
+    if (!empty($args['scramble_arriving_passwords'])) {
+        $where = $kept_ids ? ' WHERE ID NOT IN (' . implode(',', array_map('intval', $kept_ids)) . ')' : '';
+        $scrambled = array_map('strval', (array) $wpdb->get_col("SELECT user_login FROM {$wpdb->users}" . $where));
+        if ($scrambled) {
+            // One statement for every account. The first version hashed a
+            // random password per account, and a WordPress hash is slow on
+            // purpose (222 ms each on PHP 8.4, measured): a few hundred
+            // members and this single request outlived the host's gateway.
+            // The value written is not the hash of ANY password - nothing
+            // verifies against a string starting with "*" - so how random it
+            // is does not matter; the random part only keeps rows different.
+            $wpdb->query("UPDATE {$wpdb->users} SET user_pass = CONCAT('*', SHA2(CONCAT(RAND(), UUID(), ID), 256)), user_activation_key = ''" . $where);
+        }
+    }
     wp_cache_flush();
     agentpress_push_purge_page_cache();
-    return ['swapped' => count($names), 'kept_options' => array_keys($kept_options), 'kept_admins' => $kept_admins, 'undo_available' => true];
+    return ['swapped' => count($names), 'kept_options' => array_keys($kept_options), 'kept_admins' => $kept_admins, 'scrambled' => $scrambled, 'undo_available' => true];
 }
 
 /**
@@ -1111,15 +1272,18 @@ function agentpress_push_op_files_manifest($args)
             // saying "directories required for Oxygen ... are missing"
             // (design_sets, font_styles, fonts; 2026-11-11).
             sort($found);
-            foreach ($folders as $folder) {
-                $holds = false;
-                foreach ($found as $rel) {
-                    if (strpos($rel, $folder) === 0) {
-                        $holds = true;
-                        break;
-                    }
+            // Every folder that holds a file somewhere beneath it, marked by
+            // walking up from each file once. (Asking each folder "does any
+            // file start with you" was folders x files: fine on a new site,
+            // minutes on a ten-year uploads folder.)
+            $holds = [];
+            foreach ($found as $rel) {
+                for ($up = dirname($rel); $up !== '.' && $up !== '' && !isset($holds[$up]); $up = dirname($up)) {
+                    $holds[$up] = true;
                 }
-                if (!$holds) {
+            }
+            foreach ($folders as $folder) {
+                if (!isset($holds[rtrim($folder, '/')])) {
                     $files[] = $folder;
                 }
             }
@@ -1133,6 +1297,9 @@ function agentpress_push_op_files_manifest($args)
     }
     $files = json_decode((string) file_get_contents($list), true) ?: [];
     $out = fopen($path, 'ab');
+    // hash=false: the caller only wants to know which paths exist (uploads in
+    // a design push), so no file is opened at all.
+    $hash = !isset($args['hash']) || !empty($args['hash']);
     $deadline = agentpress_push_deadline();
     while ($state['i'] < count($files) && microtime(true) < $deadline) {
         $rel = $files[$state['i']++];
@@ -1146,7 +1313,7 @@ function agentpress_push_op_files_manifest($args)
         if (is_wp_error($abs) || !is_file($abs)) {
             continue; // deleted since it was listed
         }
-        fwrite($out, wp_json_encode(['p' => $rel, 's' => filesize($abs), 'h' => sha1_file($abs)], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+        fwrite($out, wp_json_encode(['p' => $rel, 's' => filesize($abs), 'h' => $hash ? sha1_file($abs) : ''], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
     }
     fclose($out);
     return ['done' => $state['i'] >= count($files), 'state' => $state, 'files_done' => $state['i'], 'files' => $state['count']];
@@ -1225,7 +1392,20 @@ function agentpress_push_op_files_unpack($args)
         return agentpress_push_fail('unpack_missing', 'No file pack has been uploaded to this session.');
     }
     $state = is_array($args['state'] ?? null) ? $args['state'] : [];
-    $state += ['pos' => 0, 'written' => 0];
+    $state += ['pos' => 0, 'written' => 0, 'refused' => 0, 'refused_names' => []];
+    // The pack was built by the OTHER site, so what it holds is a claim, not
+    // a fact. The job says which roots it asked for and anything else is
+    // refused outright: a pull asks for uploads only, and before this a pack
+    // carrying `mu-plugins/x.php` was unpacked into the developer's site and
+    // run by the very next step (security review, 2026-11-11; confirmed
+    // against this file in a harness).
+    $allowed = array_values(array_filter(array_map('strval', (array) ($args['roots'] ?? []))));
+    if (!$allowed) {
+        fclose($in);
+        return agentpress_push_fail('unpack_roots', 'The file pack was sent without saying which folders it is for. Update AgentPress on the sending side.', 422);
+    }
+    $refuse_code = !empty($args['refuse_code']);
+    $own = wp_normalize_path(__DIR__);
     $total = filesize($path);
     fseek($in, $state['pos']);
     $deadline = agentpress_push_deadline();
@@ -1241,8 +1421,21 @@ function agentpress_push_op_files_unpack($args)
             fclose($in);
             return $abs;
         }
-        if (agentpress_push_path_skipped($header['p'])) {
+        if (!in_array(strtok((string) $header['p'], '/'), $allowed, true)) {
+            fclose($in);
+            return agentpress_push_fail('bad_root', 'The file pack holds ' . $header['p'] . ', which this job did not ask for. Nothing more was unpacked.', 422);
+        }
+        if (agentpress_push_path_skipped($header['p']) || agentpress_push_is_inside($abs, $own)) {
+            // The second test is the first one again on the REAL path: the
+            // name check alone let `plugins/AgentPress-Push/...` and
+            // `plugins/AGENTP~1/...` overwrite the receiver on Windows.
             fseek($in, $size + 1, SEEK_CUR);
+        } elseif ($refuse_code && strpos((string) $header['p'], 'uploads/') === 0 && agentpress_push_runs_as_code($header['p'])) {
+            fseek($in, $size + 1, SEEK_CUR);
+            $state['refused']++;
+            if (count($state['refused_names']) < 10) {
+                $state['refused_names'][] = (string) $header['p'];
+            }
         } elseif (!empty($header['d']) || substr((string) $header['p'], -1) === '/') {
             // An empty folder the source has. Its own bytes are none.
             fseek($in, $size + 1, SEEK_CUR);
@@ -1283,7 +1476,7 @@ function agentpress_push_op_files_unpack($args)
         $state['pos'] = ftell($in);
     }
     fclose($in);
-    return ['done' => $state['pos'] >= $total, 'state' => $state, 'written' => $state['written'], 'bytes_done' => $state['pos'], 'bytes' => $total];
+    return ['done' => $state['pos'] >= $total, 'state' => $state, 'written' => $state['written'], 'refused' => $state['refused'], 'refused_names' => $state['refused_names'], 'bytes_done' => $state['pos'], 'bytes' => $total];
 }
 
 /* ------------------------------------------------------------------------
@@ -1542,7 +1735,14 @@ function agentpress_push_op_design_apply($args)
         $before = agentpress_push_design_bundle(true);
         $backup_dir = agentpress_push_data_dir() . '/design-backups';
         wp_mkdir_p($backup_dir);
-        $backup = 'design-' . gmdate('Ymd-His') . '-' . substr(bin2hex(random_bytes(4)), 0, 6) . '.json';
+        if (!file_exists($backup_dir . '/index.php')) {
+            @file_put_contents($backup_dir . '/index.php', "<?php\n// Silence is golden.\n");
+        }
+        // 128 random bits, like a session folder: on a server that ignores
+        // .htaccess the name is the only thing between this file and a guess,
+        // and a timestamp plus 24 bits was not that. The timestamp stays in
+        // front because the newest backup is found by sorting the names.
+        $backup = 'design-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(16)) . '.json';
         if (@file_put_contents($backup_dir . '/' . $backup, wp_json_encode($before, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) === false) {
             return agentpress_push_fail('backup_failed', 'Could not save a backup of the current design, so nothing was changed.', 507);
         }
@@ -1787,12 +1987,26 @@ function agentpress_push_run($op, $args)
     // same rows twice. So the reply to step N is kept, and a second request
     // for step N gets that reply instead of a second run.
     $memo = null;
+    $lock = null;
     if (isset($args['seq'], $args['session']) && preg_match('/^[a-z_]+$/', $op)) {
         $dir = agentpress_push_session_dir($args['session']);
         if (!is_wp_error($dir)) {
             $memo = $dir . '/step-' . $op . '.json';
+            // One at a time. The kept reply only exists once the first
+            // attempt has FINISHED, and the retry arrives 1.5 seconds after
+            // the gateway gave up on it - while it is still running. Without
+            // the lock both ran: a database step loaded its rows twice, and a
+            // switch or an undo happened twice. The retry now waits here,
+            // then finds the reply below.
+            $lock = @fopen($dir . '/step-' . $op . '.lock', 'cb');
+            if ($lock) {
+                @flock($lock, LOCK_EX);
+            }
             $kept = is_file($memo) ? json_decode((string) file_get_contents($memo), true) : null;
             if (is_array($kept) && (string) $kept['seq'] === (string) $args['seq']) {
+                if ($lock) {
+                    fclose($lock);
+                }
                 return $kept['result'];
             }
         }
@@ -1800,15 +2014,23 @@ function agentpress_push_run($op, $args)
     try {
         $result = call_user_func($ops[$op], $args);
     } catch (Throwable $e) {
-        return agentpress_push_fail('crashed', $op . ' stopped with an error: ' . $e->getMessage(), 500);
+        $result = agentpress_push_fail('crashed', $op . ' stopped with an error: ' . $e->getMessage(), 500);
     }
     if ($memo && !is_wp_error($result)) {
         @file_put_contents($memo, wp_json_encode(['seq' => (string) $args['seq'], 'result' => $result]), LOCK_EX);
+    }
+    if ($lock) {
+        fclose($lock); // closing releases it
     }
     return $result;
 }
 
 add_action('rest_api_init', function () {
+    if (is_multisite()) {
+        // See agentpress_push_admin_page: one site's administrator must not
+        // hold a key that writes code for the whole network.
+        return;
+    }
     register_rest_route('agentpress-push/v1', '/run', [
         'methods' => 'POST',
         'permission_callback' => 'agentpress_push_rest_permission',
@@ -1894,6 +2116,19 @@ add_action('admin_menu', function () {
 function agentpress_push_admin_page()
 {
     if (!current_user_can('manage_options')) {
+        return;
+    }
+    // A connection key can write plugin files and replace the database. So
+    // it is only for someone already allowed to do that by hand: not on a
+    // multisite (where an administrator of ONE site would gain the whole
+    // network's code), and not where file changes are switched off
+    // (DISALLOW_FILE_MODS takes `install_plugins` away from administrators).
+    if (is_multisite() || !current_user_can('install_plugins')) {
+        echo '<div class="wrap"><h1>AgentPress Push</h1><div class="notice notice-warning"><p>';
+        echo is_multisite()
+            ? 'AgentPress Push does not run on a WordPress multisite.'
+            : 'A connection key can install plugin files, and your account is not allowed to do that on this site (file changes may be switched off with DISALLOW_FILE_MODS). No key can be created here.';
+        echo '</p></div></div>';
         return;
     }
     $made = null;

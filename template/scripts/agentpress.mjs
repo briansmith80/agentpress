@@ -593,13 +593,31 @@ async function choose(message, options) {
       // (see "one screen at a time" below), so this line is on screen only
       // for the moment before that repaint; it stays so a slow action still
       // shows what was picked while it runs.
-      const rows = final ? [`${pink('?')} ${message} ${dim('›')} ${options[cursor].label}`] : [`${pink('?')} ${message}`];
-      if (!final) {
+      // No row may be wider than the window. The repaint above climbs one
+      // terminal row per entry in `rows`, so a row that WRAPS is two rows on
+      // screen and counted as one: every keypress then starts one row too
+      // low and leaves the question line behind. In a 75-column pane, one
+      // long hint ("…this local site becomes a copy of live") stacked eight
+      // "? Live site …" lines in eight keypresses (operator screenshot,
+      // 2026-11-11). Cut on the RAW text, then colour: escape codes count
+      // toward length. Read the width on every paint, so a resize is picked up.
+      const room = Math.max(20, (process.stdout.columns || 80) - 1);
+      const fit = (text, max) => (text.length <= max ? text : max < 2 ? '' : `${text.slice(0, max - 1)}…`);
+      const rows = [];
+      if (final) {
+        const q = fit(message, room - 2);
+        const answer = fit(options[cursor].label, room - 2 - q.length - 3);
+        rows.push(`${pink('?')} ${q}${answer ? ` ${dim('›')} ${answer}` : ''}`);
+      } else {
+        rows.push(`${pink('?')} ${fit(message, room - 2)}`);
         rows.push('');
         options.forEach((o, i) => {
           const marker = i === cursor ? pink('>') : ' ';
-          const label = i === cursor ? pink(o.label) : o.label;
-          rows.push(`${marker} ${label}${o.hint ? `  ${dim(o.hint)}` : ''}`);
+          const rawLabel = fit(o.label, room - 2);
+          const label = i === cursor ? pink(rawLabel) : rawLabel;
+          // The hint is the part that gives: the label is what gets picked.
+          const hint = o.hint ? fit(o.hint, room - 2 - rawLabel.length - 2) : '';
+          rows.push(`${marker} ${label}${hint ? `  ${dim(hint)}` : ''}`);
         });
       }
       process.stdout.write(`${rows.join('\n')}\n`);
@@ -736,6 +754,15 @@ function menuScreen() {
  */
 function resultScreen(trail) {
   showNormalScreen();
+  // Each result starts on a clean screen (operator's call, 2026-11-11: three
+  // "Check status" results stacked above the fourth read as a fault). What
+  // was there is not erased: from the bottom row, one line feed per row
+  // scrolls the whole view up INTO the scrollback, where the earlier results
+  // and whatever was on screen before the menu opened can still be read.
+  // That is why this is line feeds and not ESC[2J, which throws it away.
+  // The price is blank rows between results when scrolling back.
+  const rows = process.stdout.isTTY ? process.stdout.rows : 0;
+  if (rows > 1) process.stdout.write(`\x1b[${rows};1H${'\n'.repeat(rows)}\x1b[H`);
   console.log(`\n${pink('?')} ${trail.join(` ${dim('›')} `)}\n`);
 }
 
@@ -991,7 +1018,14 @@ async function checkUpdate() {
     // whose pinned version was AHEAD of npm — which is every site scaffolded from a
     // local checkout — and then pinned the OLDER version into the suggested command,
     // i.e. it talked users into downgrading.
-    return data.version && isNewerVersion(data.version, VERSION) ? data.version : null;
+    // And exactly three numbers. This string is later interpolated into a
+    // command run through a shell (`npx create-agentpress@<it> update`), and
+    // isNewerVersion() only parseInt()s each part, so "9.9.9 & calc" compared
+    // as newer and would have run. It needs a forged registry answer, which is
+    // most of the way to owning the package anyway, but a shell is not where
+    // to find out.
+    if (typeof data.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(data.version)) return null;
+    return isNewerVersion(data.version, VERSION) ? data.version : null;
   } catch {
     return null;
   }

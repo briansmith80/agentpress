@@ -117,12 +117,41 @@ export function parseConnection(text) {
     throw new PushError('That connection line holds an address that is not a URL.');
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new PushError('That connection line holds an address that is not a web URL.');
-  return { url: data.url.replace(/\/+$/, ''), key: data.key };
+  // The address goes into .env, one KEY=value per line. The URL parser
+  // silently DROPS line breaks, so an address of "https://live.example/\nDB_NAME=other"
+  // passed every check above while the raw text, written as it came, added a
+  // DB_NAME line of its own - and .env is last-wins, so a later `destroy`
+  // would have dropped a database the line named (security review,
+  // 2026-11-11; the injection was reproduced, the drop was not run). Refuse
+  // the control characters, and hand back the parsed form, not the sent one.
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(data.url) || url.username || url.password || url.search || url.hash) {
+    throw new PushError('That connection line holds an address with something extra in it. Create a new key on the live site and copy the line again.');
+  }
+  return { url: `${url.origin}${url.pathname}`.replace(/\/+$/, ''), key: data.key };
+}
+
+/**
+ * Text that came from the other site, made safe to print. A live site that
+ * has been tampered with chooses its own titles, logins and error messages,
+ * and an escape sequence in one of them could repaint the plan this tool is
+ * asking the developer to approve.
+ */
+export function shown(value) {
+  return String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+}
+
+/** shown() over every string in a small answer that is only read, never sent back. */
+function shownDeep(value) {
+  if (typeof value === 'string') return shown(value);
+  if (Array.isArray(value)) return value.map(shownDeep);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, shownDeep(v)]));
+  return value;
 }
 
 /** Hosts that never leave this machine, so plain http to them publishes nothing. */
 export function isLocalHost(hostname) {
-  return /(\.test|\.local|\.localhost)$|^localhost$|^127\.\d+\.\d+\.\d+$/i.test(String(hostname));
+  // Not .local: that is mDNS, another device on the network.
+  return /(\.test|\.localhost)$|^localhost$|^127\.\d+\.\d+\.\d+$/i.test(String(hostname));
 }
 
 /** Set KEY=value lines in .env text, replacing a key in place and keeping every other line byte for byte. */
@@ -243,6 +272,73 @@ export function diffManifests(source, target, mode = 'mirror') {
   return { send, bytes, extra };
 }
 
+/**
+ * Upload files this site has seen ON LIVE.
+ *
+ * A design push sends upload files live "does not have", by file, and that
+ * cannot tell "live never had this" from "live had it and the editor deleted
+ * it". Seen on the real server, 2026-11-11: a story and its image were
+ * deleted on live, the files were still on local from the pull, and the next
+ * dry run offered to put all ten back. That is this tool writing into the
+ * editor's folder, which is the one thing a design push promises not to do.
+ *
+ * So every operation that leaves a file on both ends writes its path down
+ * here, and a design push holds back a missing file whose path is already
+ * written down: live had it once, so its absence is somebody's decision.
+ *
+ * Kept in the project root, not under public/: it is a list of file names,
+ * and nothing readable belongs in the web root under a guessable name. It is
+ * tied to one live host, so reconnecting to a different site starts empty.
+ * No file yet (a site connected before 1.11.0's ledger, or never pulled)
+ * means nothing is held back, which is the old behaviour.
+ */
+export const SEEN_FILE = '.agentpress-push-seen.json';
+
+export async function readSeen(siteDir, host) {
+  try {
+    const data = JSON.parse(await readFile(join(siteDir, SEEN_FILE), 'utf8'));
+    return data.host === host && Array.isArray(data.paths) ? new Set(data.paths) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/** Adds every uploads/ path in `lists` to what this site has seen on `host`. */
+export async function recordSeen(siteDir, host, ...lists) {
+  const seen = await readSeen(siteDir, host);
+  for (const list of lists) for (const path of list) if (path.startsWith('uploads/')) seen.add(path);
+  await writeFile(join(siteDir, SEEN_FILE), JSON.stringify({ host, paths: [...seen].sort() }) + '\n', 'utf8');
+  return seen.size;
+}
+
+/** Splits a 'missing' plan into what really is new to live and what live has had before. */
+export function holdBackDeleted(plan, seen) {
+  const send = [];
+  const held = [];
+  let bytes = 0;
+  for (const path of plan.send) {
+    if (seen.has(path)) held.push(path);
+    else {
+      send.push(path);
+      bytes += plan.source?.get(path)?.s ?? 0;
+    }
+  }
+  return { ...plan, send, bytes, held };
+}
+
+/**
+ * The ledger is bookkeeping for the NEXT push. Failing to write it must not
+ * turn a finished push into a failed one, but it must not pass unseen either:
+ * without it the next design push goes back to re-sending deleted files.
+ */
+async function noteSeen(site, host, ...lists) {
+  try {
+    await recordSeen(site.cwd, host, ...lists);
+  } catch (err) {
+    console.log(`${yellow(WARN)} Could not write ${SEEN_FILE} (${err.code || err.message}). The next design push may re-send files that were deleted on ${host}.`);
+  }
+}
+
 export function formatBytes(n) {
   if (!Number.isFinite(n)) return '?';
   if (n < 1024) return `${n} B`;
@@ -269,11 +365,11 @@ export function describeDesignPlan(result) {
     // A match that changes nothing only records which post is which. True, but
     // not something to ask a person to approve seventeen times.
     if (change.action === 'same' || (change.action === 'adopt' && !(change.changed ?? []).length)) continue;
-    const kind = String(change.type).replace(/^(oxygen|breakdance)_/, '');
-    lines.push(`${(label[change.action] ?? change.action).padEnd(7)} ${kind.padEnd(9)} ${change.title}`);
+    const kind = shown(change.type).replace(/^(oxygen|breakdance)_/, '');
+    lines.push(`${shown(label[change.action] ?? change.action).padEnd(7)} ${kind.padEnd(9)} ${shown(change.title)}`);
   }
   for (const [part, verdict] of Object.entries(result.site ?? {})) {
-    if (verdict === 'update') lines.push(`${'change'.padEnd(7)} ${'site'.padEnd(9)} ${part.replace(/_/g, ' ')}`);
+    if (verdict === 'update') lines.push(`${'change'.padEnd(7)} ${'site'.padEnd(9)} ${shown(part).replace(/_/g, ' ')}`);
   }
   return lines;
 }
@@ -329,6 +425,15 @@ export function localEndpoint(publicDir) {
  * install on the server is.
  */
 export function remoteEndpoint({ url, key }, { fetchImpl = globalThis.fetch } = {}) {
+  // Checked here as well as at `push connect`: the address is read back from
+  // .env on every run, and a hand-edited http:// there would send the key in
+  // the clear before the plugin got the chance to refuse it.
+  {
+    const target = new URL(url);
+    if (target.protocol !== 'https:' && !isLocalHost(target.hostname)) {
+      throw new PushError(`${target.host} is not on https, so the connection key would travel in the clear. Fix PUSH_REMOTE_URL in .env, or connect again.`);
+    }
+  }
   // No two requests share an address. A page cache on the server keys on the
   // address, and on the first real server (LiteSpeed) it answered the second
   // download of manifest.ndjson with its stored copy of the first, a different
@@ -366,20 +471,30 @@ export function remoteEndpoint({ url, key }, { fetchImpl = globalThis.fetch } = 
       if (res.status >= 300 && res.status < 400) {
         // Followed by hand would mean re-sending the key to wherever the
         // redirect points. Say where it went instead.
-        throw new PushError(`${new URL(url).host} redirected to ${res.headers.get('location')}. Reconnect using the address the site really lives at.`);
+        throw new PushError(`${new URL(url).host} redirected to ${shown(res.headers.get('location'))}. Reconnect using the address the site really lives at.`);
       }
-      if (raw && res.ok) return res;
+      if (raw && res.ok) {
+        // The body is read INSIDE the retry loop. Headers arriving is not the
+        // download arriving: read outside, a connection that dropped halfway
+        // through a chunk threw past every retry and ended the whole job.
+        try {
+          return { headers: res.headers, bytes: Buffer.from(await res.arrayBuffer()) };
+        } catch (err) {
+          lastError = new PushError(`The download from ${new URL(url).host} was cut off: ${err?.cause?.code || err?.cause?.message || err.message}`);
+          continue;
+        }
+      }
       const text = await res.text();
       let data;
       try {
         data = JSON.parse(text);
       } catch {
-        const plain = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+        const plain = shown(text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
         throw new PushError(`${new URL(url).host} answered ${res.status} with something that is not AgentPress Push${plain ? `: ${plain}` : ''}. Is the plugin installed and active there?`);
       }
       if (!res.ok || (data && data.code && data.message && data.data?.status)) {
         if (data?.code === 'rest_no_route') throw new PushError(`AgentPress Push is not active on ${new URL(url).host}. Install and activate the plugin there first.`);
-        throw new PushError(data?.message || `${new URL(url).host} answered ${res.status}.`);
+        throw new PushError(shown(data?.message) || `${new URL(url).host} answered ${res.status}.`);
       }
       return data;
     }
@@ -417,7 +532,7 @@ export function remoteEndpoint({ url, key }, { fetchImpl = globalThis.fetch } = 
           const res = await request(route('get', { session, name, offset, length: chunk }), { method: 'GET' }, { raw: true });
           total = Number(res.headers.get('x-agentpress-total'));
           if (!Number.isFinite(total)) throw new PushError(`${new URL(url).host} sent a download with no size. A cache or proxy may be rewriting its answers.`);
-          const bytes = Buffer.from(await res.arrayBuffer());
+          const { bytes } = res;
           if (bytes.length === 0 && offset < total) throw new PushError(`${new URL(url).host} stopped sending partway through a download.`);
           await handle.write(bytes, 0, bytes.length, offset);
           offset += bytes.length;
@@ -451,6 +566,25 @@ export async function runSteps(endpoint, op, args, onProgress = () => {}) {
     state = last.state;
   }
   throw new PushError(`${op} on ${endpoint.label} did not finish.`);
+}
+
+/**
+ * An operation that is ONE step and must not happen twice: the database
+ * switch, an undo, applying a design. request() retries when a reply is lost,
+ * and a shared host's gateway gives up at 30 to 60 seconds while PHP carries
+ * on and finishes. Retried bare, an undo (which is a swap) ran a second time
+ * and put the site back where it started, reported as a success. With a
+ * session and a `seq` the receiver answers the retry from its kept reply,
+ * and waits for the first attempt if that is still running.
+ */
+async function runOnce(endpoint, op, args = {}) {
+  const own = !args.session;
+  const session = args.session ?? (await endpoint.run('session_new')).session;
+  try {
+    return await endpoint.run(op, { ...args, session, seq: `${randomBytes(4).toString('hex')}:0` });
+  } finally {
+    if (own) await endpoint.run('session_end', { session }).catch(() => {});
+  }
 }
 
 function ticker(text) {
@@ -527,23 +661,32 @@ async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   }
 
   tick = ticker(`switching ${to.label} to the new database`);
-  const swapped = await to.run('db_swap', swapArgs);
+  const swapped = await runOnce(to, 'db_swap', { ...swapArgs, session: sessions.to });
+  swapped.kept_admins = (swapped.kept_admins ?? []).map(shown);
+  swapped.scrambled = (swapped.scrambled ?? []).map(shown);
   tick.done(`switched; kept this site's own settings and logins (${swapped.kept_admins.join(', ') || 'no administrators'})`);
+  // Said here, at the moment it happens, and again in the closing lines of a
+  // full copy: an account nobody can log in to is a support call unless the
+  // person who ran the push was told why.
+  if (swapped.scrambled?.length) console.log(`  ${dim(STEP)} ${dim(`gave ${swapped.scrambled.length} copied account${swapped.scrambled.length === 1 ? '' : 's'} a new random password on ${to.label} (${swapped.scrambled.join(', ')})`)}`);
   return { exported, swapped };
 }
 
-async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly = false } = {}) {
+async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly = false, refuseCode = false } = {}) {
   let tick = ticker(`comparing files (${roots.join(', ')})`);
   const [a, b] = await Promise.all([
-    runSteps(from, 'files_manifest', { session: sessions.from, roots }, (s) => tick.update(`${from.label} ${s.files_done} of ${s.files}`)),
-    runSteps(to, 'files_manifest', { session: sessions.to, roots }),
+    runSteps(from, 'files_manifest', { session: sessions.from, roots, hash: mode !== 'missing' }, (s) => tick.update(`${from.label} ${s.files_done} of ${s.files}`)),
+    runSteps(to, 'files_manifest', { session: sessions.to, roots, hash: mode !== 'missing' }),
   ]);
   const fromList = join(work, 'from-manifest.ndjson');
   const toList = join(work, 'to-manifest.ndjson');
   await from.getFile(sessions.from, 'manifest.ndjson', fromList);
   await to.getFile(sessions.to, 'manifest.ndjson', toList);
   const source = parseManifest(await readFile(fromList, 'utf8'));
-  const plan = diffManifests(skipLocalOnly ? withoutLocalOnlyPlugins(source) : source, parseManifest(await readFile(toList, 'utf8')), mode);
+  const target = parseManifest(await readFile(toList, 'utf8'));
+  // Both lists ride along on the plan: the caller writes down which upload
+  // files are now on both ends (see readSeen).
+  const plan = { ...diffManifests(skipLocalOnly ? withoutLocalOnlyPlugins(source) : source, target, mode), source, target };
   tick.done(`${a.files} files on ${from.label}, ${b.files} on ${to.label}; ${plan.send.length} to send (${formatBytes(plan.bytes)})`);
   if (!plan.send.length) return plan;
 
@@ -557,8 +700,12 @@ async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly 
   await carry(from, sessions.from, to, sessions.to, 'files.pack', work, tick);
   tick.done();
   tick = ticker(`putting files in place on ${to.label}`);
-  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
-  tick.done(`put ${unpacked.written} files in place`);
+  // roots: the receiver unpacks only what this job asked for. The pack was
+  // built by the other site, and before this a pull would have unpacked a
+  // `mu-plugins/x.php` the live site slipped in.
+  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots, refuse_code: refuseCode }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
+  tick.done(`put ${unpacked.written} file${unpacked.written === 1 ? '' : 's'} in place`);
+  sayRefused(unpacked, from.label);
   return plan;
 }
 
@@ -573,12 +720,25 @@ async function settle(endpoint, session) {
 async function withSessions(from, to, fn) {
   const work = await mkdtemp(join(tmpdir(), 'agentpress-push-'));
   const sessions = { from: (await from.run('session_new')).session, to: (await to.run('session_new')).session };
+  const cleanUp = async () => {
+    await from.run('session_end', { session: sessions.from }).catch(() => {});
+    await to.run('session_end', { session: sessions.to }).catch(() => {});
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  };
+  // Ctrl+C skips `finally`. Without this, stopping a pull halfway left the
+  // live site's database export (every user's email and password hash) in
+  // its job folder until the plugin's own sweep, and a copy in this
+  // machine's temp folder for good.
+  const onStop = () => {
+    console.log(`\n${yellow(WARN)} Stopped. Removing this job's temporary files on both sites…`);
+    cleanUp().finally(() => process.exit(130));
+  };
+  process.once('SIGINT', onStop);
   try {
     return await fn(sessions, work);
   } finally {
-    await from.run('session_end', { session: sessions.from }).catch(() => {});
-    await to.run('session_end', { session: sessions.to }).catch(() => {});
-    await rm(work, { recursive: true, force: true });
+    process.removeListener('SIGINT', onStop);
+    await cleanUp();
   }
 }
 
@@ -661,7 +821,8 @@ async function bothEnds(site) {
   const local = timed(localEndpoint(site.publicDir));
   const remote = timed(requireRemote(site));
   const tick = ticker('checking both sites');
-  const [localInfo, remoteInfo] = await Promise.all([local.run('info'), remote.run('info')]);
+  const [localInfo, remoteInfoRaw] = await Promise.all([local.run('info'), remote.run('info')]);
+  const remoteInfo = shownDeep(remoteInfoRaw);
   tick.done();
   assertCompatible(localInfo, remoteInfo);
   return { local, remote, localInfo, remoteInfo };
@@ -714,17 +875,25 @@ async function pushFull(site, { yes, force, dryRun }) {
   // Give every design item its permanent id BEFORE the copy, so the ids ride
   // up inside the database and both ends agree on them from the first day.
   if (localInfo.oxygen_ready) await local.run('design_export');
+  let copied;
   await withSessions(local, remote, async (sessions, work) => {
     // Files before the database: the copied database says which plugins are
     // active, and WordPress deactivates any whose files it cannot find.
-    await copyFiles(local, remote, sessions, work, ['plugins', 'mu-plugins', 'themes', 'uploads'], 'mirror', { skipLocalOnly: true });
+    const files = await copyFiles(local, remote, sessions, work, ['plugins', 'mu-plugins', 'themes', 'uploads'], 'mirror', { skipLocalOnly: true });
+    await noteSeen(site, host, files.source.keys(), files.target.keys());
     // drop: the copy's list has the agent plugins switched on, and they must
     // not arrive that way. keep: a target that already ran them itself (a
     // second local site standing in for live) is left as it was.
-    await copyDatabase(local, remote, sessions, work, { drop_plugin_dirs: LOCAL_AGENT_PLUGINS, keep_plugin_dirs: LOCAL_AGENT_PLUGINS });
+    // scramble: a dev password must not become a live one (see db_swap).
+    copied = await copyDatabase(local, remote, sessions, work, { drop_plugin_dirs: LOCAL_AGENT_PLUGINS, keep_plugin_dirs: LOCAL_AGENT_PLUGINS, scramble_arriving_passwords: true });
     await settle(remote, sessions.to);
   });
   console.log(`\n${green(OK)} ${remoteInfo.site_url} is now a copy of this site.`);
+  const scrambled = copied?.swapped?.scrambled ?? [];
+  if (scrambled.length) {
+    console.log(`${cyan(STEP)} Set a password on ${host} for: ${scrambled.join(', ')}. Passwords from this site were not copied.`);
+    console.log(`  ${dim(`In wp-admin there: Users ${STEP} the account ${STEP} Set New Password. Or its owner uses "Lost your password?".`)}`);
+  }
   console.log(`${cyan(STEP)} Open it and look. If it is wrong: ${say(site, 'push undo --full')}`);
 }
 
@@ -751,18 +920,25 @@ async function pushDesign(site, { yes, dryRun }) {
     // say) is local's and is mirrored. Uploads are live's: only files live
     // does not have yet are added, never one it already holds.
     const code = await copyFilesPlan(local, remote, sessions, work, ['mu-plugins', 'themes'], 'mirror');
-    const media = await copyFilesPlan(local, remote, sessions, work, ['uploads'], 'missing');
+    // ...and not one live HAD and no longer has: that was deleted there.
+    const media = holdBackDeleted(await copyFilesPlan(local, remote, sessions, work, ['uploads'], 'missing'), await readSeen(site.cwd, host));
+    const heldLine = media.held.length
+      ? `${media.held.length} upload file${media.held.length === 1 ? ' that was' : 's that were'} deleted on ${host} ${media.held.length === 1 ? 'is' : 'are'} left alone (${media.held.slice(0, 2).join(', ')}${media.held.length > 2 ? ', …' : ''})`
+      : '';
     if (!lines.length && !code.send.length && !media.send.length) {
       // Nothing visible to change, but if items were only matched by name,
       // record their permanent ids now so the next push does not have to guess again.
-      if ((plan.changes ?? []).some((c) => c.action === 'adopt') && !dryRun) await remote.run('design_apply', { session: sessions.to });
+      if ((plan.changes ?? []).some((c) => c.action === 'adopt') && !dryRun) await runOnce(remote, 'design_apply', { session: sessions.to });
       console.log(`${green(OK)} ${host} already has this design. Nothing to push.`);
+      if (heldLine) console.log(`  ${dim(`${INFO} ${heldLine}`)}`);
+      if (!dryRun) await noteSeen(site, host, media.target.keys());
       return;
     }
     console.log(`\n  On ${host} this will:`);
     for (const line of lines) console.log(`    ${line}`);
     if (code.send.length) console.log(`    ${'send'.padEnd(7)} ${'code'.padEnd(9)} ${code.send.length} file${code.send.length === 1 ? '' : 's'} (${code.send.slice(0, 3).join(', ')}${code.send.length > 3 ? ', …' : ''})`);
     if (media.send.length) console.log(`    ${'send'.padEnd(7)} ${'media'.padEnd(9)} ${media.send.length} file${media.send.length === 1 ? '' : 's'} live does not have (${formatBytes(media.bytes)})`);
+    if (heldLine) console.log(`    ${'leave'.padEnd(7)} ${'media'.padEnd(9)} ${heldLine}`);
     console.log(`  ${dim("Stories, users, comments and the editor's own uploads are not touched.")}`);
     if (dryRun) {
       console.log(`\n${dim(INFO)} Dry run: nothing was changed.`);
@@ -770,12 +946,13 @@ async function pushDesign(site, { yes, dryRun }) {
     }
     if (!(await confirm(`Push this to ${host}?`, { yes }))) throw new PushError('Nothing was changed.');
     // One pack for both lists: a session holds a single files.pack.
-    if (code.send.length || media.send.length) await sendPlanned(local, remote, sessions, work, { send: [...code.send, ...media.send] });
+    if (code.send.length || media.send.length) await sendPlanned(local, remote, sessions, work, { send: [...code.send, ...media.send] }, ['mu-plugins', 'themes', 'uploads']);
     tick = ticker(`applying the design on ${host}`);
-    const applied = await remote.run('design_apply', { session: sessions.to });
+    const applied = await runOnce(remote, 'design_apply', { session: sessions.to });
     const c = applied.counts;
     tick.done(`applied: ${(c.create ?? 0) + (c.restore ?? 0)} new, ${(c.update ?? 0) + (c.adopt ?? 0)} changed, ${c.bin ?? 0} removed, ${c.same ?? 0} untouched; saved the old design first`);
     await settle(remote, sessions.to);
+    await noteSeen(site, host, media.target.keys(), media.send);
     console.log(`\n${green(OK)} ${host} has the new design.`);
     console.log(`${cyan(STEP)} Open it and look. If it is wrong: ${say(site, 'push undo')}`);
   });
@@ -784,23 +961,37 @@ async function pushDesign(site, { yes, dryRun }) {
 /** The compare half of copyFiles, so a plan can be shown before anything is sent. */
 async function copyFilesPlan(from, to, sessions, work, roots, mode) {
   const tick = ticker(`comparing files (${roots.join(', ')})`);
-  await Promise.all([runSteps(from, 'files_manifest', { session: sessions.from, roots }), runSteps(to, 'files_manifest', { session: sessions.to, roots })]);
+  // 'missing' only asks "does the other side have this path", so neither end
+  // reads a byte of the files: hashing every upload on both ends was most of
+  // the wait in a design push, for an answer nothing looked at.
+  const hash = mode !== 'missing';
+  await Promise.all([runSteps(from, 'files_manifest', { session: sessions.from, roots, hash }), runSteps(to, 'files_manifest', { session: sessions.to, roots, hash })]);
   const a = join(work, `from-${roots[0]}.ndjson`);
   const b = join(work, `to-${roots[0]}.ndjson`);
   await from.getFile(sessions.from, 'manifest.ndjson', a);
   await to.getFile(sessions.to, 'manifest.ndjson', b);
   tick.done();
-  return diffManifests(parseManifest(await readFile(a, 'utf8')), parseManifest(await readFile(b, 'utf8')), mode);
+  const source = parseManifest(await readFile(a, 'utf8'));
+  const target = parseManifest(await readFile(b, 'utf8'));
+  return { ...diffManifests(source, target, mode), source, target };
 }
 
-async function sendPlanned(from, to, sessions, work, plan) {
+/** A pull leaves out upload files that could run as code. Never silently: a missing file is a question later. */
+function sayRefused(unpacked, label) {
+  if (!unpacked?.refused) return;
+  const names = (unpacked.refused_names ?? []).map(shown);
+  console.log(`  ${yellow(WARN)} left out ${unpacked.refused} upload file${unpacked.refused === 1 ? '' : 's'} from ${label} that could run as code (${names.slice(0, 3).join(', ')}${unpacked.refused > 3 ? ', …' : ''}).`);
+  console.log(`    ${dim('A pull brings content down, and content is not PHP. If the live site really keeps code under uploads, copy it by hand.')}`);
+}
+
+async function sendPlanned(from, to, sessions, work, plan, roots) {
   const want = join(work, 'want.ndjson');
   await writeFile(want, plan.send.map((p) => JSON.stringify(p)).join('\n') + '\n', 'utf8');
   await from.putFile(sessions.from, 'want.ndjson', want);
   await runSteps(from, 'files_pack', { session: sessions.from });
   const tick = ticker(`sending ${plan.send.length} file${plan.send.length === 1 ? '' : 's'} to ${to.label}`);
   await carry(from, sessions.from, to, sessions.to, 'files.pack', work, tick);
-  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to });
+  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots });
   tick.done(`put ${unpacked.written} file${unpacked.written === 1 ? '' : 's'} in place`);
 }
 
@@ -810,7 +1001,7 @@ async function pushUndo(site, { full, yes }) {
   if (full) {
     if (!remoteInfo.has_undo) throw new PushError(`${host} holds no earlier database to go back to.`);
     if (!(await confirm(`Put ${host} back on the database it had before the last full copy?`, { yes }))) throw new PushError('Nothing was changed.');
-    const res = await remote.run('db_undo');
+    const res = await runOnce(remote, 'db_undo');
     await settle(remote);
     console.log(`${green(OK)} ${host} is back on its earlier database (${res.restored} tables). Files were not rolled back.`);
     return;
@@ -824,7 +1015,7 @@ async function pushUndo(site, { full, yes }) {
   console.log(`\n  Going back to the design saved as ${plan.restored_from} will:`);
   for (const line of lines) console.log(`    ${line}`);
   if (!(await confirm(`Undo the last design push on ${host}?`, { yes }))) throw new PushError('Nothing was changed.');
-  await remote.run('design_undo');
+  await runOnce(remote, 'design_undo');
   await settle(remote);
   console.log(`${green(OK)} ${host} is back on its earlier design.`);
 }
@@ -866,8 +1057,12 @@ export async function pullCommand(site, { yes, force, dryRun, positional = [] })
     // The plugins that ARE the local agent wiring stay on even if the live
     // site has them switched off: without them a pull would leave this site
     // with no MCP endpoint and a 401 nobody could explain.
-    await copyDatabase(remote, local, sessions, work, { keep_plugin_dirs: LOCAL_AGENT_PLUGINS });
-    await copyFiles(remote, local, sessions, work, ['uploads'], 'mirror');
+    // keep_theme: theme files never travel down, so the theme the copy
+    // names is not a theme this site has; WordPress would include its
+    // functions.php from wherever that option points.
+    await copyDatabase(remote, local, sessions, work, { keep_plugin_dirs: LOCAL_AGENT_PLUGINS, keep_theme: true });
+    const files = await copyFiles(remote, local, sessions, work, ['uploads'], 'mirror', { refuseCode: true });
+    await noteSeen(site, host, files.source.keys());
     await settle(local, sessions.to);
   });
   console.log(`\n${green(OK)} This site now has everything on ${host}.`);

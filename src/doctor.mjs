@@ -149,7 +149,9 @@ async function latestPublishedVersion() {
     const res = await fetch('https://registry.npmjs.org/create-agentpress/latest', { signal: AbortSignal.timeout(2500) });
     if (!res.ok) return null;
     const data = await res.json();
-    return typeof data.version === 'string' ? data.version : null;
+    // Printed inside a command the reader is told to run, so it is a
+    // version number or it is nothing. The site menu makes the same check.
+    return typeof data.version === 'string' && /^\d+\.\d+\.\d+$/.test(data.version) ? data.version : null;
   } catch {
     return null;
   }

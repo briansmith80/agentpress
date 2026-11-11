@@ -54,7 +54,7 @@ references are given so you don't have to take our word for it.
 |---|---|---|
 | Executes PHP via `wp eval-file` | `src/admin-login.mjs`, `template/scripts/agentpress.mjs` | Mints a one-time (300s TTL) logged-in `wp-admin` link through the Agent Connector plugin's own public `AdminLoginLink::create` API. The admin user is one **this tool created**, whose password is already in the site's `.env` — the link grants nothing you don't already have. Enforced local-dev hostnames only. |
 | Runs PowerShell with `-ExecutionPolicy Bypass` | `src/win.mjs` | OS probes (is Apache up, which PHP is serving) and launching agent CLIs. Bypass is required because `claude`/`codex` install as npm `.ps1` shims that stock Windows' `Restricted` policy refuses to run. Process-scoped; nothing persistent is changed. |
-| One UAC-elevated PowerShell | `src/wildcard.mjs` (`ensureHostsEntry`) | Appends `127.0.0.1 <site>.test` to the hosts file — the only privileged operation in the tool. The script it runs is generated locally, the hostname is validated against `/^[a-z0-9.-]+$/i`, and a declined prompt is non-fatal (the scaffold completes and prints the line to add by hand). |
+| One UAC-elevated PowerShell | `src/wildcard.mjs` (`ensureHostsEntry`) | Appends `127.0.0.1 <site>.test` to the hosts file — the only privileged operation in the tool. The script it runs is generated locally, the hostname is validated against `/^[a-z0-9.-]+$/i` and must end in Laragon's own suffix, `.test` or `.localhost`, and a declined prompt is non-fatal (the scaffold completes and prints the line to add by hand). The script file sits in `%TEMP%` while the prompt is on screen; since 1.11.0 it is locked against writers and its SHA-256 is checked before Windows is asked, so another program cannot swap what you are approving. That removes the cheap route only: a program already running as you can do worse than swap a file. |
 | Writes into Laragon's Apache config | `src/wildcard.mjs` | One wildcard vhost (`setup`, once) so new sites need no Apache reload. Placed last in config order so existing sites always win. |
 | Downloads and installs code | `src/wordpress.mjs`, `src/plugins.mjs` | WordPress core and plugins — the tool's entire purpose. |
 | Discovers MySQL root credentials | `src/mysql.mjs` | Tries empty then `"root"` (Laragon's defaults) to create a **per-site database and dedicated user**. Root is never written into any scaffolded site. Overridable with `AGENTPRESS_MYSQL_ROOT_PASSWORD`. |
@@ -69,17 +69,27 @@ so they get their own section.
 - **What is installed on the live site:** one PHP file, `agentpress-push`
   (`src/push/agentpress-push/agentpress-push.php`, readable in full before you upload it). It
   adds three REST routes under `agentpress-push/v1`. With a valid key they can replace the
-  site's database, write files under `wp-content`, and read both back. **That is the whole
-  site. Treat the key like an administrator password.**
+  site's database, write files under `wp-content` (PHP included, which the server then
+  runs), and read both back. **That is the whole site and, through PHP, whatever the site's
+  hosting account can reach. Treat the key like the hosting password, not like a WordPress
+  login.**
 - **The key.** 48 random hex characters, shown once, created and revoked in wp-admin (Tools →
   AgentPress Push, administrators only). The live site stores only a SHA-256 hash, in a PHP
   file under `wp-content/agentpress-push-data/`, not in the database. No key created means
-  every route answers 401, and repeated wrong keys from one address get that address refused
-  for a while. Revoke the key, or deactivate the plugin, whenever you are not about to push:
-  nothing else needs it.
-- **HTTPS is required.** The command refuses a plain-http address unless the host is a local
-  one (`.test`, `.local`, `localhost`, `127.x`), and the plugin refuses plain http the same
-  way. Redirects are not followed, so the key is never re-sent to a different host.
+  every route answers 403. Ten wrong keys from one address inside ten minutes and further
+  wrong keys from it are refused (429); the correct key is always let in, so someone guessing
+  from an address you share cannot lock your own push out. The key page is refused on
+  multisite and to anyone who may not install plugins. Revoke the key, or deactivate the
+  plugin, whenever you are not about to push: nothing else needs it.
+- **The key passes through a command line.** `push connect <line>` puts the connection line
+  in your shell history, and for a moment in the process list, where other programs running
+  as you can read it. The site menu's Connect item does the same underneath. Create a new
+  key (which revokes the old one) if that machine is shared.
+- **HTTPS is required.** The command refuses a plain-http address unless the host is this
+  machine (`.test`, `.localhost`, `localhost`, `127.x`), at `push connect` and again on
+  every run, since the address is read back from `.env`. The plugin refuses plain http the
+  same way. `.local` is not treated as local: it is another device on the network. Redirects
+  are not followed, so the key is never re-sent to a different host.
 - **Where the key sits locally:** `PUSH_REMOTE_URL` and `PUSH_REMOTE_KEY` in the site's
   gitignored `.env`, next to the other generated secrets.
 - **The agent plugins never go up.** `agent-connector-for-wp` and
@@ -90,14 +100,43 @@ so they get their own section.
 - **Logins do not travel.** Each end keeps its own administrators' passwords. Sign-in sessions
   and application passwords are deleted from a copied database for every user that is not one
   of the receiving site's own administrators.
-- **Data that arrives is never turned into objects.** Address rewriting inside serialized
-  values runs `unserialize` with `allowed_classes => false`.
+- **A full copy does not carry passwords up.** Every account a `push --full` brings to the
+  live site, other than that site's own administrators, gets a random password there. The
+  account stays so its stories keep their author; set a password in wp-admin or use "Lost
+  your password?". Before plugin 0.1.4 this was not so: the first real full copy
+  (2026-11-11) left the dev site's `admin` on the live server as an administrator with its
+  dev password, the one the site menu prints and `.env` holds. **If you ran a full copy
+  with an earlier plugin, change those passwords on the live site by hand**; an update does
+  not go back and fix them. A `pull` is not covered: the live site's accounts arrive on the
+  dev machine with their real password hashes, as in any database copy.
+- **The plugin never turns arriving data into objects.** Both places it reads a serialized
+  value from a copy (address rewriting, the active-plugin list) run `unserialize` with
+  `allowed_classes => false`. WordPress itself will unserialize a copied option later, when
+  it reads it, as it does with any imported database.
+- **A pull trusts the live site, within limits.** A pull runs on your machine with what the
+  live site sends, and the live site is the end more likely to have been tampered with. Since
+  plugin 0.1.5 a pull: unpacks files under `uploads` only and refuses anything else in the
+  pack (before this, a pack carrying `mu-plugins/x.php` would have been unpacked and run);
+  leaves out upload files that could run as code (`.php`, `.phtml`, `.phar`, `.htaccess`,
+  `.user.ini`) and names them; keeps your site's own `upload_path`, so a copied setting
+  cannot point the uploads folder somewhere else on your disk; keeps your own theme setting;
+  and runs only a plain `CREATE TABLE` from the export as SQL. **What it cannot check is the
+  content itself.** Oxygen stores design data in the database, and that data can hold PHP
+  code blocks which Oxygen runs when the page is built. Posts can hold scripts. A pull
+  brings those down as they are. **Do not pull from a live site you believe has been broken
+  into.** These guards were found by a review and proven between two local sites; none of
+  them has met a real attack.
 - **Temporary files on the live site.** During a job the database export and file packs sit
   in a folder with a 32-character random name under `wp-content/agentpress-push-data/`, and
-  are deleted when the job ends. The folder carries a `Require all denied` `.htaccess`. **A
+  are deleted when the job ends, also when you stop it with Ctrl+C. A job that is killed
+  outright (the window closed, the machine asleep) leaves them; the plugin removes any job
+  folder not written to for six hours the next time it is asked anything, so until then a
+  database export, with every user's email and password hash, sits there. The folder
+  carries a `Require all denied` `.htaccess`. **A
   server that ignores `.htaccess` (nginx) does not enforce that**, and there the unguessable
   folder name is the only protection for the minutes a job runs. Saved design backups (the
-  last ten, design data only, no users or passwords) stay in that folder between jobs.
+  last ten, design data only, no users or passwords) stay in that folder between jobs, under
+  random names since 0.1.5 (earlier ones were named by date and time alone).
 - **A page cache must not keep what the plugin answers.** The key is a request header, not a
   WordPress login, so to a page cache every request looks like an anonymous visitor. Found on
   the first real server (2026-11-11, LiteSpeed with the LiteSpeed Cache plugin, plugin 0.1.2):
@@ -107,9 +146,19 @@ so they get their own section.
   was fetched that way; no database export was. From 0.1.3 the plugin forbids caching of
   every answer (also the refusals) and the sender never asks for the same address twice.
   If you ran a pull or push with 0.1.2 against a LiteSpeed server, purge its cache once.
-- **Lightly proven:** connect, status, the preview, the first full copy, a design push and
-  its undo have run against one real server (cPanel, LiteSpeed, PHP 8.4). A pull, and the
-  undo of a full copy, have run between local sites only.
+- **Lightly proven:** every command has run at least once against one real server (cPanel,
+  LiteSpeed, PHP 8.4): connect, status, the preview, the first full copy and its undo, a
+  design push and its undo, and a pull. No other host, web server or PHP version has seen it.
+  That was plugin 0.1.4. **Plugin 0.1.5 (the review fixes above, plus: a retried step is
+  answered from its kept reply instead of run again, and the password reset is one statement)
+  has run only between two local sites.**
+- **Known limits, not fixed.** The database export pages through each table by row offset,
+  which slows down on very large tables and can skip or repeat a row if the live site is
+  written to during a pull. Everything travels as one pack with no free-disk check first.
+  The kept database (`apold_` tables) stays until the next full copy; there is no command to
+  drop it. A job that fails halfway is started again from the top, not resumed. A second
+  full copy to a site whose plugins use named foreign keys (WooCommerce) is untested and may
+  collide on those names.
 
 ## Where secrets live
 - `<site>/.env` — DB and WordPress admin passwords this tool generated. It sits **outside** the
@@ -151,6 +200,17 @@ so they get their own section.
 
   Sites scaffolded before v1.4.0 have neither the mu-plugin nor the widened rewrite — run
   `npx create-agentpress@latest update` from inside that site's folder to add both.
+
+  **A tunnel makes the internet look local.** Laragon's Share, ngrok, cloudflared and a
+  forwarded port all run on your machine, so every request they carry arrives from
+  `127.0.0.1`, and until 1.11.0 the guard let all of it reach the agent routes (credentials
+  were still needed). From 1.11.0 the mu-plugin also refuses a request to those routes that
+  carries a forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`, `Forwarded`,
+  `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`), which those tools add. Verified on
+  a local site: the same request answers 401 without the header and 403 with it. A tunnel
+  that adds none of them is not caught, and the `.htaccess` layer does not look at headers
+  at all. **Do not share a site that has the agent plugins switched on.** Existing sites
+  get this with `update`.
 - **Up to and including v1.4.0, application passwords were never actually revoked.** The code
   passed the password's NAME to `wp user application-password delete`, which takes UUIDs, so it
   matched nothing and silently did nothing. Two consequences: every re-mint (a re-scaffold, a
@@ -189,7 +249,30 @@ so they get their own section.
   projects with a root `.env` may be serving it over HTTP.
 - **The `.env` exposure check is a warning, not a hard stop.** If your Apache ignores the
   protective `.htaccess`, the scaffold prints a prominent warning and continues rather than
-  failing.
+  failing. **And on a machine that already denies `.env` by name at server level, the check
+  cannot fail at all**: it asks for `/<site>/.env` and a 403 looks the same whether the
+  project's own `.htaccess` is honoured or not. It never asks for `.mcp.json`, which holds
+  an administrator-equivalent password. Known, not yet fixed.
+- **`destroy` checks that `.env` describes the folder it is run in** (since 1.11.0).
+  Everything it removes outside the folder (the database and its user, the application
+  password, the hosts line) is named by `.env`, and a copied site folder carries the
+  original's `.env`. Before 1.11.0, `destroy` run inside such a copy dropped the
+  ORIGINAL site's database. It now refuses, also under `--yes`, unless the database
+  server is this machine and `SITE_HOST` is this folder's name (or the hostname the registry
+  holds for this exact folder). The preamble names the database and address it will remove.
+- **Found by the same review (2026-11-11) and not fixed yet:**
+  - `public/wp-content/plugins/oxygen/…/html-to-page.php.agentpress-bak` (the backup the
+    Oxygen patch keeps) is served as plain text, and so is `wp-content/debug.log` once you
+    switch WP_DEBUG_LOG on from the site menu.
+  - The site menu starts `npx`, `powershell` and `wp` by bare name from the site
+    folder, so a file of that name planted there would run instead. Anything able to write
+    there can already edit the menu script, so this buys an attacker little.
+  - The scaffold summary prints the admin password and the one-click login link even when
+    output is not a terminal, so an agent-driven scaffold puts them in its transcript.
+  - The abilities pack (the plugin that carries shell-exec) is installed from a moving
+    tag, not a fixed version, and `plugin update --all` runs right after.
+  - `resume` takes `SITE_HOST` from `.env` without the checks `rewire` applies. The
+    hosts write now refuses a non-local name, which was the part that mattered.
 
 ## Automated scanner reports
 

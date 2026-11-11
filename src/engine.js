@@ -33,7 +33,7 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { AGENT_LABELS, detectAgents } from './agents.mjs';
 import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS } from './mcp.mjs';
 import { mintAdminLoginUrl } from './admin-login.mjs';
-import { destroySite } from './destroy.mjs';
+import { destroySite, destroyTargetProblems } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
 import { pullCommand, pushCommand, runPushLike } from './push.mjs';
 import { certCoversHostname, ensureHostsEntry, fetchViaLoopback, flushDnsCache, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
@@ -2000,8 +2000,31 @@ async function destroyCommand({ yes }) {
     );
     return;
   }
+  // Ownership of what lies OUTSIDE the folder. The checks above prove this
+  // folder is a site; they say nothing about whose database and hostname its
+  // .env names. See destroyTargetProblems for the copy-of-a-site case this
+  // closes. Enforced under --yes for the same reason as the two above.
+  let destroyEnv = {};
+  try {
+    destroyEnv = parseEnvFile(await readFile(join(cwd, '.env'), 'utf8'));
+  } catch {
+    // unreadable .env: destroySite will fail on the same read and say so
+  }
+  const registered = (await listEnvironments().catch(() => [])).find((e) => resolve(String(e.dir || '')).toLowerCase() === resolve(cwd).toLowerCase());
+  const registeredHostname = registered?.hostname || null;
+  const targetProblems = destroyTargetProblems({ projectDir: cwd, env: destroyEnv, registeredHostname });
+  if (targetProblems.length) {
+    bail(
+      `${red(BAD)} Refusing to destroy ${cwd}: its .env does not describe this folder.\n` +
+        targetProblems.map((p) => `  - ${p}`).join('\n') +
+        '\n  Nothing was changed. If this folder is a copy, delete it by hand (it has no database of\n' +
+        '  its own). If it was renamed, rename it back and run destroy again.',
+    );
+    return;
+  }
   console.log(
     `${bold(`This permanently removes ${cwd}`)}:\n` +
+      (destroyEnv.DB_NAME ? `  ${dim(`database ${destroyEnv.DB_NAME}${destroyEnv.SITE_HOST ? `, address ${destroyEnv.SITE_HOST}` : ''}`)}\n` : '') +
       '  - the database and its dedicated user\n' +
       '  - the WordPress application password this tool minted\n' +
       '  - MCP registrations for any agents this site configured\n' +
@@ -2030,7 +2053,7 @@ async function destroyCommand({ yes }) {
   // that had already gone.
   let result;
   try {
-    result = await destroySite({ projectDir: cwd, onStep: (msg) => console.log(`  … ${msg}`) });
+    result = await destroySite({ projectDir: cwd, registeredHostname, onStep: (msg) => console.log(`  … ${msg}`) });
   } catch (err) {
     // EBUSY/EPERM on the project directory has one overwhelmingly common cause, and
     // the generic message did not name it: Windows holds a handle on every process's

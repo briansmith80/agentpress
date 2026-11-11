@@ -9,7 +9,7 @@ A local WordPress dev site on [Laragon](https://laragon.org), scaffolded by
 ## Everyday use
 
 ```bash
-npm run agentpress   # the menu — admin login, DB snapshot/restore, recent errors, your agent
+npm run agentpress   # the menu — admin login, DB snapshot/restore, recent errors, your agent, live site
 npm run wp -- <command...>   # WP-CLI, e.g. npm run wp -- plugin list
 ```
 
@@ -17,6 +17,10 @@ Worth knowing about the menu: **Snapshot the database** before letting an AI age
 the site gives you a two-keystroke rollback (**Restore the latest snapshot**) if the session
 goes sideways. Snapshots land in `snapshots/`, gitignored — a dump is the whole site,
 password hashes included.
+
+**Live site** in the menu sends this site's design to a live server and brings its content
+back down. The first time, it walks you through connecting the two. The rules are in the
+[push and pull guide](https://github.com/briansmith80/agentpress#push-to-live-pull-from-live).
 
 WordPress core lives in `public/` (that's Laragon's document root for this project —
 everything else here is AgentPress's own tooling, not part of the site).

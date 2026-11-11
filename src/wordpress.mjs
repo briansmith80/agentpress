@@ -147,11 +147,18 @@ if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
  * String.raw: this PHP contains regex backslashes that a normal template
  * literal would eat (`\d` -> `d`), silently widening the address check.
  */
-const MCP_GUARD_PHP = String.raw`<?php
+export const MCP_GUARD_PHP = String.raw`<?php
 /**
  * Plugin Name: AgentPress agent-API loopback guard
  * Description: Rejects non-loopback requests to the MCP and Abilities REST namespaces. Written by create-agentpress; delete it only if you deliberately want remote agent access.
  */
+
+// Asked for directly (/wp-content/mu-plugins/<this file>) there is no
+// WordPress: add_filter() is undefined and the fatal printed the site's full
+// path on disk.
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
 // The Agent Connector's abilities pack grants shell-exec, PHP-eval and
 // filesystem write to an authenticated administrator. That capability IS the
@@ -164,8 +171,18 @@ const MCP_GUARD_PHP = String.raw`<?php
 // reachable through core's own wp-abilities/v1 controller as well as through
 // the MCP adapter, and blocking only mcp/ leaves shell-exec fully exposed.
 //
-// REMOTE_ADDR only, never X-Forwarded-For: that header is attacker-supplied
-// and there is no trusted reverse proxy in front of a Laragon dev site.
+// REMOTE_ADDR decides who is local, and X-Forwarded-For is never believed:
+// that header is attacker-supplied and there is no trusted reverse proxy in
+// front of a Laragon dev site.
+//
+// But its PRESENCE is used, to refuse. A tunnel (Laragon's Share, ngrok,
+// cloudflared, a forwarded port) runs on this machine, so every request from
+// the internet arrives with REMOTE_ADDR 127.0.0.1 and the address check alone
+// lets all of it through (security review, 2026-11-11). Tunnels and proxies
+// add a forwarding header; a local agent talking to this site directly does
+// not. Sending one can only get a request refused, so there is nothing to
+// forge. A tunnel that adds none of these headers is not caught: do not
+// share a site that has the agent plugins switched on.
 
 if ( ! function_exists( 'agentpress_is_loopback_remote_addr' ) ) {
 	function agentpress_is_loopback_remote_addr( $addr ) {
@@ -181,6 +198,17 @@ if ( ! function_exists( 'agentpress_is_loopback_remote_addr' ) ) {
 			$addr = substr( $addr, 7 );
 		}
 		return 1 === preg_match( '/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/', $addr );
+	}
+}
+
+if ( ! function_exists( 'agentpress_request_was_forwarded' ) ) {
+	function agentpress_request_was_forwarded( $server ) {
+		foreach ( array( 'HTTP_X_FORWARDED_FOR', 'HTTP_X_FORWARDED_HOST', 'HTTP_FORWARDED', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP', 'HTTP_TRUE_CLIENT_IP' ) as $key ) {
+			if ( isset( $server[ $key ] ) && '' !== trim( (string) $server[ $key ] ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 }
 
@@ -215,7 +243,7 @@ add_filter(
 		if ( ! agentpress_is_guarded_rest_route( $request->get_route() ) ) {
 			return $result;
 		}
-		if ( agentpress_is_loopback_remote_addr( isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '' ) ) {
+		if ( agentpress_is_loopback_remote_addr( isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '' ) && ! agentpress_request_was_forwarded( $_SERVER ) ) {
 			return $result;
 		}
 		return new WP_Error(

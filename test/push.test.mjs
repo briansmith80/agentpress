@@ -52,7 +52,9 @@ test('parseConnection refuses anything that is not a connection line, with a Pus
 });
 
 test('isLocalHost only exempts hosts that cannot leave the machine', () => {
-  for (const host of ['spice.test', 'a.b.local', 'localhost', '127.0.0.1', 'x.localhost']) assert.equal(isLocalHost(host), true, host);
+  for (const host of ['spice.test', 'localhost', '127.0.0.1', 'x.localhost']) assert.equal(isLocalHost(host), true, host);
+  // .local is mDNS: another device on the network, not this machine.
+  for (const host of ['a.b.local', 'nas.local']) assert.equal(isLocalHost(host), false, host);
   for (const host of ['mymagazinehub.example', 'test.example.com', 'mytest', 'localhost.example.com']) assert.equal(isLocalHost(host), false, host);
 });
 
@@ -390,4 +392,91 @@ test('no answer of ours can be kept or replayed by a page cache', async () => {
   await endpoint.run('files_manifest', { session: 's' });
   assert.equal(new Set(urls).size, urls.length, 'every request has its own address');
   assert.ok(urls.every((u) => new URL(u).searchParams.get('rest_route') === '/agentpress-push/v1/run'), 'the route itself is untouched');
+});
+
+/* ---------------------------------------------- the "seen on live" ledger -- */
+
+import { mkdtemp as mkTmp, rm as rmTmp, writeFile as writeTmp } from 'node:fs/promises';
+import { tmpdir as osTmp } from 'node:os';
+import { join as joinPath } from 'node:path';
+import { SEEN_FILE, holdBackDeleted, readSeen, recordSeen } from '../src/push.mjs';
+
+test('a design push holds back an upload file live has had before, and counts only what it sends', () => {
+  // Real server, 2026-11-11: an image deleted on live was offered back by
+  // the next design push, because its files were still on local from a pull.
+  const source = new Map([
+    ['uploads/2026/11/new.jpg', { s: 100, h: 'a' }],
+    ['uploads/2026/11/deleted-on-live.jpg', { s: 5000, h: 'b' }],
+    ['uploads/2026/11/deleted-on-live-150x150.jpg', { s: 700, h: 'c' }],
+  ]);
+  const plan = { ...diffManifests(source, new Map(), 'missing'), source };
+  assert.equal(plan.send.length, 3, 'without a ledger all three look missing');
+  const seen = new Set(['uploads/2026/11/deleted-on-live.jpg', 'uploads/2026/11/deleted-on-live-150x150.jpg']);
+  const held = holdBackDeleted(plan, seen);
+  assert.deepEqual(held.send, ['uploads/2026/11/new.jpg']);
+  assert.deepEqual(held.held, ['uploads/2026/11/deleted-on-live.jpg', 'uploads/2026/11/deleted-on-live-150x150.jpg']);
+  assert.equal(held.bytes, 100, 'the size shown is the size sent');
+  // No ledger yet (an older site): nothing is held back, the old behaviour.
+  assert.deepEqual(holdBackDeleted(plan, new Set()).send, plan.send);
+});
+
+test('the ledger keeps upload paths only, adds up across runs, and belongs to one live host', async () => {
+  const dir = await mkTmp(joinPath(osTmp(), 'agentpress-seen-'));
+  try {
+    assert.equal((await readSeen(dir, 'live.example')).size, 0, 'no file reads as nothing seen');
+    await recordSeen(dir, 'live.example', ['uploads/a.jpg', 'plugins/x/x.php', 'themes/t/style.css']);
+    await recordSeen(dir, 'live.example', new Map([['uploads/b.jpg', {}]]).keys(), ['uploads/a.jpg']);
+    assert.deepEqual([...(await readSeen(dir, 'live.example'))].sort(), ['uploads/a.jpg', 'uploads/b.jpg']);
+    // Reconnected to a different site: what the old one had says nothing about this one.
+    assert.equal((await readSeen(dir, 'other.example')).size, 0);
+    await recordSeen(dir, 'other.example', ['uploads/c.jpg']);
+    assert.deepEqual([...(await readSeen(dir, 'other.example'))], ['uploads/c.jpg']);
+    assert.equal((await readSeen(dir, 'live.example')).size, 0, 'and the old host is not remembered alongside');
+    // A damaged file must read as empty, never throw into a push.
+    await writeTmp(joinPath(dir, SEEN_FILE), '{not json', 'utf8');
+    assert.equal((await readSeen(dir, 'other.example')).size, 0);
+  } finally {
+    await rmTmp(dir, { recursive: true, force: true });
+  }
+});
+
+test('every operation that leaves upload files on both ends writes them down, and the ledger stays out of repos', async () => {
+  const src = (await readFile(new URL('../src/push.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+  const fn = (name) => {
+    const start = src.indexOf(name);
+    assert.ok(start >= 0, `${name} not found`);
+    return src.slice(start, src.indexOf('\n}\n', start));
+  };
+  assert.match(fn('async function pushFull('), /await noteSeen\(site, host, files\.source\.keys\(\), files\.target\.keys\(\)\)/);
+  assert.match(fn('export async function pullCommand('), /await noteSeen\(site, host, files\.source\.keys\(\)\)/);
+  const design = fn('async function pushDesign(');
+  assert.match(design, /holdBackDeleted\(await copyFilesPlan\(local, remote, sessions, work, \['uploads'\], 'missing'\), await readSeen\(site\.cwd, host\)\)/);
+  assert.match(design, /await noteSeen\(site, host, media\.target\.keys\(\), media\.send\)/);
+  // A dry run writes nothing, the ledger included.
+  assert.match(design, /if \(!dryRun\) await noteSeen\(/);
+  const ignore = await readFile(new URL('../template/gitignore', import.meta.url), 'utf8');
+  assert.match(ignore, /^\.agentpress-push-seen\.json\r?$/m);
+  assert.match(ignore, /^\/public\/wp-content\/agentpress-push-data\/\r?$/m);
+});
+
+test('a full copy never carries a password to the receiving site, and only a push asks for that', async () => {
+  // First real full copy: the dev site's `admin` became a live administrator
+  // with its dev password, the one the site menu prints in its header.
+  const src = (await readFile(new URL('../src/push.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+  const fn = (name) => src.slice(src.indexOf(name), src.indexOf('\n}\n', src.indexOf(name)));
+  assert.match(fn('async function pushFull('), /scramble_arriving_passwords: true/);
+  assert.doesNotMatch(fn('export async function pullCommand('), /scramble_arriving_passwords/, 'a pull leaves the copied accounts as they came');
+  // The person running the push is told which accounts need a password.
+  assert.match(fn('async function pushFull('), /Set a password on \$\{host\} for: \$\{scrambled\.join\(', '\)\}/);
+
+  const php = (await readFile(PLUGIN_PATH, 'utf8')).replace(/\r\n/g, '\n');
+  const start = php.indexOf("if (!empty($args['scramble_arriving_passwords'])) {");
+  assert.ok(start > 0, 'the receiver only scrambles when asked');
+  const block = php.slice(start, php.indexOf('wp_cache_flush();', start));
+  assert.match(block, /WHERE ID NOT IN \(' \. implode\(',', array_map\('intval', \$kept_ids\)\)/, "the receiving site's own administrators keep their passwords");
+  // One statement, and a value that is not the hash of any password.
+  assert.match(block, /UPDATE \{\$wpdb->users\} SET user_pass = CONCAT\('\*', SHA2\(/, 'a value no password verifies against');
+  assert.doesNotMatch(block, /wp_hash_password/, 'not one slow hash per account in a single request');
+  // It runs after the administrators were put back, or it would scramble them too.
+  assert.ok(php.indexOf('$kept_ids[] = $new_id;') < start);
 });

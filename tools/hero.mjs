@@ -2,7 +2,7 @@
 //
 //   node tools/hero.mjs
 //     -> docs/hero.svg   (a scaffold run: command, wordmark, steps, panel)
-//     -> docs/menu.svg   (the site menu: selection walk, snapshot, receipt)
+//     -> docs/menu.svg   (the site menu: main menu, Live site, a push preview)
 //
 // Animated SVGs instead of screen-recorded GIFs, deliberately: GitHub and npm
 // render them inline, CSS animations play inside an <img>, text stays
@@ -163,15 +163,24 @@ function makeDoc({ width, height, seconds, label }) {
 }
 
 // --- docs/menu.svg: the site menu ---------------------------------------------
+// Three screens, because since 1.11.0 the menu IS one screen at a time: it
+// repaints whole at each step instead of leaving a log of every question
+// asked. So the scenes replace each other (snap, no crossfade - a repaint is
+// instant, and a crossfade would show two menus at once), and the third one
+// drops the header, because what a command prints goes to the normal screen
+// under one heading line. The demo before this showed the old log look, with
+// the answered question still sitting above the next menu.
 {
   const X = 36;
   const LINE = 23;
-  const doc = makeDoc({ width: 860, height: 470, seconds: 18, label: 'm' });
+  const doc = makeDoc({ width: 860, height: 440, seconds: 24, label: 'm' });
+  const LIVE = 'my-site.example';
 
   // Like the hero: open with the command that gets you here, then the menu.
-  doc.text(X, 64, t('PS C:\\laragon\\www\\my-site> ', C.dim) + t('npm run agentpress'), doc.vis([1, 8]));
+  doc.text(X, 64, t('PS C:\\laragon\\www\\my-site> ', C.dim) + t('npm run agentpress'), doc.vis([1, 6]));
 
   // The credential header the real menu prints (URLs are links, i.e. pink).
+  // It is on screen for both menus and gone for the result.
   let y = 64;
   const header = [
     ['WordPress', 'https://my-site.test', C.pink],
@@ -180,56 +189,105 @@ function makeDoc({ width, height, seconds, label }) {
     ['Password', 'wp-....-....', C.text],
   ];
   for (const [name, value, fill] of header) {
-    doc.raw(`<text x="${X}" y="${y}" ${FONT}>${t(name)}</text><text x="${X + 110}" y="${y}" ${FONT}>${t(value, fill)}</text>`, doc.vis([10, 96]));
+    doc.raw(`<text x="${X}" y="${y}" ${FONT}>${t(name)}</text><text x="${X + 110}" y="${y}" ${FONT}>${t(value, fill)}</text>`, doc.vis([8, 66], { snap: true }));
     y += LINE;
   }
-  y += LINE * 0.5;
-  doc.text(X, y, t('? ', C.pink) + t('What would you like to do?'), doc.vis([[12, 50]]));
-  const questionY = y;
-  y += LINE * 1.2;
+  const questionY = y + LINE * 0.5;
 
-  // The real option list, hints included (all rows show their hint, dim).
-  const items = [
-    ['Open WP Admin', 'one-click login'],
-    ['Open the site', 'front end'],
-    ['Open Claude Code', 'MCP points here'],
-    ['Snapshot the database', 'rollback point before agent sessions'],
-    ['Restore the latest snapshot', 'db-2026-08-14T09-12-44Z.sql'],
-    ['Show recent errors', 'debug on — nothing logged yet'],
-    ['Open in VS Code', 'this site folder'],
-    ['Open a terminal here', ''],
-    ['Exit', ''],
-  ];
-  // The selection cursor walks from the first row down to Snapshot, pauses,
-  // then "Enter": windows per row, in % of the 18s loop.
-  const sel = [
-    [14, 22],
-    [22, 30],
-    [30, 38],
-    [38, 50],
-  ];
-  items.forEach(([labelText, hint], i) => {
-    const rowY = y + i * LINE;
-    const hintPart = hint ? t('  ' + hint, C.dim) : '';
-    if (i < sel.length) {
-      // Plain except while the cursor sits on it; the pink overlay covers that window.
-      const [a, b] = sel[i];
-      doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis([[12, a], [b, 50]], { snap: true }));
-      doc.text(X, rowY, t('> ', C.pink) + t(labelText, C.pink) + hintPart, doc.vis([a, b], { snap: true }));
-    } else {
-      doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis([12, 50], { snap: true }));
-    }
-  });
+  /**
+   * One menu screen: a question, its rows, and a cursor that sits on each of
+   * `walk`'s rows in turn. `walk` is [rowIndex, from%, to%]; every other
+   * moment a row is drawn plain.
+   */
+  const screen = (question, items, [from, to], walk) => {
+    doc.text(X, questionY, t('? ', C.pink) + t(question), doc.vis([from, to], { snap: true }));
+    items.forEach(([labelText, hint, hintFill = C.dim], i) => {
+      const rowY = questionY + LINE * 1.2 + i * LINE;
+      const hintPart = hint ? t('  ' + hint, hintFill) : '';
+      const on = walk.filter(([row]) => row === i).map(([, a, b]) => [a, b]);
+      if (!on.length) {
+        doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis([from, to], { snap: true }));
+        return;
+      }
+      // Plain in the gaps around the cursor's visit; the pink overlay covers the visit.
+      const plain = [];
+      let at = from;
+      for (const [a, b] of on) {
+        if (a > at) plain.push([at, a]);
+        at = b;
+      }
+      if (at < to) plain.push([at, to]);
+      if (plain.length) doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis(plain, { snap: true }));
+      doc.text(X, rowY, t('> ', C.pink) + t(labelText, C.pink) + hintPart, doc.vis(on, { snap: true }));
+    });
+  };
 
-  // Enter: the menu collapses to question › answer, then the receipt.
-  doc.text(X, questionY, t('? ', C.pink) + t('What would you like to do? ') + t('› ', C.dim) + t('Snapshot the database'), doc.vis([52, 96]));
-  doc.text(X, questionY + LINE * 1.2, t('  → database saved to snapshots\\db-2026-08-14T09-12-44Z.sql (2.6 MB)', C.dim), doc.vis([57, 96]));
-  doc.text(X, questionY + LINE * 2.6, t('? ', C.pink) + t('What would you like to do?'), doc.vis([62, 96]));
-  doc.text(X, questionY + LINE * 3.8, t('> ', C.pink) + t('Open WP Admin', C.pink) + t('  one-click login', C.dim), doc.vis([64, 96]));
-  doc.text(X, questionY + LINE * 4.8, t('  Open the site  ', C.text) + t('front end', C.dim), doc.vis([64, 96]));
-  doc.text(X, questionY + LINE * 5.8, t('  …', C.dim), doc.vis([64, 96]));
+  // Screen 1: the real option list, hints included. The cursor walks down to Live site.
+  screen(
+    'What would you like to do?',
+    [
+      ['Open WP Admin', 'one-click login'],
+      ['Open the site', 'front end'],
+      ['Open Claude Code', 'MCP points here'],
+      ['Snapshot the database', 'rollback point before agent sessions'],
+      ['Restore the latest snapshot', 'db-2026-11-11T09-12-44Z.sql'],
+      ['Live site', `push and pull · ${LIVE}`],
+      ['Show recent errors', 'debug on — nothing logged yet'],
+      ['Open in VS Code', 'this site folder'],
+      ['Open a terminal here', ''],
+      ['Exit', ''],
+    ],
+    [9, 36],
+    [
+      [0, 9, 14],
+      [1, 14, 17],
+      [2, 17, 20],
+      [3, 20, 23],
+      [4, 23, 26],
+      [5, 26, 36],
+    ],
+  );
 
-  const svg = doc.render('The per-site menu: one-click admin login, database snapshot and restore, recent errors, editor and terminal launchers');
+  // Screen 2: the same place on screen, repainted. Nothing of screen 1 is left behind.
+  screen(
+    `Live site ${LIVE}`,
+    [
+      ['Check status', 'compare this site with live'],
+      ['Preview a design push', 'shows the plan, sends nothing'],
+      ['Push design to live', 'asks first; stories on live are kept'],
+      ['Pull content from live', 'asks first; this local site becomes a copy of live'],
+      ['Undo…', 'the last push, pull or full copy'],
+      ['First launch: full copy to live', 'replaces everything on live', '#d9a441'],
+      ['Set up or reconnect…', 'plugin zip, new connection key'],
+      ['Back', ''],
+    ],
+    [38, 66],
+    [
+      [0, 38, 46],
+      [1, 46, 66],
+    ],
+  );
+
+  // Screen 3: what the command printed, on the normal screen under one
+  // heading line. These are the tool's own strings for a design-push preview.
+  y = 64;
+  const out = (at, content, gap = 1) => {
+    doc.text(X, y, content, doc.vis([at, 97]));
+    y += LINE * gap;
+  };
+  out(68, t('? ', C.pink) + t(`Live site ${LIVE} `) + t('› ', C.dim) + t('Preview a design push'), 1.6);
+  out(70, `<tspan font-weight="bold">${t('Design push')}</tspan>` + t(`  https://my-site.test  `) + t('→', C.cyan) + t(`  https://${LIVE}`));
+  out(72, t('  … reading the design here', C.dim));
+  out(74, t('  … comparing files (mu-plugins, themes)', C.dim));
+  out(76, t('  … comparing files (uploads)', C.dim), 1.6);
+  out(79, t(`  On ${LIVE} this will:`));
+  out(81, t('    change  footer    Site Footer'));
+  out(83, t('    send    media     2 files live does not have (412 KB)'));
+  out(85, t("  Stories, users, comments and the editor's own uploads are not touched.", C.dim), 1.6);
+  out(88, t('· ', C.dim) + t('Dry run: nothing was changed.'), 1.6);
+  out(91, t('  Press any key to go back to the menu…', C.dim));
+
+  const svg = doc.render('The per-site menu, one screen at a time: pick Live site, preview a design push, read the plan it would send');
   await writeFile(repo('docs/menu.svg'), svg, 'utf8');
   console.log(`docs/menu.svg written (${Buffer.byteLength(svg)} bytes)`);
 }
