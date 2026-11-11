@@ -374,7 +374,8 @@ test('no answer of ours can be kept or replayed by a page cache', async () => {
   const src = await readFile(PLUGIN_PATH, 'utf8');
   const start = src.indexOf('function agentpress_push_rest_permission(');
   const body = src.slice(start, src.indexOf('\nfunction ', start + 10));
-  assert.match(body, /^[^\n]*\n\{\n\s*agentpress_push_never_cache\(\);/, 'never_cache runs before anything can be refused');
+  // \r?\n: CI checks the file out with Windows line endings, a dev machine may not.
+  assert.match(body, /^[^\r\n]*\r?\n\{\r?\n\s*agentpress_push_never_cache\(\);/, 'never_cache runs before anything can be refused');
   assert.match(src, /header\('X-LiteSpeed-Cache-Control: no-cache'\)/);
   assert.match(src, /do_action\('litespeed_control_set_nocache'/);
   assert.match(src, /define\('DONOTCACHEPAGE', true\)/);
