@@ -17,9 +17,13 @@ references are given so you don't have to take our word for it.
   actually answers (`verifyMcpEndpoint`, `src/mcp.mjs` — only when an agent CLI was wired), and
   the plugin/theme/core update checks WordPress itself sends to `api.wordpress.org` while the
   scaffold installs and updates plugins. There is no `PUT` or `PATCH` anywhere.
-- **No remote targets.** WP-CLI is always invoked as local `php.exe` + the pinned
-  `wp-cli-<version>.phar` with `--path=<local folder>` (`src/wp.mjs`). No function in this tool
-  accepts a remote host to act on, so it cannot touch a site that isn't a folder on your disk.
+- **No remote targets, with one exception you set up by hand.** WP-CLI is always invoked as
+  local `php.exe` + the pinned `wp-cli-<version>.phar` with `--path=<local folder>`
+  (`src/wp.mjs`). Scaffold, update, doctor and destroy accept no remote host, so they cannot
+  touch a site that isn't a folder on your disk. The exception, since 1.11.0, is `push` and
+  `pull` (`src/push.mjs`): they talk to **one** live site, and only after you installed the
+  receiver plugin there yourself, created a key in its wp-admin, and ran `push connect` with
+  it. Until then no code path has an address to send to. See "Push and pull" below.
 - **`wp-cli.phar` is pinned and verified.** Downloaded from a specific WP-CLI release and
   checked against an embedded SHA-512 *before* it is written, then re-verified on every run — a
   mismatching file is replaced, never executed. The filename is version-scoped, so a `wp` you
@@ -40,7 +44,8 @@ references are given so you don't have to take our word for it.
   install/update), `github.com` (WP-CLI releases, the Agent Connector plugin releases, and your
   own private plugin repo *only if you configure one*), `registry.npmjs.org` (the version check
   in a scaffolded site's own script, and the `npx` MCP proxies at each agent session start), and
-  `oxygenbuilder.com` (only if you configure a licence key, see above). There is no default
+  `oxygenbuilder.com` (only if you configure a licence key, see above), and the one live site
+  you connected with `push connect` (only when you run `push` or `pull`). There is no default
   premium-plugin repo — nothing is fetched from the author's account.
 
 ## Things that look alarming, and why they're necessary
@@ -56,8 +61,57 @@ references are given so you don't have to take our word for it.
 | Writes agent MCP configs | `src/mcp.mjs` | Registers the site as an MCP server: into the site's own `.mcp.json` for Claude Code, into home-directory configs for Cursor / Codex / OpenCode. The feature. |
 | **Edits a third-party plugin's PHP** | `src/plugins.mjs` (`patchOxygenHtmlToPage`) | The only place this tool modifies code it did not write. Oxygen's `html-to-page` fails on **every** input on libxml ≥ 2.10 (a `<meta charset>` prefix with `LIBXML_HTML_NOIMPLIED` raises a spurious "Memory allocation failed"), and it is the builder's documented primary tool. One line is replaced with an XML encoding declaration. It matches the **exact** known-broken string or refuses aloud, checks the libxml version first, keeps the original as `html-to-page.php.agentpress-bak`, comments the change in the file, never fails a scaffold, and stops applying itself the moment Oxygen ships a fix. Skip it with `--premium=none`. |
 
-## Where secrets live
+## Push and pull
 
+`push` and `pull` are the only commands that reach a server that is not your own machine,
+so they get their own section.
+
+- **What is installed on the live site:** one PHP file, `agentpress-push`
+  (`src/push/agentpress-push/agentpress-push.php`, readable in full before you upload it). It
+  adds three REST routes under `agentpress-push/v1`. With a valid key they can replace the
+  site's database, write files under `wp-content`, and read both back. **That is the whole
+  site. Treat the key like an administrator password.**
+- **The key.** 48 random hex characters, shown once, created and revoked in wp-admin (Tools →
+  AgentPress Push, administrators only). The live site stores only a SHA-256 hash, in a PHP
+  file under `wp-content/agentpress-push-data/`, not in the database. No key created means
+  every route answers 401, and repeated wrong keys from one address get that address refused
+  for a while. Revoke the key, or deactivate the plugin, whenever you are not about to push:
+  nothing else needs it.
+- **HTTPS is required.** The command refuses a plain-http address unless the host is a local
+  one (`.test`, `.local`, `localhost`, `127.x`), and the plugin refuses plain http the same
+  way. Redirects are not followed, so the key is never re-sent to a different host.
+- **Where the key sits locally:** `PUSH_REMOTE_URL` and `PUSH_REMOTE_KEY` in the site's
+  gitignored `.env`, next to the other generated secrets.
+- **The agent plugins never go up.** `agent-connector-for-wp` and
+  `universal-abilities-plugin` carry shell-exec, PHP-eval and filesystem-write abilities. A
+  push skips their files and removes them from the list of plugins to switch on. Live-verified
+  2026-11-11: after a full copy to a site without them, neither folder existed there and the
+  MCP route answered 404.
+- **Logins do not travel.** Each end keeps its own administrators' passwords. Sign-in sessions
+  and application passwords are deleted from a copied database for every user that is not one
+  of the receiving site's own administrators.
+- **Data that arrives is never turned into objects.** Address rewriting inside serialized
+  values runs `unserialize` with `allowed_classes => false`.
+- **Temporary files on the live site.** During a job the database export and file packs sit
+  in a folder with a 32-character random name under `wp-content/agentpress-push-data/`, and
+  are deleted when the job ends. The folder carries a `Require all denied` `.htaccess`. **A
+  server that ignores `.htaccess` (nginx) does not enforce that**, and there the unguessable
+  folder name is the only protection for the minutes a job runs. Saved design backups (the
+  last ten, design data only, no users or passwords) stay in that folder between jobs.
+- **A page cache must not keep what the plugin answers.** The key is a request header, not a
+  WordPress login, so to a page cache every request looks like an anonymous visitor. Found on
+  the first real server (2026-11-11, LiteSpeed with the LiteSpeed Cache plugin, plugin 0.1.2):
+  the server stored a file-list download and then gave that stored copy to a request with **no
+  key at all**, because a cache hit never reaches the key check. The address held a
+  32-character random job id, so it was not guessable, and only a list of file names and sizes
+  was fetched that way; no database export was. From 0.1.3 the plugin forbids caching of
+  every answer (also the refusals) and the sender never asks for the same address twice.
+  If you ran a pull or push with 0.1.2 against a LiteSpeed server, purge its cache once.
+- **Lightly proven:** connect, status, the preview, the first full copy, a design push and
+  its undo have run against one real server (cPanel, LiteSpeed, PHP 8.4). A pull, and the
+  undo of a full copy, have run between local sites only.
+
+## Where secrets live
 - `<site>/.env` — DB and WordPress admin passwords this tool generated. It sits **outside** the
   site's docroot (`public/`), and the tool writes a `Require all denied` `.htaccess` in the
   project root and then **actively verifies over HTTP that `.env` is not served**, warning

@@ -25,6 +25,7 @@ const VARS = {
   WP_ADMIN_USER: 'admin',
   WP_ADMIN_EMAIL: 'admin@example.com',
   WP_BAT_ESCAPED: 'C:\\\\laragon\\\\usr\\\\bin\\\\wp.bat',
+  CHECKOUT_CLI_ESCAPED: '',
 };
 
 async function render() {

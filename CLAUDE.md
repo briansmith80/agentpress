@@ -227,6 +227,113 @@ prints itself instead of executing.
 reuse or paste an old one. Per-site secrets live only in each site's gitignored `.env`. Never
 commit or echo generated passwords, app passwords, or license keys.
 
+**Push and pull (`src/push.mjs` + `src/push/agentpress-push/agentpress-push.php`, 1.11.0).**
+One PHP plugin runs on BOTH ends: the live one is reached over REST, the local one through
+`wp agentpress-push run`, and Node only carries files between them. So a rule fixed in the
+plugin is fixed for both directions, and a local-to-local run exercises the real code. As of
+2026-11-11 exactly one real server has seen it (a shared host, cPanel + LiteSpeed,
+PHP 8.4): connect, status, the dry run, the first full push, one design push and its undo
+(both cleared the page cache by themselves). A pull and `push undo --full` have only
+ever run between three local sites.
+
+- **Ownership decides everything: design is local's and only goes up, content is live's and
+  only comes down.** The whole database moves only in `push --full` (first launch) and
+  `pull`. Do not add a third path that merges rows.
+- **Oxygen's own Design Library importer is not a base to build on.** Run twice against a
+  site (6.2.1): it keeps the stories, but bins and recreates every template under a NEW id
+  each run, publishes a second "Home" (`home-2`) when the page changed, and drops
+  `_breakdance_block_settings`. Hence the in-place apply keyed on a permanent
+  `_agentpress_uid` per design item.
+- **The agent plugins are local-only, both ways** (`LOCAL_AGENT_PLUGINS`). They carry
+  shell-exec and PHP-eval. The first full push copied the whole plugins folder and the
+  copied database switched them on at the target; caught before any real server was touched.
+  A push now skips their files AND drops them from the active list. Both halves or neither:
+  files skipped with the plugin still listed is a missing-plugin error on live. A test pins
+  the pair.
+- **Sessions and application passwords never travel with a database copy.** The dev site's
+  app password is the one its AI agent holds.
+- **The connection key lives in a FILE, never `wp_options`.** A full copy replaces the
+  options table mid-job; a key stored there vanishes at the swap and every later step 401s
+  with the job half done.
+- **The swap keeps the copy's active-plugin list, not the union with the target's.** With
+  the union, a target that had WooCommerce (the source did not) answered its next request
+  60 seconds late: WooCommerce found its options gone and reinstalled itself.
+- **The design fingerprint rewrites block references on the tree string BEFORE
+  `wp_json_encode`.** Encoded, every quote is escaped (`\"block\":140`) and the reference
+  pattern matches nothing, so two identical designs with different block ids hashed
+  differently: `push status` said "differs" straight after a push that said "nothing to
+  push", and the pull guard (same hash) would have refused every pull.
+- **A step is numbered `runId:i`, not `i`.** The receiver remembers the last answer per
+  number so a retried request is answered once; a bare integer collides the moment one op
+  runs twice in a session.
+- **A PHP-backed test skips ONLY when PHP is missing** (resolver throws, or exit code null).
+  PHP that ran and answered wrongly must fail. The first version skipped on any non-zero
+  exit, which would have hidden a parse error in the plugin behind a green run.
+- **The site menu's Live site items RUN the command, they do not reimplement it.** An
+  item's value is its command line, so the plan, the questions and the refusals cannot
+  drift from the tool's. Three things make that work: `CHECKOUT_CLI` is stamped into the
+  menu so a site updated from a git clone pushes with that clone (`npx …@latest` is the
+  last PUBLISHED version, older than the plugin the clone just installed); everything of
+  ours the menu runs gets `AGENTPRESS_NO_BANNER=1` (operator screenshot, 2026-11-11: every
+  pick reprinted the wordmark until the results were lost between five of them); and
+  `AGENTPRESS_MENU=1` makes `say()` in `src/push.mjs` name the menu item to pick next
+  instead of a long command. `MENU_LABELS` there and the menu's labels are pinned by
+  `test/parity.test.mjs`. The pasted connection line is validated against one exact shape
+  BEFORE it reaches a shell (`runInherit` is `shell: true`).
+- **The site menu is one screen at a time, not a log** (operator's call, 2026-11-11, after
+  the submenu turned the old one-line-per-pick log into a column of question marks). Menus
+  draw on the terminal's ALTERNATE screen and repaint whole at each step. What a command
+  PRINTS goes to the normal screen under one heading line and waits for a key: the
+  alternate screen has no scrollback, so a long result shown there loses its top for good,
+  and this way what is left after exit is a log of what was done, not of every menu looked
+  at. Quick actions leave a receipt through `note()`, drawn under the next header, because
+  a line printed on the spot is wiped by the repaint. Never `ESC[2J`/`ESC[3J`: the screen
+  and scrollback from before the menu opened are the user's. `process.on('exit')` leaves
+  the alternate screen, or a crash returns a prompt with no history that will not scroll.
+  `docs/menu.svg` (built by `tools/hero.mjs`) still shows the old log look.
+- **A local-to-local test cannot see what a pre-installed plugin hides.** Both findings of
+  the first real push (a shared host, cPanel + LiteSpeed, 2026-11-11) were invisible
+  locally because every test target already had Oxygen: (1) the file sync skipped any folder
+  NAMED `cache`/`backups`/`node_modules`, and Oxygen ships code in `Twig/Cache/`, so the push
+  died AFTER the database switch with `Class "…\Twig\Cache\FilesystemCache" not found`;
+  (2) empty folders did not travel, and Oxygen refuses to run without three of its (empty)
+  upload folders. Code roots are now copied exactly (only `.git` skipped), name-based skips
+  apply only directly under `uploads/`, and empty folders are listed, packed and created.
+  To reproduce a bare server locally, strip the target first: park `Twig/Cache` and
+  `rmdir` the three `uploads/oxygen/*` folders, push, expect "6 to send".
+- **A push that "worked" can still show the old site: the server's page cache.** After the
+  first real push `push status` said all equal while `/` answered `X-LiteSpeed-Cache: hit`
+  with the empty pre-push WordPress ("My WordPress Blog"); a cache-busting query showed the
+  real page. Two causes: nothing purged the cache, and the copied database had switched the
+  host-installed `litespeed-cache` plugin OFF, so the one thing that could purge was not
+  running. Plugin 0.1.2 sends `X-LiteSpeed-Purge: *` itself in `db_swap`, `db_undo` and
+  `finish`, and keeps an active page-cache plugin active with its own options through a
+  swap (`agentpress_push_page_cache_plugins`). Live-verified the same day with a design
+  push (0.1.3, cache plugin active): `/` had been cached with the old footer, and the first
+  request after the push answered `miss` with the new one, no manual purge. Which of the
+  two purges did it (the raw header or the plugin's `litespeed_purge_all`) is not
+  separated, and the header alone, with the cache plugin OFF, is still unproven. Check with
+  `curl -s -D - -o /dev/null https://<site>/ | grep -i x-litespeed-cache` straight after a
+  push: `miss` is right, `hit` with the old content means the purge did not land.
+- **The key is a header, so a page cache sees every request as an anonymous GET, and
+  `nocache_headers()` does not stop LiteSpeed.** Second finding on the real server, the
+  moment the LiteSpeed Cache plugin was switched back on (it caches the REST API by
+  default): a design-push dry run said "96 files live does not have" when live lacked ONE.
+  The second download of `manifest.ndjson` in a session (uploads) was answered
+  `X-LiteSpeed-Cache: hit` with the first (mu-plugins, themes), same address, different
+  file. A real push would have re-sent and overwritten every upload on live, which are the
+  editor's. And the stored copy was served to a request with NO key: a cache hit never
+  reaches PHP, so never reaches the permission check. `Cache-Control: no-store, private`
+  was being sent throughout and ignored. Plugin 0.1.3: `agentpress_push_never_cache()` runs
+  first in the permission check (so a refusal is not cached either) with all three
+  spellings (`DONOTCACHEPAGE`, `litespeed_control_set_nocache`, `X-LiteSpeed-Cache-Control:
+  no-cache`), and `route()` in `src/push.mjs` adds a unique `ap_n` to every address. Both
+  halves stay. Any new route goes through the same permission callback or it is cacheable.
+  Probe: download the same session file twice and read `x-litespeed-cache` on the second.
+- **Not exercised by anything yet:** differing table prefixes, a real `post_max_size`, the
+  wp-admin key page in a browser, and on a real server: a pull, `push undo --full`.
+  Say so rather than assume.
+
 ---
 
 ## Style

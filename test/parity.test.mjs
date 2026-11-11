@@ -154,3 +154,57 @@ test('every AGENTPRESS_* env read in the frozen menu goes through envOn', () => 
     .filter(([, line]) => !/envOn\(/.test(line));
   assert.deepEqual(offenders, [], 'read these through envOn(), or "=0" will mean on');
 });
+
+test('every menu item the push hints name is a real label in the frozen menu', async () => {
+  // src/push.mjs tells someone inside the menu which ITEM to pick next. An
+  // item the menu does not have is worse than the long command it replaced.
+  const { MENU_LABELS } = await import('../src/push.mjs');
+  for (const [command, label] of Object.entries(MENU_LABELS)) {
+    for (const part of label.split(' → ')) {
+      assert.ok(menu.includes(`label: '${part}'`), `push hint for "${command}" names "${part}", which is not a menu label`);
+    }
+    // Connect is the one item that is not a bare command line: it asks for the
+    // pasted line first. Every other item's value IS the command it runs.
+    if (command !== 'push connect') assert.ok(menu.includes(`value: '${command}'`), `the menu has no item that runs "${command}"`);
+  }
+});
+
+test('the menu accepts exactly the connection lines src/push.mjs parses', async () => {
+  const push = await read('src/push.mjs');
+  const shape = '/^agentpress-push:[A-Za-z0-9_-]+$/';
+  // The menu hands the pasted line to a shell, so its check is the security
+  // boundary; the parser's is the same shape, so nothing valid is refused.
+  assert.ok(menu.includes(`${shape}.test(line)`), 'the menu no longer validates the pasted line with the known shape');
+  // Same characters, plus the one capture group the parser reads the payload from.
+  assert.ok(push.includes('/^agentpress-push:([A-Za-z0-9_-]+)$/.exec(raw)'), 'src/push.mjs parses a different shape than the menu validates');
+});
+
+test('the menu shows the wordmark once: everything of ours it runs is told to skip it', () => {
+  // Operator screenshot, 2026-11-11: each Live site pick printed the banner
+  // again and the results were lost between five wordmarks.
+  assert.match(menu, /const OWN_TOOL_ENV = \{ \.\.\.process\.env, AGENTPRESS_NO_BANNER: '1', AGENTPRESS_MENU: '1' \}/);
+  const ownRuns = [...menu.matchAll(/runInherit\('(?:npx|node)',[^\n]*/g)].map((m) => m[0]);
+  assert.ok(ownRuns.length >= 4, 'expected the rewire, update and two Live site call sites');
+  for (const call of ownRuns) assert.ok(call.includes('env: OWN_TOOL_ENV'), `runs our own tool with the banner on: ${call}`);
+});
+
+test('the menu gives the terminal its own screen back however it ends, and never deletes history', () => {
+  // The menu draws on the alternate screen. Left there after a crash, the
+  // shell prompt comes back with no history above it and nothing scrolls.
+  assert.ok(menu.includes("process.on('exit', showNormalScreen)"), 'the alternate screen is not left on exit');
+  // ESC[3J wipes the scrollback and ESC[2J pushes or wipes the visible screen
+  // depending on the terminal. Neither belongs here: what was in the terminal
+  // before the menu opened is the user's, not ours.
+  assert.ok(!menu.includes('\x1b[3J') && !menu.includes('\x1b[2J'), 'the menu must not clear the normal screen or its scrollback');
+});
+
+test('every menu question is drawn on a fresh screen', () => {
+  // A chooser drawn without a repaint lands under whatever was there, which
+  // is the pile-up the one-screen design exists to remove.
+  const lines = menu.split('\n');
+  lines.forEach((line, i) => {
+    if (!/await choose\(/.test(line)) return;
+    const before = lines.slice(Math.max(0, i - 3), i).join('\n');
+    assert.match(before, /menuScreen\(\);/, `choose() at line ${i + 1} is not preceded by menuScreen()`);
+  });
+});

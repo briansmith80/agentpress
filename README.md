@@ -123,11 +123,15 @@ alias works for every command: `agentpress doctor`, `agentpress destroy`, and so
 … update --all         # the same, for every site in `list` (run from anywhere)
 … rewire               # point the AI agents' MCP connection back at THIS site
 … destroy              # permanently remove the site: DB, vhost, MCP wiring, hosts entry, folder
+… push                 # send this site's DESIGN to its live site (stories there are kept)
+… push --full          # first launch: make the live site a full copy of this one
+… pull                 # bring the live site's content down to this local site
 
 # flags
 … my-site --plugins=akismet,seo-by-rank-math   # extra wordpress.org plugins
 … my-site --premium=all|none|oxygen,…          # which premium plugins this site gets
 … my-site --yes        # non-interactive (skips the confirmation prompt; implies --premium=all)
+… push --dry-run       # (push and pull) show what would change, send nothing
 ```
 
 Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install folder if not
@@ -139,6 +143,88 @@ Output appearance: `AGENTPRESS_NO_BANNER=1` hides the wordmark header, and the s
 `NO_COLOR=1` / `FORCE_COLOR=1` turn colour off / on. Colour and the banner are suppressed
 automatically when output isn't a terminal, so piping or redirecting any command gives you
 clean plain text.
+
+## Push to live, pull from live
+
+New in 1.11.0, and **lightly proven**: one real server so far (cPanel with LiteSpeed,
+PHP 8.4). Connect, status, the preview, the first full copy, a design push and its undo
+have run there. A pull, and the undo of a full copy, have only run between local sites. Treat your first run as a
+test: use a fresh WordPress install on the server, and keep the host's own backup
+switched on.
+
+A push clears the server's page cache when it finishes, and a cache plugin the live site
+already runs (LiteSpeed Cache, WP Rocket and the like) stays switched on with its own
+settings. If the home page still shows the old site after a push, purge the cache in
+that plugin or in the hosting panel.
+
+One rule decides what travels:
+
+- **Design belongs to the local site and only goes up.** Oxygen templates, header, footer,
+  blocks, Oxygen-built pages, selectors, variables, global styles, plus the theme and
+  `mu-plugins` code the design needs.
+- **Content belongs to the live site and only comes down.** Stories, comments, users, media
+  the editor uploaded.
+
+So after launch you keep designing locally and `push`, while the editor keeps writing on
+live, and neither wipes the other. It works over plain HTTPS, so shared hosting with no SSH
+(most cPanel accounts) is fine.
+
+**Set up, once per site:**
+
+```bash
+… push plugin            # writes agentpress-push.zip into the site folder
+```
+
+1. On the live site: Plugins → Add Plugin → Upload Plugin, choose that zip, activate it.
+2. Tools → AgentPress Push → **Create a connection key**. It shows one long line, once.
+3. Back in the local site folder: `… push connect <that line>`
+
+**Day to day:**
+
+```bash
+… push status            # compare the two sites: versions, counts, same design or not
+… push --full            # first launch only: files + whole database up
+… push                   # after that: design only. Shows the plan, then asks
+… push undo              # put live back on the design it had before the last push
+… push undo --full       # put live back on the database it had before the last full copy
+… pull                   # live's database and uploads down; local becomes a copy of live
+… pull undo              # put the local database back as it was before the pull
+```
+
+Add `--dry-run` to `push`, `push --full` or `pull` to see the plan and send nothing.
+
+All of it is also in the site menu: `npm run agentpress`, then **Live site**. Run `update`
+in a site scaffolded before 1.11.0 to get that entry.
+
+**What each end keeps through a full copy or a pull:** its own address, its administrators'
+logins, its search-engine visibility setting, its admin email and its Oxygen license. Sign-in
+sessions and application passwords never travel.
+
+**Built to be hard to hurt yourself with:**
+
+- A full copy loads the new database *beside* the running one and switches in a single
+  step. The old one stays, which is what `undo` goes back to.
+- `push --full` onto a site that already has content asks you to type the site's name.
+  `--yes` alone is refused there; a script needs `--force` as well.
+- `pull` refuses if the local design has changes that were never pushed, because a pull
+  would replace them. Push first, or `--force`.
+- A design push saves the live design first (last ten kept), and puts design items it
+  removes in the bin instead of deleting them.
+- Files are never deleted on the receiving end.
+- **The agent plugins stay local.** `agent-connector-for-wp` and
+  `universal-abilities-plugin` give AI agents shell and PHP access. A push never sends
+  them and never switches them on at the other end.
+
+**Not covered yet:**
+
+- A design push does not carry categories, menus or new plugins. Those travel with a full
+  copy only.
+- An image added to the design *after* launch is sent as a file, but the design points at it
+  by media-library number, which can differ on live. Re-pick the image on live, or add it
+  on live first and pull.
+- `undo --full` and `pull undo` roll back the database, not files.
+- Both sites need the same Oxygen version. The command checks and stops if they differ.
+- Sites with different table prefixes: the code handles it, but no test has exercised it.
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 
@@ -229,6 +315,10 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
   kept in the site's `snapshots\` folder (gitignored: a dump is the whole site, password
   hashes included). Take one before letting an agent loose on the site; restoring is a
   two-keystroke rollback.
+- **Live site** — push and pull without typing the commands: check status, preview a
+  design push, push, pull, undo, and the two set-up steps (make the plugin zip, paste the
+  connection line). Each item runs the same command you could type, so the plan and the
+  questions are identical. See "Push to live, pull from live" above.
 - **Show recent errors** — the tail of `wp-content\debug.log`, or how to turn debug
   logging on when there isn't one.
 - **Open in VS Code** (or Cursor) — the site folder in your editor. Appears only when one
@@ -237,6 +327,10 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
   site folder (a plain Command Prompt on machines without it).
 - **Update this site** — appears only when npm has a newer version, and runs the update
   for you.
+
+The menu draws one clean screen at a time, like a full-screen app, and gives your terminal
+back exactly as it was when you exit. Anything a command prints (a push, the error log) is
+shown in your normal terminal instead, so you can scroll it and it is still there afterwards.
 
 The menu is dependency-free and frozen into the site at scaffold time; `update` refreshes it.
 
@@ -366,7 +460,8 @@ Nothing here runs in the background; removing it is deleting things. In order:
 This is a local dev tool that does a few things that look alarming in isolation (executes PHP
 via WP-CLI, runs PowerShell, UAC prompts for the hosts file, installs downloaded plugins).
 **[SECURITY.md](SECURITY.md)** explains each one with source references, states what it
-deliberately does *not* do (no telemetry, no outbound data, no remote targets), and lists the
+deliberately does *not* do (no telemetry, no outbound data, no remote target except a live
+site you connect yourself with `push connect`), and lists the
 limitations we would rather disclose than hide. Worth two minutes before you run any tool that
 asks for a UAC prompt.
 

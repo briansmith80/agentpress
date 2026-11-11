@@ -35,6 +35,7 @@ import { mintAppPassword, readWiredHostnames, verifyMcpEndpoint, MCP_CONFIGURERS
 import { mintAdminLoginUrl } from './admin-login.mjs';
 import { destroySite } from './destroy.mjs';
 import { registerQuickApp } from './quickapp.mjs';
+import { pullCommand, pushCommand, runPushLike } from './push.mjs';
 import { certCoversHostname, ensureHostsEntry, fetchViaLoopback, flushDnsCache, installWildcardConf, sslCertPresent, wildcardActive, wildcardConfInstalled, WILDCARD_CONF_PATH } from './wildcard.mjs';
 import { randomBytes } from 'node:crypto';
 
@@ -65,6 +66,17 @@ const CLI = RUNNING_FROM_PACKAGE ? 'npx create-agentpress' : `node ${join(ENGINE
  * usr\bin is only on PATH when Laragon's "Add to Path" was applied.
  */
 const WP_BAT_ESCAPED = join(LARAGON_ROOT, 'usr', 'bin', 'wp.bat').replace(/\\/g, '\\\\');
+
+/**
+ * This checkout's index.js for the site menu's Live site items, or '' when
+ * running from npm/npx. A site scaffolded or updated from a git clone must
+ * push with THAT clone: its receiver plugin was just copied from it, and
+ * `npx create-agentpress@latest` is the last PUBLISHED version, which can
+ * be older than that plugin (or, before a release, have no push at all).
+ * Empty from a package on purpose: the npx cache path is ephemeral, the
+ * same reason CLI above never prints it. Escaped like WP_BAT_ESCAPED.
+ */
+const CHECKOUT_CLI_ESCAPED = RUNNING_FROM_PACKAGE ? '' : join(ENGINE_DIR, 'index.js').replace(/\\/g, '\\\\');
 
 /**
  * Hand-rolled, no dep — extended from the original katalystwp parser to also
@@ -1329,6 +1341,7 @@ async function finishExtras({ name, hostname, projectDir, extraPlugins = [], pre
     WP_ADMIN_USER: adminUser,
     WP_ADMIN_EMAIL: adminEmail,
     WP_BAT_ESCAPED,
+    CHECKOUT_CLI_ESCAPED,
   });
 
   const sandboxConfigPath = join(projectDir, 'sandbox.config.json');
@@ -1835,6 +1848,7 @@ async function updateProject({ yes, dir = process.cwd(), announce = true }) {
     WP_ADMIN_USER: env.WP_ADMIN_USER || 'admin',
     WP_ADMIN_EMAIL: env.WP_ADMIN_EMAIL || 'admin@example.com',
     WP_BAT_ESCAPED,
+    CHECKOUT_CLI_ESCAPED,
   };
 
   if (announce) {
@@ -2148,6 +2162,36 @@ async function destroyCommand({ yes }) {
  * tooling files), `destroy` (which deletes a tree and drops a database) and
  * `rewire` (which mints a credential and takes machine-global state).
  */
+/**
+ * `push` and `pull`: the same folder gate `rewire` and `destroy` enforce, then
+ * hand over to push.mjs. The gate matters more here than anywhere: these
+ * commands read a connection key out of .env and can replace a database, so
+ * "any folder that happens to hold a .env" is not good enough.
+ */
+async function pushOrPullCommand(args) {
+  const cwd = process.cwd();
+  let env;
+  try {
+    env = parseEnvFile(await readFile(join(cwd, '.env'), 'utf8'));
+  } catch {
+    bail(notASiteDirMessage(args.command, cwd));
+    return;
+  }
+  if (!(await isAgentPressSiteDir(cwd)) || !(await fileExists(join(cwd, 'public')))) {
+    bail(notASiteDirMessage(args.command, cwd));
+    return;
+  }
+  const site = { cwd, env, publicDir: join(cwd, 'public'), cli: CLI };
+  const options = {
+    yes: args.yes,
+    force: flagOn(args.flags.force),
+    dryRun: flagOn(args.flags['dry-run']),
+    full: flagOn(args.flags.full),
+    positional: args.positional,
+  };
+  await runPushLike(() => (args.command === 'pull' ? pullCommand(site, options) : pushCommand(site, options)));
+}
+
 async function isAgentPressSiteDir(cwd) {
   return (
     (await fileExists(join(cwd, 'sandbox.config.json'))) ||
@@ -2449,6 +2493,12 @@ function printUsage() {
       cmd('update --all', 'The same, for every site in `list` (run from anywhere)'),
       cmd('rewire', "Point the AI agents' MCP connection back at THIS site"),
       cmd('destroy', 'Permanently remove that site'),
+      cmd('push plugin', 'Write the plugin zip to upload to a live site (once per live site)'),
+      cmd('push connect <line>', 'Connect this site to a live one, using the line that plugin shows'),
+      cmd('push --full', 'First copy: put this whole site on the live one'),
+      cmd('push', "Send this site's design up; the live site's stories are not touched"),
+      cmd('pull', "Bring the live site's content down here"),
+      cmd('push status', 'Compare the two; push undo / pull undo step back'),
       cmd('npm run agentpress', 'The site menu: admin login, DB snapshots, recent errors'),
       cmd('/verify', 'In an agent: exercise both MCP servers and Oxygen end to end'),
       '',
@@ -2462,6 +2512,8 @@ function printUsage() {
       cmd('--premium=all|none|a,b', 'Which premium plugins this site gets'),
       cmd('--adopt', 'resume: proceed on a folder with no AgentPress marker (it will be overwritten)'),
       cmd('--force-name', 'Scaffold a site whose name looks like a mistyped command'),
+      cmd('--dry-run', 'push, pull: show what would change and change nothing'),
+      cmd('--force', 'push --full onto a site with content; pull over unpushed design changes'),
       cmd('--help, -h', 'This screen'),
       cmd('--version, -v', 'Print the version'),
       `  ${dim('Values attach with =, not a space: --premium=none, never --premium none.')}`,
@@ -2479,7 +2531,7 @@ function printUsage() {
   );
 }
 
-const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all']);
+const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all', 'full', 'dry-run', 'force']);
 
 /**
  * Is a boolean flag on? The same trap as environment variables (see `envOn` in
@@ -2523,7 +2575,9 @@ const VALUE_FLAG_EXAMPLE = { premium: '--premium=none', plugins: '--plugins=word
 const VALUE_FLAGS = new Set(['plugins', 'premium']);
 /** Commands that act on the current directory and take no site name. */
 const CWD_COMMANDS = new Set(['update', 'rewire', 'destroy']);
-const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'rewire', 'destroy', 'register-quick-app', 'help', 'version']);
+// `push` and `pull` act on the current folder too, but are NOT in CWD_COMMANDS:
+// that set refuses any further positional, and these take one (`push connect <line>`).
+const KNOWN_COMMANDS = new Set(['doctor', 'setup', 'list', 'resume', 'update', 'rewire', 'destroy', 'push', 'pull', 'register-quick-app', 'help', 'version']);
 
 function editDistance(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -2767,6 +2821,11 @@ export async function create({ argv = process.argv.slice(2) } = {}) {
 
   if (args.command === 'destroy') {
     await destroyCommand({ yes: args.yes });
+    return;
+  }
+
+  if (args.command === 'push' || args.command === 'pull') {
+    await pushOrPullCommand(args);
     return;
   }
 

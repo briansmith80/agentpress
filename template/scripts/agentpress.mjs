@@ -5,7 +5,7 @@
 // Apache/MySQL are shared by every Laragon site, always-on, so unlike
 // the Docker original this menu never starts or stops anything itself.
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { emitKeypressEvents } from 'node:readline';
+import { createInterface, emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -22,6 +22,13 @@ const LOCK_PATH = join(CWD, '.agentpress.lock');
 // user-profile Laragon under O'Brien), `"` is not — so this can never
 // break, while a single-quoted literal could.
 const WP_BAT = "__WP_BAT_ESCAPED__";
+// The git checkout this site was scaffolded or last updated from, or '' when
+// that was the npm package. The Live site items run the main tool, and from a
+// checkout `npx create-agentpress@latest` is the WRONG tool: it is the last
+// PUBLISHED version, which can be older than the receiver plugin the checkout
+// just installed on this site (or, before a release, have no push command at
+// all). Used only while the file still exists; otherwise npx, as for everyone.
+const CHECKOUT_CLI = "__CHECKOUT_CLI_ESCAPED__";
 const AGENT_LABELS = { claude: 'Claude Code', cursor: 'Cursor CLI', codex: 'Codex CLI', opencode: 'OpenCode' };
 // The registry KEY is not the command. Launching used to pass the key straight
 // to the shell, so "Open Cursor CLI" ran `cursor` (a different program, or
@@ -132,7 +139,7 @@ function openBrowser(url) {
   // envOn for the same reason as every other gate here: AGENTPRESS_NO_OPEN=0 must
   // mean "do open", and bare truthiness made it mean the opposite.
   if (envOn('AGENTPRESS_NO_OPEN') || envOn('KATALYST_NO_OPEN')) {
-    console.log(`  ${dim('Open:')} ${url}`);
+    note(`  ${dim('Open:')} ${url}`);
     return;
   }
   try {
@@ -149,7 +156,7 @@ function openBrowser(url) {
       shell: false,
     }).unref();
   } catch {
-    console.log(`  ${dim('Open:')} ${url}`);
+    note(`  ${dim('Open:')} ${url}`);
   }
 }
 
@@ -246,7 +253,7 @@ async function openTerminalHere() {
     return 'Windows Terminal';
   }
   if (await trySpawnDetached('cmd', ['/c', 'start', 'cmd'])) return 'a Command Prompt';
-  console.log(`  ${dim('(could not open a terminal — run this yourself:)')} ${pink(`cd ${CWD}`)}`);
+  note(`  ${dim('(could not open a terminal — run this yourself:)')} ${pink(`cd ${CWD}`)}`);
   return null;
 }
 
@@ -435,7 +442,7 @@ async function adminUrl() {
       // fall through
     }
   }
-  console.log(dim('  (one-click login unavailable — opening the normal login form; credentials are in .env)'));
+  note(dim('  (one-click login unavailable — opening the normal login form; credentials are in .env)'));
   return `${SITE}/wp-admin`;
 }
 
@@ -582,7 +589,10 @@ async function choose(message, options) {
       // every action deposited an identical two-line block with nothing
       // between them — four "What would you like to do? / > Open WP Admin"
       // pairs stacked into a wall on a real session (operator screenshot,
-      // 2026-08-12). One line per round reads as a session log instead.
+      // 2026-08-12). Since 1.11.0 the menu repaints a whole screen per step
+      // (see "one screen at a time" below), so this line is on screen only
+      // for the moment before that repaint; it stays so a slow action still
+      // shows what was picked while it runs.
       const rows = final ? [`${pink('?')} ${message} ${dim('›')} ${options[cursor].label}`] : [`${pink('?')} ${message}`];
       if (!final) {
         rows.push('');
@@ -621,7 +631,9 @@ async function choose(message, options) {
         // "0 selects the last item" is a trap: this same chooser renders the
         // restore confirm, whose last item is Restore — a reflex 0 there
         // would overwrite the database instead of leaving the menu.
-        const exitAt = options.findIndex((o) => o.value === 'exit');
+        // 'back' is the same promise one level down: it leaves a submenu and
+        // changes nothing.
+        const exitAt = options.findIndex((o) => o.value === 'exit' || o.value === 'back');
         if (exitAt >= 0) {
           cursor = exitAt;
           return finish(options[cursor].value, true);
@@ -653,7 +665,107 @@ function pressAnyKey() {
   });
 }
 
-function runInherit(cmd, args = []) {
+// --- one screen at a time ---
+// The menu draws on the terminal's ALTERNATE screen (the one vim and less
+// use) and repaints it whole at every step, so moving around looks like a
+// menu and leaves nothing behind. It used to log instead: each pick collapsed
+// to a "? question › answer" line and the next menu printed underneath. That
+// read as a session log while the menu was one level deep. With a submenu it
+// became a column of question marks with the results lost between them
+// (operator, 2026-11-11: "it just looks messy").
+//
+// What a command PRINTS is the opposite case, and is kept. Results go to the
+// normal screen under one heading line, where they can be scrolled and are
+// still there after the menu closes. The alternate screen has no scrollback,
+// so a 40-line error log or a full push shown there would lose its top with
+// no way to get it back.
+let onMenuScreen = false;
+function showMenuScreen() {
+  if (!onMenuScreen) process.stdout.write('\x1b[?1049h');
+  onMenuScreen = true;
+  // Home, then erase to the end: a full repaint of a screen that is ours.
+  process.stdout.write('\x1b[H\x1b[J');
+}
+function showNormalScreen() {
+  if (onMenuScreen) process.stdout.write('\x1b[?1049l');
+  onMenuScreen = false;
+}
+// However this process ends, the terminal gets its own screen back. Left on
+// the alternate one the shell prompt returns with no history above it and
+// nothing scrolls, which is indistinguishable from a broken terminal.
+process.on('exit', showNormalScreen);
+
+// Lines a helper wants shown that are not worth a screen of their own (a
+// fallback note, a URL to open by hand). They used to be printed on the spot,
+// which the next repaint would now wipe before anyone read them; collected
+// here, they are drawn under the header of the next menu screen instead.
+const notes = [];
+const note = (line) => notes.push(line);
+
+function drawHeader() {
+  if (SHOW_BANNER) {
+    const subtitle = `v${VERSION} · AI-agent-ready WordPress`;
+    // Right-aligned by measuring the art, never a hardcoded run of spaces, so
+    // the subtitle stays flush with the wordmark's right edge when the version
+    // string changes length.
+    const pad = ' '.repeat(Math.max(0, BANNER_WIDTH - subtitle.length));
+    console.log(`\n${BANNER_LINES.map((l) => pink(l)).join('\n')}`);
+    console.log(`${pad}${dim(subtitle)}`);
+  }
+  console.log(`\n  WordPress  ${link(SITE)}`);
+  console.log(`  Admin      ${link(`${SITE}/wp-admin`)}`);
+  console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
+  console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
+  // The version rides in the banner subtitle, so a welcome line is redundant
+  // there. With the banner suppressed it is the only place the version shows.
+  if (!SHOW_BANNER) console.log(`Welcome to AgentPress v${VERSION}.\n`);
+}
+
+/** A fresh menu screen: the header, then whatever the last action left to say. */
+function menuScreen() {
+  showMenuScreen();
+  drawHeader();
+  if (notes.length) console.log(`${notes.splice(0).join('\n')}\n`);
+}
+
+/**
+ * Leave the menu for the normal screen and head what a command is about to
+ * print with the path that led to it. One line per command, so what is left
+ * in the terminal afterwards is a log of what was DONE, not of every menu
+ * that was looked at on the way.
+ */
+function resultScreen(trail) {
+  showNormalScreen();
+  console.log(`\n${pink('?')} ${trail.join(` ${dim('›')} `)}\n`);
+}
+
+/** Hold a result until it has been read, then take the prompt away again so it never ends up in that log. */
+function holdResult() {
+  return new Promise((resolve) => {
+    process.stdout.write(`\n  ${dim('Press any key to go back to the menu…')}`);
+    emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once('keypress', () => {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\r\x1b[2K');
+      resolve();
+    });
+  });
+}
+
+// The environment for OUR OWN tool when this menu runs it. Two switches:
+// - AGENTPRESS_NO_BANNER: this menu already printed the wordmark when it
+//   opened. Without this every item repeated it, and five picks later the
+//   terminal was a column of wordmarks with the results lost between them
+//   (operator screenshot, 2026-11-11). Once per session, here, is the rule.
+// - AGENTPRESS_MENU: lets the tool name the menu item to pick next instead of
+//   printing a long command at someone who opened a menu to avoid typing one.
+// Never passed to an agent CLI or an editor: those are not ours to configure.
+const OWN_TOOL_ENV = { ...process.env, AGENTPRESS_NO_BANNER: '1', AGENTPRESS_MENU: '1' };
+
+function runInherit(cmd, args = [], { ownErrors = false, env = undefined } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -661,7 +773,7 @@ function runInherit(cmd, args = []) {
       // files (confirmed for Claude Code on this machine) — shell:true is
       // still used here as a pragmatic default since `cmd` is always one of
       // our own small hardcoded set, never user input.
-      child = spawn(cmd, args, { cwd: CWD, stdio: 'inherit', shell: true });
+      child = spawn(cmd, args, { cwd: CWD, stdio: 'inherit', shell: true, ...(env ? { env } : {}) });
     } catch (err) {
       console.log(`  ${dim(`(could not launch ${cmd}: ${err.message})`)}`);
       resolve();
@@ -672,8 +784,13 @@ function runInherit(cmd, args = []) {
     // or one the user killed is NOT a missing binary, and saying so told people
     // a program they had just used interactively might not be installed.
     // cmd.exe reports "not recognized" as 1 or 9009; a signal gives null.
+    // ownErrors: our own tool exits 1 for every refusal it has ALREADY
+    // explained ("Nothing was changed." after answering no to a push), so
+    // guessing at PATH under that would blame a missing program for a
+    // deliberate "no". Only 9009, cmd.exe's real "not recognized", is ours.
     child.on('close', (code, signal) => {
       if (signal) resolve();
+      else if (ownErrors && code !== 9009) resolve();
       else if (code === 1 || code === 9009) console.log(`  ${dim(`(could not run ${cmd} — is it installed and on PATH?)`)}`);
       else if (code) console.log(`  ${dim(`(${cmd} exited with code ${code})`)}`);
       resolve();
@@ -683,6 +800,109 @@ function runInherit(cmd, args = []) {
       resolve();
     });
   });
+}
+
+// --- the live site (push and pull) ---
+
+/** Run the main tool in this site folder: the checkout it came from if that is still there, else the published package. */
+function runCli(args) {
+  // Quoted for the shell: a checkout can live under a path with spaces, and
+  // `"` cannot appear in a Windows path, so the quoting cannot be broken out of.
+  if (CHECKOUT_CLI && existsSync(CHECKOUT_CLI)) return runInherit('node', [`"${CHECKOUT_CLI}"`, ...args], { ownErrors: true, env: OWN_TOOL_ENV });
+  return runInherit('npx', ['create-agentpress@latest', ...args], { ownErrors: true, env: OWN_TOOL_ENV });
+}
+
+/** The live site this one is connected to, as a bare host, or null. Re-read on every render: `push connect` writes it while the menu is open. */
+function liveHost() {
+  try {
+    const url = parseEnv(readFileSync(ENV_PATH, 'utf8')).PUSH_REMOTE_URL;
+    return url ? new URL(url).host : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One typed or pasted line. Ctrl+C gives '' instead of leaving a dead prompt: with no SIGINT listener readline only pauses, and the menu would sit there unable to read a key. */
+function askLine(question) {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let answered = false;
+    rl.on('SIGINT', () => rl.close());
+    rl.on('close', () => {
+      if (!answered) resolve('');
+    });
+    rl.question(question, (answer) => {
+      answered = true;
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/**
+ * Push and pull without typing the commands. Every item RUNS the main tool's
+ * own command, so the plan, the questions and the refusals are that tool's
+ * and cannot drift from it: nothing here decides whether a push is safe.
+ * An option's value IS the command line it runs.
+ */
+async function liveSiteMenu() {
+  for (;;) {
+    const host = liveHost();
+    const setup = [
+      { value: 'push plugin', label: 'Make the plugin zip', hint: 'step 1: upload it on the live site and activate it' },
+      { value: 'connect', label: 'Connect', hint: 'step 2: paste the line from Tools → AgentPress Push on the live site' },
+      { value: 'back', label: 'Back' },
+    ];
+    const main = [
+      { value: 'push status', label: 'Check status', hint: 'compare this site with live' },
+      { value: 'push --dry-run', label: 'Preview a design push', hint: 'shows the plan, sends nothing' },
+      { value: 'push', label: 'Push design to live', hint: 'asks first; stories on live are kept' },
+      { value: 'pull', label: 'Pull content from live', hint: 'asks first; this local site becomes a copy of live' },
+      { value: 'undo', label: 'Undo…', hint: 'the last push, pull or full copy' },
+      { value: 'push --full', label: 'First launch: full copy to live', hint: yellow('replaces everything on live') },
+      { value: 'setup', label: 'Set up or reconnect…', hint: 'plugin zip, new connection key' },
+      { value: 'back', label: 'Back' },
+    ];
+    // Back first, like every other chooser that can lose work: Enter on a
+    // reflex must not roll a site back. Each command asks again itself.
+    const undo = [
+      { value: 'back', label: 'Back' },
+      { value: 'push undo', label: 'The last design push', hint: 'live goes back to its saved design' },
+      { value: 'pull undo', label: 'The last pull', hint: 'this local database goes back' },
+      { value: 'push undo --full', label: 'The last full copy', hint: yellow('live goes back to its earlier database') },
+    ];
+    const title = host ? `Live site ${host}` : 'Live site: not connected yet';
+    // The path shown above a command's output: the menus that led to it.
+    const trail = [title];
+    let picked = host ? main : setup;
+    menuScreen();
+    let choice = await choose(title, picked);
+    // Back (or Esc) inside a nested chooser returns to THIS menu, not all the
+    // way out: one step back per keypress.
+    if (choice === 'setup' || choice === 'undo') {
+      const nested = choice === 'setup' ? setup : undo;
+      const heading = choice === 'setup' ? 'Set up the live site' : 'Undo what?';
+      trail.push(picked.find((o) => o.value === choice).label);
+      picked = nested;
+      menuScreen();
+      choice = await choose(heading, nested);
+      if (choice === null || choice === 'back') continue;
+    }
+    if (choice === null || choice === 'back') return;
+    resultScreen([...trail, picked.find((o) => o.value === choice).label]);
+    if (choice === 'connect') {
+      const line = (await askLine(`${pink('?')} Paste the connection line: `)).replace(/\s+/g, '');
+      // Validated before it goes anywhere near a shell: this exact shape has
+      // no character cmd.exe treats specially, and anything else is refused
+      // here rather than quoted and hoped for.
+      if (!line) console.log(`  ${dim('(nothing pasted, nothing changed)')}`);
+      else if (!/^agentpress-push:[A-Za-z0-9_-]+$/.test(line)) console.log(`  ${red('✖')} That is not a connection line. It starts with "agentpress-push:".`);
+      else await runCli(['push', 'connect', line]);
+    } else {
+      await runCli(choice.split(' '));
+    }
+    await holdResult();
+  }
 }
 
 /**
@@ -777,28 +997,10 @@ async function checkUpdate() {
   }
 }
 
-if (SHOW_BANNER) {
-  const subtitle = `v${VERSION} · AI-agent-ready WordPress`;
-  // Right-aligned by measuring the art, never a hardcoded run of spaces, so
-  // the subtitle stays flush with the wordmark's right edge when the version
-  // string changes length.
-  const pad = ' '.repeat(Math.max(0, BANNER_WIDTH - subtitle.length));
-  console.log(`\n${BANNER_LINES.map((l) => pink(l)).join('\n')}`);
-  console.log(`${pad}${dim(subtitle)}`);
-}
-
-console.log(`\n  WordPress  ${link(SITE)}`);
-console.log(`  Admin      ${link(`${SITE}/wp-admin`)}`);
-console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
-console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
-
+// First screen straight away, so the header is up while the version check
+// below waits on the network.
+menuScreen();
 const latestVersion = await checkUpdate();
-// The version rides in the banner subtitle now, so the standalone welcome
-// line is redundant — except when the banner is suppressed, where dropping it
-// would print the version nowhere at all. Kept for exactly that case. The
-// Password row's own trailing newline supplies the blank line before the menu
-// prompt either way.
-if (!SHOW_BANNER) console.log(`Welcome to AgentPress v${VERSION}.\n`);
 
 // Static per session: editors do not appear mid-menu, and existsSync per
 // render would be pure waste.
@@ -826,6 +1028,7 @@ for (;;) {
   });
   const latestSnapshot = newestSnapshot();
   const debug = debugLogState();
+  const live = liveHost();
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
@@ -833,6 +1036,9 @@ for (;;) {
     ...(wiringBroken ? [{ value: 'rewire', label: 'Point MCP here', hint: yellow('⚠ fixes the wiring above') }] : []),
     { value: 'snapshot', label: 'Snapshot the database', hint: 'rollback point before agent sessions' },
     ...(latestSnapshot ? [{ value: 'restore', label: 'Restore the latest snapshot', hint: latestSnapshot }] : []),
+    // Always listed, unlike the remedies above: it is a feature, not a fix,
+    // and an unconnected site is exactly where someone goes looking for it.
+    { value: 'live', label: 'Live site', hint: live ? `push and pull · ${live}` : 'connect one to push and pull' },
     {
       value: 'errors',
       label: 'Show recent errors',
@@ -843,36 +1049,43 @@ for (;;) {
     ...(latestVersion ? [{ value: 'update', label: 'Update this site', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
   ];
+  menuScreen();
   const choice = await choose('What would you like to do?', options);
+  const label = options.find((o) => o.value === choice)?.label;
 
-  // Every looping action ends with a dim one-line receipt and a blank line.
-  // Both exist for the same screenshot: silent actions left nothing but the
-  // collapsed prompt behind, so repeated picks fused into a stuttering wall —
-  // and the silence itself invited re-picking, since nothing said the click
-  // had landed. The receipt never includes the admin URL: the one-click link
-  // carries a single-use login token, and tokens are never echoed.
+  // Two kinds of action, two ways of answering:
+  // - A QUICK one (open the browser, take a snapshot) leaves a dim one-line
+  //   receipt via note(), drawn under the header of the next menu screen.
+  //   Silence invited re-picking, since nothing said the click had landed.
+  //   The receipt never includes the admin URL: the one-click link carries a
+  //   single-use login token, and tokens are never echoed.
+  // - One that PRINTS (a command, a log, an error) gets the normal screen and
+  //   waits for a key, so the next repaint cannot wipe it unread.
   if (choice === null || choice === 'exit') {
+    showNormalScreen();
     console.log(`\n${pink(`cd ${CWD} && npm run agentpress`)} ${dim('to come back.')}\n`);
     process.exit(0);
   } else if (choice === 'admin') {
     openBrowser(await adminUrl());
-    console.log(`  ${dim('→ opened WP Admin in your browser')}\n`);
+    note(`  ${dim('→ opened WP Admin in your browser')}`);
   } else if (choice === 'site') {
     openBrowser(SITE);
-    console.log(`  ${dim(`→ opened ${SITE} in your browser`)}\n`);
+    note(`  ${dim(`→ opened ${SITE} in your browser`)}`);
   } else if (choice === 'editor') {
     const ok = await trySpawnDetached(codeEditor.exe, [CWD], { shell: false });
-    console.log(ok ? `  ${dim(`→ opened ${codeEditor.label} in this folder`)}\n` : `  ${dim(`(could not launch ${codeEditor.label} — is it still installed?)`)}\n`);
+    note(ok ? `  ${dim(`→ opened ${codeEditor.label} in this folder`)}` : `  ${dim(`(could not launch ${codeEditor.label} — is it still installed?)`)}`);
   } else if (choice === 'shell') {
     const opened = await openTerminalHere();
-    console.log(opened ? `  ${dim(`→ opened ${opened} in this folder`)}\n` : '');
+    if (opened) note(`  ${dim(`→ opened ${opened} in this folder`)}`);
+  } else if (choice === 'live') {
+    await liveSiteMenu();
   } else if (choice === 'rewire') {
-    console.log('');
-    await runInherit('npx', ['create-agentpress@latest', 'rewire']);
+    resultScreen([label]);
+    await runInherit('npx', ['create-agentpress@latest', 'rewire'], { env: OWN_TOOL_ENV });
     // No receipt of our own: rewire prints its results, and the menu's own ⚠
     // hints re-read the wiring on the next render — them going quiet IS the
     // confirmation.
-    console.log('');
+    await holdResult();
   } else if (choice === 'snapshot') {
     try {
       mkdirSync(SNAPSHOT_DIR, { recursive: true });
@@ -897,9 +1110,10 @@ for (;;) {
     const r = await runWp(['db', 'export', `"${file}"`, '--add-drop-table']);
     if (r.code === 0 && existsSync(file)) {
       const mb = (statSync(file).size / (1024 * 1024)).toFixed(1);
-      console.log(`  ${dim(`→ database saved to snapshots\\${name} (${mb} MB)`)}\n`);
+      note(`  ${dim(`→ database saved to snapshots\\${name} (${mb} MB)`)}`);
     } else {
       const reason = (r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0];
+      resultScreen([label]);
       console.log(`  ${red('✖')} snapshot failed: ${reason}`);
       // Only reachable when the resolver above found nothing to prepend —
       // the machine has no Laragon-shaped MySQL tree and no tools on PATH.
@@ -907,18 +1121,19 @@ for (;;) {
         console.log(`  ${dim("mysqldump isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
         console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
       }
-      console.log('');
+      await holdResult();
     }
   } else if (choice === 'restore') {
     const name = newestSnapshot();
     if (!name) {
-      console.log(`  ${dim('(no snapshot found — take one first)')}\n`);
+      note(`  ${dim('(no snapshot found — take one first)')}`);
     } else {
       // Cancel is first ON PURPOSE: Enter on a reflex must not overwrite the
       // database. "overwrites", not "replaces ALL": the dump drops and
       // recreates the tables IT contains, so posts/pages/settings/users roll
       // back — but a table some plugin created after the snapshot survives.
       // The hint must not promise a cleaner wipe than wp db import performs.
+      menuScreen();
       const sure = await choose(`Restore ${name} over the current database?`, [
         { value: false, label: 'Cancel' },
         { value: true, label: 'Restore', hint: yellow('overwrites the current WordPress content') },
@@ -927,21 +1142,21 @@ for (;;) {
         // Forward slashes for the same reason as the export above: mysql's
         // SOURCE parser eats backslash pairs as client commands.
         const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, name).replace(/\\/g, '/')}"`]);
-        if (r.code === 0) console.log(`  ${dim(`→ database restored from snapshots\\${name}`)}\n`);
+        if (r.code === 0) note(`  ${dim(`→ database restored from snapshots\\${name}`)}`);
         else {
           const reason = (r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0];
+          resultScreen([label]);
           console.log(`  ${red('✖')} restore failed: ${reason}`);
           if (/not recognized/i.test(reason)) {
             console.log(`  ${dim("mysql isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
             console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
           }
-          console.log('');
+          await holdResult();
         }
-      } else {
-        console.log('');
       }
     }
   } else if (choice === 'errors') {
+    resultScreen([label]);
     if (!existsSync(debug.path)) {
       // Two OPPOSITE states used to print the same "off" message: WordPress
       // only creates debug.log on the first logged notice, so enabled-but-
@@ -949,23 +1164,22 @@ for (;;) {
       // debug and the menu told them it was off.
       console.log(
         debug.enabled
-          ? `\n  ${dim('Debug logging is ON — nothing has been logged yet, which is a healthy sign.')}\n` +
-              `  ${dim('The log appears at wp-content/debug.log with the first error or notice.')}\n`
-          : `\n  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
+          ? `  ${dim('Debug logging is ON — nothing has been logged yet, which is a healthy sign.')}\n` +
+              `  ${dim('The log appears at wp-content/debug.log with the first error or notice.')}`
+          : `  ${dim('No wp-content/debug.log — debug logging is off, which is the healthy default.')}\n` +
               `  ${dim('Turn it on with:')} ${pink('npm run wp -- config set WP_DEBUG true --raw')}\n` +
-              `  ${dim('and:')}             ${pink('npm run wp -- config set WP_DEBUG_LOG true --raw')}\n`,
+              `  ${dim('and:')}             ${pink('npm run wp -- config set WP_DEBUG_LOG true --raw')}`,
       );
     } else {
       const lines = tailFile(debug.path);
       if (lines.length === 0) {
-        console.log(`\n  ${dim('wp-content/debug.log exists but is empty — nothing has gone wrong yet.')}\n`);
+        console.log(`  ${dim('wp-content/debug.log exists but is empty — nothing has gone wrong yet.')}`);
       } else {
-        console.log(`\n  ${dim(`last ${lines.length} line${lines.length === 1 ? '' : 's'} of wp-content/debug.log:`)}\n`);
+        console.log(`  ${dim(`last ${lines.length} line${lines.length === 1 ? '' : 's'} of wp-content/debug.log:`)}\n`);
         for (const l of lines) console.log(`  ${l}`);
-        console.log('');
       }
     }
-    await pressAnyKey();
+    await holdResult();
   } else if (choice === 'update') {
     // Pinned to the version the LIVE npm check returned this session — not
     // @latest, which npx can serve from a stale cache right after a release,
@@ -977,16 +1191,20 @@ for (;;) {
     // operator's ask: the menu already detected the update, so offering a
     // command to retype was friction, not safety (update itself still asks
     // before overwriting files).
-    console.log('');
-    await runInherit('npx', [`create-agentpress@${latestVersion}`, 'update']);
+    resultScreen([label]);
+    await runInherit('npx', [`create-agentpress@${latestVersion}`, 'update'], { env: OWN_TOOL_ENV });
     // This running menu IS one of the files update refreshes, so the new
     // version only shows after a relaunch. The item stays in the list — a
     // second pick is harmless, and dropping it here would fake certainty this
     // process cannot have about whether the run succeeded.
-    console.log(`\n  ${dim('→ update run — restart the menu (npm run agentpress) to load the refreshed files')}\n`);
+    console.log(`\n  ${dim('→ update run — restart the menu (npm run agentpress) to load the refreshed files')}`);
+    await holdResult();
   } else if (choice.startsWith('agent:')) {
     const key = choice.slice('agent:'.length);
     const wired = wiredHostFor(key);
+    // The agent draws inline and keeps its own scrollback, so it gets the
+    // normal screen, not the menu's.
+    showNormalScreen();
     // Never launch an agent whose WordPress tools address a DIFFERENT site
     // without stopping first — it would read and edit the wrong WordPress, and
     // the agent's own startup output repaints the terminal immediately, so a
@@ -1003,7 +1221,7 @@ for (;;) {
               ? 'Destroying a site removes the wiring machine-wide, which is the usual cause.'
               : 'MCP wiring is machine-wide, so the most recently scaffolded site owns it.',
           )}\n` +
-          `  ${dim('Point it at this site with:')} ${pink('npx create-agentpress@latest rewire')}\n` +
+          `  ${dim('Point it at this site with:')} ${pink('Point MCP here')} ${dim('in this menu')}\n` +
           `  ${dim('Launching anyway — the agent will have no WordPress tools for THIS site.')}\n`,
       );
       await pressAnyKey();
@@ -1015,8 +1233,5 @@ for (;;) {
       console.log(`\n  ${dim('Tip: run')} ${pink('/verify')} ${dim('inside the agent to test MCP, Playwright and Oxygen end to end.')}\n`);
     }
     await runInherit(await agentLaunchCommand(key));
-    // The agent owned the terminal until just now — one blank line keeps its
-    // last output from fusing with the next menu round.
-    console.log('');
   }
 }
