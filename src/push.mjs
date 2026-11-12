@@ -42,6 +42,24 @@ const JSON_MARK = 'AGENTPRESS_PUSH_JSON ';
 export const LOCAL_AGENT_PLUGINS = ['agent-connector-for-wp', 'universal-abilities-plugin'];
 
 /**
+ * What those plugins keep in the DATABASE, which is local-only for the same
+ * reason and was the half nobody had listed. First full copy onto the real
+ * server after a pull (2026-11-12): the connector's three OAuth tables and
+ * its settings went up with everything else (the tables were empty that day;
+ * on a site whose agent signs in with OAuth they are its credentials), and
+ * `push undo --full` left the tables on live, because undo only swaps back
+ * what the kept set names. Neither end reads these tables into a copy, the
+ * receiver refuses them if they arrive anyway, and each site keeps its own
+ * settings through the switch.
+ *
+ * Tables by WHOLE name: `acfw_` is also the prefix of a coupons plugin for
+ * WooCommerce, and a shop's own tables must travel. Settings by prefix: the
+ * long one is the connector's alone.
+ */
+export const LOCAL_AGENT_TABLES = ['acfw_oauth_clients', 'acfw_oauth_codes', 'acfw_oauth_tokens', 'acfw_mcp_events'];
+export const LOCAL_AGENT_OPTIONS = ['agent_connector_for_wp_'];
+
+/**
  * A file list with the local-only agent plugins taken out. Applied to the
  * SOURCE list before the compare, so those files are not sent, not counted in
  * the byte total and not shown in a dry run. Caught before any real server
@@ -52,6 +70,25 @@ export function withoutLocalOnlyPlugins(manifest) {
   const kept = new Map();
   for (const [path, file] of manifest) {
     if (!LOCAL_AGENT_PLUGINS.some((dir) => path.startsWith(`plugins/${dir}/`))) kept.set(path, file);
+  }
+  return kept;
+}
+
+/**
+ * A file list with the themes this site does not run on taken out. `inUse` is
+ * the local site's own answer (`info.themes_in_use`). First real site,
+ * 2026-11-12: the three default themes had been removed from live on purpose
+ * (Oxygen runs with themes off), they were still in the local folder, and
+ * every design push offered all 393 files back. "The theme the design needs"
+ * is the one WordPress is running, not every folder beside it. Files directly
+ * under themes/ stay. A full copy is not filtered: that one is a copy.
+ */
+export function withoutUnusedThemes(manifest, inUse) {
+  if (!Array.isArray(inUse)) return manifest;
+  const kept = new Map();
+  for (const [path, file] of manifest) {
+    const parts = path.split('/');
+    if (parts[0] !== 'themes' || parts.length < 3 || inUse.includes(parts[1])) kept.set(path, file);
   }
   return kept;
 }
@@ -489,6 +526,16 @@ export function remoteEndpoint({ url, key }, { fetchImpl = globalThis.fetch } = 
       try {
         data = JSON.parse(text);
       } catch {
+        // A password lock in front of the whole site (the hosting panel's
+        // "password protection") answers before WordPress runs. Seen on the
+        // real server, 2026-11-12, where the old message asked whether the
+        // plugin was installed: it was, and nothing could reach it.
+        if (res.status === 401 && /^\s*basic\b/i.test(res.headers?.get?.('www-authenticate') ?? '')) {
+          throw new PushError(
+            `${new URL(url).host} is behind a password lock: the server asks for a username and password before WordPress runs, and this tool cannot pass it. ` +
+              'Switch the lock off in the hosting panel while you push or pull, then switch it on again.',
+          );
+        }
         const plain = shown(text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
         throw new PushError(`${new URL(url).host} answered ${res.status} with something that is not AgentPress Push${plain ? `: ${plain}` : ''}. Is the plugin installed and active there?`);
       }
@@ -646,7 +693,7 @@ async function carry(from, fromSession, to, toSession, name, work, tick) {
 
 async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   let tick = ticker(`reading the database on ${from.label}`);
-  const exported = await runSteps(from, 'db_export', { session: sessions.from }, (s) => tick.update(`table ${s.tables_done} of ${s.tables}`));
+  const exported = await runSteps(from, 'db_export', { session: sessions.from, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.update(`table ${s.tables_done} of ${s.tables}`));
   tick.done(`read ${exported.rows} rows from ${exported.tables} tables (${formatBytes(exported.bytes)})`);
 
   tick = ticker(`sending the database to ${to.label}`);
@@ -654,14 +701,20 @@ async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   tick.done();
 
   tick = ticker(`loading it beside the current one on ${to.label}`);
-  const imported = await runSteps(to, 'db_import', { session: sessions.to }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
+  const imported = await runSteps(to, 'db_import', { session: sessions.to, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
   tick.done(`loaded ${imported.rows} rows; the site is still running on its old database`);
-  if (imported.rows !== exported.rows || imported.tables !== exported.tables) {
+  // The sender was asked to leave the agent connector's tables out. If some
+  // arrived anyway the receiver did not load them, and that is said, not
+  // swallowed: it means the other end is not running the code this end is.
+  const refusedTables = imported.skipped_tables ?? 0;
+  const refusedRows = imported.skipped_rows ?? 0;
+  if (refusedTables) console.log(`  ${yellow(WARN)} ${from.label} sent ${refusedTables} table${refusedTables === 1 ? '' : 's'} that belong to its own agent connector. ${refusedTables === 1 ? 'It was' : 'They were'} not loaded on ${to.label}.`);
+  if (imported.rows + refusedRows !== exported.rows || imported.tables + refusedTables !== exported.tables) {
     throw new PushError(`${to.label} loaded ${imported.rows} rows in ${imported.tables} tables but ${from.label} sent ${exported.rows} in ${exported.tables}. Nothing was made current.`);
   }
 
   tick = ticker(`switching ${to.label} to the new database`);
-  const swapped = await runOnce(to, 'db_swap', { ...swapArgs, session: sessions.to });
+  const swapped = await runOnce(to, 'db_swap', { ...swapArgs, own_option_prefixes: LOCAL_AGENT_OPTIONS, session: sessions.to });
   swapped.kept_admins = (swapped.kept_admins ?? []).map(shown);
   swapped.scrambled = (swapped.scrambled ?? []).map(shown);
   tick.done(`switched; kept this site's own settings and logins (${swapped.kept_admins.join(', ') || 'no administrators'})`);
@@ -693,7 +746,7 @@ async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly 
   const want = join(work, 'want.ndjson');
   await writeFile(want, plan.send.map((p) => JSON.stringify(p)).join('\n') + '\n', 'utf8');
   await from.putFile(sessions.from, 'want.ndjson', want);
-  tick = ticker(`packing ${plan.send.length} files on ${from.label}`);
+  tick = ticker(`packing ${plan.send.length} file${plan.send.length === 1 ? '' : 's'} on ${from.label}`);
   await runSteps(from, 'files_pack', { session: sessions.from }, (s) => tick.update(`${s.files_done} of ${s.files}`));
   tick.done();
   tick = ticker(`sending files to ${to.label}`);
@@ -919,7 +972,12 @@ async function pushDesign(site, { yes, dryRun }) {
     // Code the design depends on (a must-use plugin registering image sizes,
     // say) is local's and is mirrored. Uploads are live's: only files live
     // does not have yet are added, never one it already holds.
-    const code = await copyFilesPlan(local, remote, sessions, work, ['mu-plugins', 'themes'], 'mirror');
+    // Of the themes, only the one this site runs on (see withoutUnusedThemes).
+    const code = await copyFilesPlan(local, remote, sessions, work, ['mu-plugins', 'themes'], 'mirror', (list) => withoutUnusedThemes(list, localInfo.themes_in_use));
+    const unusedThemes = [...new Set(code.leftOut.map((path) => path.split('/')[1]))];
+    const themeLine = unusedThemes.length
+      ? `${code.leftOut.length} file${code.leftOut.length === 1 ? '' : 's'} in ${unusedThemes.length === 1 ? 'a theme' : 'themes'} this site does not run on (${unusedThemes.slice(0, 3).map(shown).join(', ')}${unusedThemes.length > 3 ? ', …' : ''})`
+      : '';
     // ...and not one live HAD and no longer has: that was deleted there.
     const media = holdBackDeleted(await copyFilesPlan(local, remote, sessions, work, ['uploads'], 'missing'), await readSeen(site.cwd, host));
     const heldLine = media.held.length
@@ -931,6 +989,7 @@ async function pushDesign(site, { yes, dryRun }) {
       if ((plan.changes ?? []).some((c) => c.action === 'adopt') && !dryRun) await runOnce(remote, 'design_apply', { session: sessions.to });
       console.log(`${green(OK)} ${host} already has this design. Nothing to push.`);
       if (heldLine) console.log(`  ${dim(`${INFO} ${heldLine}`)}`);
+      if (themeLine) console.log(`  ${dim(`${INFO} Not sent: ${themeLine}`)}`);
       if (!dryRun) await noteSeen(site, host, media.target.keys());
       return;
     }
@@ -939,6 +998,7 @@ async function pushDesign(site, { yes, dryRun }) {
     if (code.send.length) console.log(`    ${'send'.padEnd(7)} ${'code'.padEnd(9)} ${code.send.length} file${code.send.length === 1 ? '' : 's'} (${code.send.slice(0, 3).join(', ')}${code.send.length > 3 ? ', …' : ''})`);
     if (media.send.length) console.log(`    ${'send'.padEnd(7)} ${'media'.padEnd(9)} ${media.send.length} file${media.send.length === 1 ? '' : 's'} live does not have (${formatBytes(media.bytes)})`);
     if (heldLine) console.log(`    ${'leave'.padEnd(7)} ${'media'.padEnd(9)} ${heldLine}`);
+    if (themeLine) console.log(`    ${'leave'.padEnd(7)} ${'themes'.padEnd(9)} ${themeLine}`);
     console.log(`  ${dim("Stories, users, comments and the editor's own uploads are not touched.")}`);
     if (dryRun) {
       console.log(`\n${dim(INFO)} Dry run: nothing was changed.`);
@@ -959,7 +1019,7 @@ async function pushDesign(site, { yes, dryRun }) {
 }
 
 /** The compare half of copyFiles, so a plan can be shown before anything is sent. */
-async function copyFilesPlan(from, to, sessions, work, roots, mode) {
+async function copyFilesPlan(from, to, sessions, work, roots, mode, pick = (list) => list) {
   const tick = ticker(`comparing files (${roots.join(', ')})`);
   // 'missing' only asks "does the other side have this path", so neither end
   // reads a byte of the files: hashing every upload on both ends was most of
@@ -971,9 +1031,13 @@ async function copyFilesPlan(from, to, sessions, work, roots, mode) {
   await from.getFile(sessions.from, 'manifest.ndjson', a);
   await to.getFile(sessions.to, 'manifest.ndjson', b);
   tick.done();
-  const source = parseManifest(await readFile(a, 'utf8'));
+  const all = parseManifest(await readFile(a, 'utf8'));
+  const source = pick(all);
   const target = parseManifest(await readFile(b, 'utf8'));
-  return { ...diffManifests(source, target, mode), source, target };
+  // What `pick` took out that would otherwise have travelled: shown in the
+  // plan, because a file quietly not sent is a question later.
+  const leftOut = source === all ? [] : diffManifests(all, target, mode).send.filter((path) => !source.has(path));
+  return { ...diffManifests(source, target, mode), source, target, leftOut };
 }
 
 /** A pull leaves out upload files that could run as code. Never silently: a missing file is a question later. */

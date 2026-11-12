@@ -97,6 +97,17 @@ so they get their own section.
   push skips their files and removes them from the list of plugins to switch on. Live-verified
   2026-11-11: after a full copy to a site without them, neither folder existed there and the
   MCP route answered 404.
+- **Nor does what they keep in the database (plugin 0.1.8).** The connector has tables of its
+  own (`acfw_oauth_clients`, `acfw_oauth_codes`, `acfw_oauth_tokens`, `acfw_mcp_events`) and
+  settings named `agent_connector_for_wp_…`. Until 0.1.8 a full copy took them up with
+  everything else: found on the real server (2026-11-12), where three empty tables and the
+  settings (the dev machine's hostname among them) had arrived, and the undo left the tables
+  behind. On a site whose agent signs in with OAuth those tables hold its tokens. Now neither
+  end reads those tables into a copy, the receiving end refuses them if they are sent anyway,
+  and each site keeps its own settings through a push and through a pull. **If you ran a full
+  copy with an earlier plugin, those tables and settings are still on the live site**; drop
+  the four tables by hand if they are there. Only those four names are held back: another
+  plugin's tables that begin `acfw_` travel as before.
 - **Logins do not travel.** Each end keeps its own administrators' passwords. Sign-in sessions
   and application passwords are deleted from a copied database for every user that is not one
   of the receiving site's own administrators.
@@ -149,16 +160,41 @@ so they get their own section.
 - **Lightly proven:** every command has run at least once against one real server (cPanel,
   LiteSpeed, PHP 8.4): connect, status, the preview, the first full copy and its undo, a
   design push and its undo, and a pull. No other host, web server or PHP version has seen it.
-  That was plugin 0.1.4. **Plugin 0.1.5 (the review fixes above, plus: a retried step is
-  answered from its kept reply instead of run again, and the password reset is one statement)
-  has run only between two local sites.**
+  That was plugin 0.1.4. The review fixes above (0.1.5, plus: a retried step is answered
+  from its kept reply instead of run again, and the password reset is one statement) have
+  since run there for `push status`, one pull (0.1.5) and one design push (0.1.6), with
+  the host's own security measures switched on and a table prefix with capital letters on
+  the live side. On 2026-11-12 the rest ran there with 0.1.7: a pull and its undo, a design
+  push that changed one sentence and its undo, a pull with a `.php` file planted in the live
+  uploads (left out, and named), and a full copy onto the capital-letter prefix followed by
+  its undo, after which the site read the same as before by its public REST API. The pull,
+  the full copy and its undo ran there once more with 0.1.8, to see the agent connector's
+  tables and settings stay where they were. The retry lock has never been seen to fire.
+- **A password lock in front of the site stops the tool.** When the hosting panel's
+  password protection is on, the server answers 401 before WordPress runs, so the
+  connection key is never looked at. The tool says so and sends nothing further. It does
+  not store or send a username and password for that lock.
+- **A design push sends less than it used to (plugin 0.1.6 and 0.1.7).** Only the theme
+  the local site runs on travels, not every theme folder: themes removed from the live
+  site on purpose were being put back. And the zip WordPress keeps in `uploads` while a
+  plugin or theme upload is unfinished is no longer listed as media: one was sent to the
+  live site, where it stays until it is deleted by hand. The first rule has run against the
+  real server (themes absent there, none sent); the second only on the local site that held
+  the real leftover. A design push also leaves alone an upload file the live site once had
+  and no longer has, because that was deleted there: run against the real server with an
+  image uploaded, pulled, and deleted on live.
 - **Known limits, not fixed.** The database export pages through each table by row offset,
   which slows down on very large tables and can skip or repeat a row if the live site is
   written to during a pull. Everything travels as one pack with no free-disk check first.
   The kept database (`apold_` tables) stays until the next full copy; there is no command to
   drop it. A job that fails halfway is started again from the top, not resumed. A second
   full copy to a site whose plugins use named foreign keys (WooCommerce) is untested and may
-  collide on those names.
+  collide on those names. An undo of a full copy puts back the tables the site had; a table
+  only the copy had (a plugin installed on the dev site alone) stays on the live site,
+  unused. A full copy brings the dev site's own `admin` account to the live site as an
+  administrator: its password is unusable there, but the account exists until it is deleted.
+  A full copy is a copy: it sends every theme folder and every upload file, including ones
+  a design push would have left alone.
 
 ## Where secrets live
 - `<site>/.env` — DB and WordPress admin passwords this tool generated. It sits **outside** the
@@ -249,10 +285,18 @@ so they get their own section.
   projects with a root `.env` may be serving it over HTTP.
 - **The `.env` exposure check is a warning, not a hard stop.** If your Apache ignores the
   protective `.htaccess`, the scaffold prints a prominent warning and continues rather than
-  failing. **And on a machine that already denies `.env` by name at server level, the check
-  cannot fail at all**: it asks for `/<site>/.env` and a 403 looks the same whether the
-  project's own `.htaccess` is honoured or not. It never asks for `.mcp.json`, which holds
-  an administrator-equivalent password. Known, not yet fixed.
+  failing. Until 1.11.0 the check asked for `/<site>/.env`, and on a machine that already
+  denies `.env` by name at server level it could not fail: a 403 looked the same whether
+  the project's own `.htaccess` was honoured or not, while `.mcp.json` (an
+  administrator-equivalent password) sat readable beside it. It now writes a randomly named
+  text file into the project folder, asks for that, and removes it. Verified on a local
+  site with the protective `.htaccess` taken away: `.env` still answered 403 and the new
+  check reported the folder as served.
+- **Two plain-text files under `public/` are refused by address** (since 1.11.0): the
+  backup the Oxygen patch keeps (`…/html-to-page.php.agentpress-bak`, vendor source) and
+  `wp-content/debug.log`, which WordPress writes once debug logging is on. One rewrite
+  rule in the AgentPress block of `public/.htaccess`; existing sites get it with
+  `update`. A server that ignores `.htaccess` ignores this too.
 - **`destroy` checks that `.env` describes the folder it is run in** (since 1.11.0).
   Everything it removes outside the folder (the database and its user, the application
   password, the hosts line) is named by `.env`, and a copied site folder carries the
@@ -261,9 +305,6 @@ so they get their own section.
   server is this machine and `SITE_HOST` is this folder's name (or the hostname the registry
   holds for this exact folder). The preamble names the database and address it will remove.
 - **Found by the same review (2026-11-11) and not fixed yet:**
-  - `public/wp-content/plugins/oxygen/…/html-to-page.php.agentpress-bak` (the backup the
-    Oxygen patch keeps) is served as plain text, and so is `wp-content/debug.log` once you
-    switch WP_DEBUG_LOG on from the site menu.
   - The site menu starts `npx`, `powershell` and `wp` by bare name from the site
     folder, so a file of that name planted there would run instead. Anything able to write
     there can already edit the menu script, so this buys an attacker little.

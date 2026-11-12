@@ -138,8 +138,8 @@ no SSH (most cPanel accounts) is fine.
 One rule decides what travels:
 
 - **Design belongs to the local site and only goes up.** Oxygen templates, header, footer,
-  blocks, Oxygen-built pages, selectors, variables, global styles, plus the theme and
-  `mu-plugins` code the design needs.
+  blocks, Oxygen-built pages, selectors, variables, global styles, plus the `mu-plugins`
+  code the design needs and the theme the site runs on (none, with Oxygen's themes off).
 - **Content belongs to the live site and only comes down.** Stories, comments, users, media
   the editor uploaded.
 
@@ -147,8 +147,8 @@ So after launch you keep designing locally and `push`, while the editor keeps wr
 live, and neither wipes the other.
 
 **Lightly proven.** One real server so far (cPanel with LiteSpeed, PHP 8.4). Every command
-has run there at least once, and that one server found four bugs no local run had shown.
-The newest safety checks (plugin 0.1.5) have run in full only between local sites. Treat
+has run there, undos included, and that one server found eight bugs no local run had
+shown. No other host, web server or PHP version has seen it. Treat
 your first run as a test: use a fresh WordPress install on the server, and keep the host's
 own backup switched on.
 
@@ -187,7 +187,9 @@ in a site scaffolded before 1.11.0 to get that entry.
 
 - **Passwords do not travel up.** `push --full` copies your accounts, but everyone it
   brings, apart from the live site's own administrators, gets a random password there.
-  The push ends by naming who needs one set.
+  The push ends by naming who needs one set. That includes your local `admin`, which
+  arrives on the live site as an administrator nobody can sign in as. Delete it there if
+  you do not want it.
 - **Each end keeps what is its own** through a full copy or a pull: its address, its
   administrators' logins, its search-engine visibility setting, its admin email and its
   Oxygen license. Sign-in sessions and application passwords never travel.
@@ -200,6 +202,9 @@ in a site scaffolded before 1.11.0 to get that entry.
   `leave media` line instead. The tool remembers what it has seen there in
   `.agentpress-push-seen.json` in the project folder (gitignored). Delete that file to
   send them anyway.
+- **A full copy is a copy.** `push --full` sends every theme folder and every upload file,
+  including ones a design push would leave alone. Use it for the first launch, and `push`
+  after that.
 
 **Built to be hard to hurt yourself with:**
 
@@ -214,7 +219,8 @@ in a site scaffolded before 1.11.0 to get that entry.
 - Files are never deleted on the receiving end.
 - **The agent plugins stay local.** `agent-connector-for-wp` and
   `universal-abilities-plugin` give AI agents shell and PHP access. A push never sends
-  them and never switches them on at the other end.
+  them and never switches them on at the other end. Their sign-in tokens and settings
+  stay on the site they belong to as well, in a push and in a pull.
 - **A pull checks what the live site hands it.** It takes content and uploads only. Files
   that would run as code are left out and named, and your local theme and upload folder
   settings are kept. [SECURITY.md](SECURITY.md) lists what this does not cover.
@@ -226,11 +232,17 @@ in a site scaffolded before 1.11.0 to get that entry.
 - An image added to the design *after* launch is sent as a file, but the design points at it
   by media-library number, which can differ on live. Re-pick the image on live, or add it
   on live first and pull.
-- `undo --full` and `pull undo` roll back the database, not files.
+- `undo --full` and `pull undo` roll back the database, not files. A table only the copy
+  had (from a plugin installed on one site alone) is left where it landed, unused.
+- The database a full copy keeps for its undo stays on the live site until the next full
+  copy. There is no command to remove it; drop the `apold_` tables by hand when you are
+  sure you will not go back.
 - Both sites need the same Oxygen version. The command checks and stops if they differ.
-- Different table prefixes on the two sites: tested between local sites only. Some hosting
-  panels rename the prefix as a "security measure". If the undo of a full copy seems to
-  vanish after that, the kept tables still carry the old prefix.
+- A site behind a hosting password lock: switch the lock off while you push or pull.
+- Different table prefixes on the two sites work: a pull, a full copy and its undo have
+  run against a live site whose prefix differs from the local one and has capital letters.
+  Some hosting panels rename the prefix as a "security measure". If the undo of a full
+  copy seems to vanish after that, the kept tables still carry the old prefix.
 
 ## Premium plugins (Oxygen / Breakdance) — bring your own
 

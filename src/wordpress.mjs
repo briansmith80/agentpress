@@ -301,6 +301,14 @@ export const HTACCESS_GUARD_BLOCK = `${HTACCESS_GUARD_BEGIN}
 # "?rest_route=%2Fmcp%2Fx" slips past this block and is caught only there.
 <IfModule mod_rewrite.c>
 RewriteEngine On
+# Two files Apache would hand out as plain text: the backup AgentPress keeps
+# beside the Oxygen file it patches (vendor source), and the PHP error log
+# WordPress writes into wp-content once debug logging is on (paths, queries,
+# sometimes credentials). Both are only ever read from disk. Done with a
+# rewrite rule, not "Require", so it needs nothing the rules below do not
+# already need: a server that honours those honours this.
+RewriteRule (\\.agentpress-bak|(^|/)debug\\.log)$ - [F,L,NC]
+
 RewriteCond %{REQUEST_URI} ^/(index\\.php/)?wp-json/(mcp|wp-abilities)(/|$) [NC,OR]
 RewriteCond %{QUERY_STRING} (^|&)rest_route=/?(mcp|wp-abilities)(/|&|$) [NC]
 RewriteCond %{REMOTE_ADDR} !^(127\\.[0-9.]+|::1|::ffff:127\\.[0-9.]+)$

@@ -197,6 +197,26 @@ Live on a local site: 401 without the header, 403 with it, `wp/v2/posts` untouch
 `.htaccess` block was left alone (v1.7.0 is why). A tunnel that adds no such header is
 not caught; SECURITY.md says so.
 
+**A check that asks for a file by a deniable NAME cannot fail.** The scaffold's
+"is the project root served?" check fetched `/<name>/.env`. This machine denies `.env`
+by name at server level (see the scaffold recipe), so it answered 403 with the project's
+own .htaccess honoured or not: live, with that .htaccess parked, `.env` was 403 and
+`projectRootServed` said true. The probe is now a randomly named .txt holding a token,
+written, fetched, removed, and only the token coming back counts. Same reasoning as the
+recipe's `package.json` check. Any future "is X exposed" probe needs a file that exists
+only where the exposure would be and that no name rule covers.
+
+**Refusing a file in `public/.htaccess` is a RewriteRule, not `Require`.** The block
+now refuses `*.agentpress-bak` and `debug.log` (both were readable by address). A
+`Require all denied` inside `<FilesMatch>` needs `AllowOverride AuthConfig`, and where
+that is not granted Apache answers 500 for EVERY request to the site. The rewrite rule
+needs only what the block's existing rules already need. It must be the first rewrite
+line: `RewriteCond` lines bind to the next `RewriteRule`, so a rule dropped between
+the agent-route conditions and their rule takes the conditions and leaves that rule
+refusing everything. `test/core-review-served.test.mjs` pins both. Live on a fresh
+scaffold and on an updated site: both files 403, home, a story, REST and CSS 200, the
+agent route 401 from loopback and 403 with a forwarding header.
+
 **Never spawn a competing Apache.** Tried and reverted: it restores the TCP port with a
 *stale in-memory config*, serving every existing site while silently 404ing the new one —
 worse than a clear outage. Detect and report; recovery is the user's Stop All → Start All.
@@ -291,6 +311,25 @@ failed first push, not the empty install, because each swap replaces the kept se
   A push now skips their files AND drops them from the active list. Both halves or neither:
   files skipped with the plugin still listed is a missing-plugin error on live. A test pins
   the pair.
+- **Their DATABASE half is local-only too, and it was missed until a full copy ran on the
+  real server after a pull (2026-11-12, plugin 0.1.8).** The connector's OAuth tables
+  (`acfw_oauth_clients`, `_codes`, `_tokens`, plus `acfw_mcp_events`) and its
+  `agent_connector_for_wp_*` options went up with everything else; the tables were empty
+  that day, and the undo left them on live. `copyDatabase` now names them on all three
+  steps (`LOCAL_AGENT_TABLES`, `LOCAL_AGENT_OPTIONS`): the sender does not read the tables,
+  the receiver refuses them if they come anyway (a pull's sender is the live site), and
+  the switch puts the receiver's own options back and removes the copy's. All three or
+  there is a hole. Tables are WHOLE names on purpose: `acfw_` is also a WooCommerce
+  coupons plugin's prefix. Proven between two local sites with planted markers, both
+  directions: the sender's token row and settings did not arrive, the receiver's own
+  survived, a look-alike `acfw_store_credits` table travelled, and an export made WITHOUT
+  the list was loaded minus one table and one row with the totals still adding up. Then
+  on the real server the same day, which still held the three tables from the earlier
+  copy: a pull read 16 tables where it had read 19, a full copy sent 16 where it had sent
+  19, a marker option planted on local was not on live afterwards, live's five connector
+  options were the five it had before (local had eight), and the undo gave back the
+  editor's password. This also closed a gap nobody had seen: a pull from a live site that
+  never had those options took the local ones away.
 - **Sessions and application passwords never travel with a database copy.** The dev site's
   app password is the one its AI agent holds.
 - **Nor does a password, on the way UP.** The first real full push left the dev `admin` on
@@ -398,7 +437,12 @@ failed first push, not the empty install, because each swap replaces the kept se
   `plugins//agentpress-push/` are the receiver's own folder to Windows and a different
   string to a prefix test. `test/push-security.test.mjs` drives the real `files_unpack`
   against a fake wp-content (`test/php/unpack-harness.php`). Proven between two local sites
-  with planted files and a hostile theme setting; NOT run against the real server. What no
+  with planted files and a hostile theme setting. Against the real server only the
+  upload half has run (2026-11-12): a `.php` file planted in live's uploads was listed,
+  packed, and left out on arrival with the warning naming it. The host answers 403 for
+  any `.php` name under uploads, there or not, so the file could not be confirmed by
+  address first. A hostile pack root and a hostile `upload_path` have NOT been tried
+  there: both need live itself altered. What no
   check can close: Oxygen design data can hold PHP that Oxygen runs. SECURITY.md says so.
 - **The connection line is data until it is parsed, and `.env` gets the parsed form.** The
   URL parser DROPS line breaks, so `https://live.example/\nDB_NAME=other` passed every
@@ -428,20 +472,64 @@ failed first push, not the empty install, because each swap replaces the kept se
   WordPress toolkit: its "security measures" checklist has the item "Change default
   database table prefix", and the operator's screenshot the same evening showed it
   applied, with 17 others (bot protection, no PHP in uploads, blocked sensitive files).
-  `push status` has run with all of them on; a push or a pull has not; `has_undo` looks for `apold_<current prefix>`, so
-  the `apold_wp_` set was simply no longer seen. It is still in that database, orphaned,
-  and nothing here removes it. `info` reports `prefix`, which is how this was found; look
+  `push status` has run with all of them on, and so have a pull and a design push the next day; `has_undo` looks for `apold_<current prefix>`, so
+  the `apold_wp_` set was simply no longer seen. It sat in that database, orphaned, until
+  the operator dropped it by hand in phpMyAdmin on 2026-11-12 (14 tables, with the 16 of
+  the current-prefix kept set, the three connector tables and nine connector option rows);
+  nothing in the tool removes any of them. `info` reports `prefix`, which is how this was found; look
   there first when an undo "disappears". It also made the two ends differ, which until
   then nothing had exercised. Tested the same day between two local sites, one renamed to
   a different prefix by hand (tables, `<prefix>user_roles`, the prefixed usermeta keys):
   a pull and a full push each way, roles intact on the receiver, tables created under the
-  receiver's own prefix, undo fine. NOT covered by that: a prefix with CAPITAL letters
+  receiver's own prefix, undo fine. Covered the next day by a pull from the real server: a prefix with CAPITAL letters
   (the live one has them; MySQL on Windows lowercases table names, so it cannot be
-  reproduced here), and a real server.
+  reproduced here). A full push onto that server followed the same day (local `wp_`,
+  live a capital-letter prefix, `--yes --force`, straight after a pull so the content
+  was the same): posts, pages, media, users and the home page text read the same as
+  before by REST, the roles option and every capabilities key sat under live's own
+  prefix with no `wp_` key left over, the receiving administrator's password
+  fingerprint was unchanged, the two arriving accounts were unusable, the agent plugins
+  were not active and the cache plugin was. `push undo --full` then gave live its 16
+  tables back with the editor's password usable again. What that run found: the agent
+  connector's own tables and options travelled (fixed in 0.1.8, see the agent plugins
+  rule above), and two things nothing fixes: an undo leaves on live any table only the
+  copy had (undo swaps what the kept set names, nothing else), and the dev `admin`
+  arrives as an administrator, unusable password or not. Both are in SECURITY.md.
+- **Second day on the real server (2026-11-12): what worked and three findings.** With
+  the host's 18 security measures on and the capital-letter prefix: `push status`, a
+  pull (plugin 0.1.5; 3,386 rows from 16 tables, local stayed on `wp_`, roles and the
+  local admin kept) and a design push (0.1.6; the home page answered `miss` straight
+  after). The findings, none of them visible between two local sites:
+  (1) **A password lock in front of the site** (the hosting panel's password protection)
+  answers 401 with `WWW-Authenticate: Basic` before WordPress runs. The old message asked
+  whether the plugin was installed. `request()` now names the lock. The tool cannot pass
+  it and deliberately holds no credentials for it; the operator switches it off for the
+  job. (2) **A design push mirrored the whole themes folder**, so three default themes
+  removed from live on purpose went back up (393 files, 01:25 by their Last-Modified,
+  from a push made before the fix). Now only the theme the local site runs on travels:
+  `info.themes_in_use` on the local end, `withoutUnusedThemes` on the source list, a
+  `leave themes` line in the plan. Oxygen with themes off reports `oxygen-zero`, which
+  IS a folder (inside the Oxygen plugin), so the list is not empty: it just names nothing
+  under `themes/`. A full copy is not filtered. Proven between two local sites with the
+  receiver's themes parked ("Not sent: 393 files"), and on the real server the same day
+  once the three themes had been removed from live again: all three answered 404 by
+  address, and the dry run said "Not sent: 393 files in themes this site does not run on"
+  under "Nothing to push". The real one-sentence design push that followed carried the
+  same `leave themes` line and the themes were still 404 on live after it. (3) **WordPress keeps an uploaded plugin zip as a media item**
+  (`_wp_attachment_context` = `upgrader`) until the install ends or two hours pass. The
+  push plugin's zip was uploaded in the LOCAL wp-admin, the screen was left, and the
+  design push sent it to live's uploads. `files_manifest` now leaves those out
+  (`agentpress_push_upgrader_leftovers`), found by that mark and not by file type.
+  Proven on the local site that held the real leftover: on disk, not listed.
+- **The plugin version changes whenever the PHP changes, even by one field.** The
+  version is the only thing `assertCompatible` sees, and a live site may be running the
+  build from an hour ago. 0.1.6 and 0.1.7 were both cut in one night for that reason;
+  the cost is one more "Replace current with uploaded" for the operator.
 - **Not exercised by anything yet:** a real `post_max_size`, the
   wp-admin key page in a browser, any host that is not cPanel + LiteSpeed (nginx, Apache,
-  a managed host), and `pull undo` anywhere but local (it only ever touches local).
-  Say so rather than assume.
+  a managed host). Say so rather than assume. (`pull undo` left this list 2026-11-12:
+  run after a pull from the real server, local media went 9 back to 8, home and REST
+  200, and the pulled files stayed on disk, which the ledger then holds back.)
 - **The chooser cuts every row to the window width, on the raw text.** Its repaint climbs
   one terminal row per entry it drew, so a row that wraps is two on screen and one in the
   count: each keypress left the question line behind (eight stacked "? Live site …" lines
@@ -459,8 +547,16 @@ failed first push, not the empty install, because each swap replaces the kept se
   back a missing file whose path is in it and prints a `leave media` line. No ledger (a
   site connected before this, or never synced) means nothing is held back. A dry run
   writes nothing, the ledger included. Proven between two local sites with an image's
-  files moved aside: 8 held with the ledger, "send media 8 files" without it. NOT yet
-  run against the real server. To send held files anyway, delete the ledger.
+  files moved aside: 8 held with the ledger, "send media 8 files" without it. Run against
+  the real server 2026-11-12, the whole way round: an image uploaded on live, a pull
+  (10 files down, ledger 108 to 118 paths, exactly those 10), the image deleted on live
+  (404 by address, all 10 files still on local), then a dry run: "10 upload files that
+  were deleted on … are left alone". Same dry run with the ledger parked: "send media
+  10 files live does not have (5.2 MB)". Then a real design push that changed one
+  footer sentence: "1 changed, 16 untouched", the deleted image still 404 on live
+  afterwards, the ledger still 118 paths, `/` answered `miss` with the new sentence
+  (it had been `hit`), and `push undo` put the old sentence back. To send held files
+  anyway, delete the ledger.
 
 ---
 

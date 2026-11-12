@@ -596,6 +596,33 @@ async function offerHttpsForNewSite(hostname, projectDir) {
  * depends on a Laragon conf we do not own granting AllowOverride, so a
  * silent regression would leak credentials to anything on the network.
  */
+/**
+ * Is the project ROOT readable over HTTP? Asked with a file of our own, not
+ * with `.env`.
+ *
+ * The old check fetched `/<name>/.env` and warned on a 200. On a machine that
+ * already denies `.env` BY NAME at server level (this one does), Apache
+ * answers 403 before it looks at the folder at all, so the check passed
+ * whether the project's own .htaccess was honoured or not, while `.mcp.json`
+ * and everything else beside it stayed readable (security review,
+ * 2026-11-11: "cannot fail"). A probe has to be a file that exists only in the
+ * project root and that no name-based rule covers: a randomly named .txt
+ * holding a token, written, asked for, removed. Only the token coming back
+ * counts, so a catch-all page answering 200 for anything is not a false alarm.
+ */
+export async function projectRootServed({ name, projectDir, fetchPath = (path) => fetchViaLoopback('127.0.0.1', path, { timeoutMs: 4000 }) }) {
+  const token = randomBytes(16).toString('hex');
+  const probe = `agentpress-root-probe-${token.slice(0, 8)}.txt`;
+  const file = join(projectDir, probe);
+  await writeFile(file, token, 'utf8');
+  try {
+    const res = await fetchPath(`/${encodeURIComponent(name)}/${probe}`);
+    return Boolean(res && res.status === 200 && String(res.body ?? '').includes(token));
+  } finally {
+    await rm(file, { force: true }).catch(() => {});
+  }
+}
+
 async function protectProjectSecrets({ name, projectDir }) {
   await writeFile(
     join(projectDir, '.htaccess'),
@@ -605,13 +632,13 @@ async function protectProjectSecrets({ name, projectDir }) {
       'Require all denied\n',
     'utf8',
   );
-  const res = await fetchViaLoopback('127.0.0.1', `/${encodeURIComponent(name)}/.env`, { timeoutMs: 4000 });
-  if (res && res.status === 200 && /DB_PASSWORD|WP_ADMIN_PASSWORD/.test(res.body)) {
+  if (await projectRootServed({ name, projectDir })) {
     console.log(
-      `\n${yellow(WARN)} SECURITY: ${join(projectDir, '.env')} is being served over HTTP\n` +
-        `  (http://127.0.0.1/${name}/.env returned its contents — it holds this site's DB and\n` +
-        "  admin passwords, and Apache listens on every interface). The protective .htaccess was\n" +
-        "  written but Laragon's Apache is ignoring it (AllowOverride None for www\\).\n" +
+      `\n${yellow(WARN)} SECURITY: ${projectDir} is being served over HTTP\n` +
+        `  (http://127.0.0.1/${name}/ returned a file from it. That folder holds .env and .mcp.json,\n` +
+        "  with this site's DB, admin and agent passwords, and Apache listens on every interface).\n" +
+        "  The protective .htaccess was written but Laragon's Apache is ignoring it\n" +
+        '  (AllowOverride None for www\\).\n' +
         '  Fix: add `AllowOverride All` for the www directory in Laragon\'s Apache config, or move\n' +
         '  this site out of a world-served tree, before using this site on an untrusted network.\n',
     );
@@ -1125,7 +1152,7 @@ async function finishInstall({ name, hostname, projectDir, extraPlugins = [], pr
     'utf8',
   );
   if (!(await protectProjectSecrets({ name, projectDir }))) {
-    warnings.push("this site's .env is being served over HTTP — see the SECURITY warning above");
+    warnings.push("this site's project folder (.env, .mcp.json) is being served over HTTP — see the SECURITY warning above");
   }
 
   await finishExtras({ name, hostname, projectDir, extraPlugins, premiumSelection, adminUser, adminPassword, adminEmail, siteUrl: `${scheme}://${hostname}`, scheme, warnings });

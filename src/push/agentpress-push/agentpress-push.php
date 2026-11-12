@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AgentPress Push
  * Description: Receives a site pushed from a local AgentPress install, and hands this site's content back for a pull. Driven by `agentpress push` / `agentpress pull`; does nothing until a connection key is created under Tools > AgentPress Push.
- * Version: 0.1.5
+ * Version: 0.1.8
  * Author: AgentPress
  * License: GPL-2.0-or-later
  * Requires PHP: 7.4
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-const AGENTPRESS_PUSH_VERSION = '0.1.5';
+const AGENTPRESS_PUSH_VERSION = '0.1.8';
 const AGENTPRESS_PUSH_FORMAT = 1;
 const AGENTPRESS_PUSH_STEP_SECONDS = 8;
 const AGENTPRESS_PUSH_UID = '_agentpress_uid';
@@ -405,7 +405,21 @@ function agentpress_push_op_info()
     $counts['comments'] = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->comments}");
     $free = @disk_free_space(WP_CONTENT_DIR);
     $design = agentpress_push_oxygen_ready() ? agentpress_push_design_bundle(false) : null;
+    // The theme folders this site really runs on. A design push sends only
+    // these: on the first real site the default themes had been removed from
+    // live on purpose, and every design push offered all 393 files back
+    // (2026-11-12). Oxygen with its theme switch off reports `oxygen-zero`,
+    // a folder inside the Oxygen plugin: a real theme to WordPress, and nothing
+    // under wp-content/themes, so no theme folder travels at all.
+    $themes = [];
+    foreach ([get_stylesheet(), get_template()] as $slug) {
+        $slug = (string) $slug;
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $slug) && $slug !== '.' && $slug !== '..' && is_dir(get_theme_root($slug) . '/' . $slug)) {
+            $themes[$slug] = true;
+        }
+    }
     return [
+        'themes_in_use' => array_map('strval', array_keys($themes)),
         'plugin_version' => AGENTPRESS_PUSH_VERSION,
         'format' => AGENTPRESS_PUSH_FORMAT,
         'site_url' => site_url(),
@@ -534,6 +548,53 @@ function agentpress_push_tables($prefix)
     }));
 }
 
+/**
+ * Tables that belong to the INSTALL they are on and never travel with a
+ * copy, by their name without the prefix. The caller names them (`own_tables`),
+ * the way it names the agent plugins' folders.
+ *
+ * Found by the first full copy onto a server after a pull (2026-11-12): the
+ * local agent connector keeps OAuth clients, codes and tokens in three tables
+ * of its own, and they went up with everything else. They were empty that
+ * day. On a site whose agent signs in with OAuth they are its credentials,
+ * arriving on a public server whose copy of the plugin is not even switched
+ * on, and `undo` left the tables there: it only swaps back what the kept set
+ * names. The plugin's files and its place in the active list were already
+ * local-only; its data was the half nobody had listed.
+ *
+ * Whole names, never a pattern: `acfw_` is also the prefix of a coupons plugin
+ * for WooCommerce, and a pattern would leave a shop's own tables behind.
+ */
+function agentpress_push_own_tables($args)
+{
+    $names = [];
+    foreach ((array) ($args['own_tables'] ?? []) as $name) {
+        if (is_string($name) && preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+            $names[] = $name;
+        }
+    }
+    return $names;
+}
+
+/**
+ * LIKE patterns for the options that stay with the install the same way
+ * (`own_option_prefixes`), each with the two spellings WordPress stores a
+ * transient of that name under.
+ */
+function agentpress_push_own_option_likes($args)
+{
+    global $wpdb;
+    $likes = [];
+    foreach ((array) ($args['own_option_prefixes'] ?? []) as $prefix) {
+        if (is_string($prefix) && preg_match('/^[A-Za-z0-9_]+$/', $prefix)) {
+            foreach (['', '_transient_', '_transient_timeout_'] as $lead) {
+                $likes[] = $wpdb->esc_like($lead . $prefix) . '%';
+            }
+        }
+    }
+    return $likes;
+}
+
 /** One cell, JSON-safe. Bytes that are not UTF-8 (a BLOB) ride as base64. */
 function agentpress_push_cell_out($value)
 {
@@ -564,8 +625,12 @@ function agentpress_push_op_db_export($args)
     $prefix = $wpdb->prefix;
 
     if ($state['tables'] === null) {
-        $state['tables'] = agentpress_push_tables($prefix);
-        $meta = ['t' => 'meta', 'format' => AGENTPRESS_PUSH_FORMAT, 'prefix' => $prefix, 'site_url' => site_url(), 'home_url' => home_url(), 'tables' => count($state['tables'])];
+        // Not read at all, so a token never reaches the export file either.
+        $own = agentpress_push_own_tables($args);
+        $state['tables'] = array_values(array_filter(agentpress_push_tables($prefix), function ($table) use ($prefix, $own) {
+            return !in_array(substr($table, strlen($prefix)), $own, true);
+        }));
+        $meta =['t' => 'meta', 'format' => AGENTPRESS_PUSH_FORMAT, 'prefix' => $prefix, 'site_url' => site_url(), 'home_url' => home_url(), 'tables' => count($state['tables'])];
         file_put_contents($path, wp_json_encode($meta, JSON_UNESCAPED_SLASHES) . "\n");
     }
     $out = fopen($path, 'ab');
@@ -752,7 +817,12 @@ function agentpress_push_op_db_import($args)
         return agentpress_push_fail('import_missing', 'No database export has been uploaded to this session.');
     }
     $state = is_array($args['state'] ?? null) ? $args['state'] : [];
-    $state += ['pos' => 0, 'table' => '', 'name' => '', 'rows' => 0, 'tables' => 0, 'meta' => null];
+    $state += ['pos' => 0, 'table' => '', 'name' => '', 'rows' => 0, 'tables' => 0, 'meta' => null, 'skip' => false, 'skipped_tables' => 0, 'skipped_rows' => 0];
+    // The sender leaves these out of its export. Asked again here because on
+    // a pull the sender is the live site, and what it sends is checked, not
+    // believed: a table of the agent connector's arriving from there would
+    // replace this site's own, sign-in tokens and all.
+    $own_tables = agentpress_push_own_tables($args);
     $prefix = $wpdb->prefix;
     $new_prefix = AGENTPRESS_PUSH_NEW . $prefix;
 
@@ -800,6 +870,10 @@ function agentpress_push_op_db_import($args)
             return agentpress_push_fail('import_corrupt', 'The uploaded database export is damaged (a line is not valid JSON). Nothing on this site was changed.', 422);
         }
         if (isset($record['r'])) {
+            if ($state['skip']) {
+                $state['skipped_rows']++;
+                continue;
+            }
             $row = [];
             foreach ($record['r'] as $i => $cell) {
                 if (is_array($cell)) {
@@ -849,6 +923,15 @@ function agentpress_push_op_db_import($args)
                 fclose($in);
                 return agentpress_push_fail('import_corrupt', 'The uploaded database export is damaged (unexpected table record).', 422);
             }
+            $state['skip'] = in_array((string) $record['name'], $own_tables, true);
+            if ($state['skip']) {
+                // Counted, so the caller can still see every row accounted for.
+                $state['skipped_tables']++;
+                $state['table'] = '';
+                $state['name'] = '';
+                $state['pos'] = ftell($in);
+                continue;
+            }
             $table = $new_prefix . $record['name'];
             if (strlen($table) > 64) {
                 fclose($in);
@@ -895,7 +978,7 @@ function agentpress_push_op_db_import($args)
     }
     $state['pos'] = ftell($in);
     fclose($in);
-    return ['done' => $done, 'state' => $state, 'rows' => $state['rows'], 'tables' => $state['tables'], 'bytes_done' => $state['pos'], 'bytes' => filesize($path)];
+    return ['done' => $done, 'state' => $state, 'rows' => $state['rows'], 'tables' => $state['tables'], 'skipped_rows' => $state['skipped_rows'], 'skipped_tables' => $state['skipped_tables'], 'bytes_done' => $state['pos'], 'bytes' => filesize($path)];
 }
 
 /**
@@ -1028,6 +1111,19 @@ function agentpress_push_op_db_swap($args)
     foreach ($own_names as $name) {
         $own_options[$name] = $wpdb->get_row($wpdb->prepare("SELECT option_value, autoload FROM {$wpdb->options} WHERE option_name = %s", $name), ARRAY_A);
     }
+    // The settings that go with `own_tables`: this site's stay, the copy's do
+    // not arrive, and where this site had none the copy's are removed. The
+    // first full copy left the dev site's agent-connector settings on the
+    // live server (its switch set to on, and the dev machine's hostname).
+    // The other way round, a pull from a live site that never had them took
+    // this site's away, which is the agent wiring a pull says it keeps.
+    $install_likes = agentpress_push_own_option_likes($args);
+    $install_rows = [];
+    foreach ($install_likes as $like) {
+        foreach ((array) $wpdb->get_results($wpdb->prepare("SELECT option_name, option_value, autoload FROM {$wpdb->options} WHERE option_name LIKE %s", $like), ARRAY_A) as $row) {
+            $install_rows[$row['option_name']] = $row;
+        }
+    }
     $active_here = (array) get_option('active_plugins', []);
     // A page-cache plugin this site is running keeps its own settings too, or
     // it would come back switched on with none (see agentpress_push_page_cache_plugins).
@@ -1093,6 +1189,14 @@ function agentpress_push_op_db_swap($args)
         } else {
             $wpdb->delete($wpdb->options, ['option_name' => $name]);
         }
+    }
+    // The copy's rows out first, then this site's back: a setting the copy
+    // has and this site never had must not be left standing.
+    foreach ($install_likes as $like) {
+        $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $like));
+    }
+    foreach ($install_rows as $row) {
+        $wpdb->insert($wpdb->options, $row);
     }
     // Plugins: the copy's own list, plus this plugin (or the job could not
     // finish itself), plus the few the caller names in `keep_plugin_dirs` when
@@ -1226,6 +1330,34 @@ function agentpress_push_op_db_undo()
  * --------------------------------------------------------------------- */
 
 /**
+ * Upload files that are WordPress's own leftovers, as a set of paths.
+ *
+ * "Upload Plugin" and "Upload Theme" save the zip as a media item marked
+ * `upgrader` and delete it when the install ends, or two hours later if the
+ * screen was left on "Replace current with uploaded?". Second day on the real
+ * server (2026-11-12): the push plugin's own zip had been uploaded in the
+ * LOCAL site's wp-admin, the screen was left, and the design push two minutes
+ * later sent that zip to live as "media live does not have". It is nobody's
+ * media, and on live nothing would ever have removed it.
+ */
+function agentpress_push_upgrader_leftovers()
+{
+    global $wpdb;
+    $set = [];
+    if (!isset($wpdb) || !is_object($wpdb)) {
+        return $set;
+    }
+    $rows = $wpdb->get_col(
+        "SELECT f.meta_value FROM {$wpdb->postmeta} c JOIN {$wpdb->postmeta} f ON f.post_id = c.post_id AND f.meta_key = '_wp_attached_file' "
+        . "WHERE c.meta_key = '_wp_attachment_context' AND c.meta_value = 'upgrader'"
+    );
+    foreach ((array) $rows as $attached) {
+        $set['uploads/' . ltrim(wp_normalize_path((string) $attached), '/')] = true;
+    }
+    return $set;
+}
+
+/**
  * Lists every file under the asked-for roots with its size and SHA-1, into
  * manifest.ndjson. Listing is one fast pass; hashing is the slow part and is
  * the part cut into steps.
@@ -1251,6 +1383,7 @@ function agentpress_push_op_files_manifest($args)
             $walker = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($roots[$root], FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
             $folders = [];
             $found = [];
+            $leftovers = $root === 'uploads' ? agentpress_push_upgrader_leftovers() : [];
             foreach ($walker as $file) {
                 if ($file->isLink()) {
                     continue;
@@ -1261,7 +1394,7 @@ function agentpress_push_op_files_manifest($args)
                 }
                 if ($file->isDir()) {
                     $folders[] = $rel . '/';
-                } elseif ($file->isFile()) {
+                } elseif ($file->isFile() && !isset($leftovers[$rel])) {
                     $found[] = $rel;
                 }
             }
