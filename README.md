@@ -113,6 +113,8 @@ alias works for every command: `agentpress doctor`, `agentpress destroy`, and so
 … destroy              # permanently remove the site: DB, vhost, MCP wiring, hosts entry, folder
 … push                 # send this site's DESIGN to its live site (stories there are kept)
 … push --full          # first launch: make the live site a full copy of this one
+… push content         # send stories written here up to the live site (only adds)
+… push status          # compare this site with its live site
 … pull                 # bring the live site's content down to this local site
 
 # flags
@@ -121,6 +123,8 @@ alias works for every command: `agentpress doctor`, `agentpress destroy`, and so
 … my-site --yes        # non-interactive (skips the confirmation prompt; implies --premium=all)
 … push --dry-run       # (push and pull) show what would change, send nothing
 ```
+
+The push and pull commands, with their set-up, are in the next section.
 
 Environment variables (all optional): `AGENTPRESS_LARAGON_ROOT` (Laragon install folder if not
 auto-detected), `AGENTPRESS_MYSQL_ROOT_PASSWORD` (when root isn't passwordless/"root"),
@@ -151,10 +155,10 @@ So after launch you keep designing locally and `push`, while the editor keeps wr
 live, and neither wipes the other.
 
 **Lightly proven.** One real server so far (cPanel with LiteSpeed, PHP 8.4). Every command
-has run there, undos included, and that one server found eight bugs no local run had
-shown. No other host, web server or PHP version has seen it. Treat
-your first run as a test: use a fresh WordPress install on the server, and keep the host's
-own backup switched on.
+has run there at least once, undos included, and that one server found eight bugs no local
+run had shown. No other host, web server (nginx, plain Apache, OpenLiteSpeed) or PHP
+version has seen it. Treat your first run as a test: use a fresh WordPress install on the
+server, and keep the host's own backup switched on.
 
 **Set up, once per site:**
 
@@ -203,10 +207,13 @@ in a site scaffolded before 1.11.0 to get that entry.
 - **Each end keeps what is its own** through a full copy or a pull: its address, its
   administrators' logins, its search-engine visibility setting, its admin email and its
   Oxygen license. Sign-in sessions and application passwords never travel.
-- **The page cache is cleared for you** when a push finishes, and a cache plugin the live
-  site already runs (LiteSpeed Cache, WP Rocket and the like) stays on with its own
-  settings. If the home page still shows the old site, purge the cache in that plugin or
-  in the hosting panel.
+- **The page cache is cleared for you** when a push finishes, for the caches the tool
+  knows: a LiteSpeed server's own cache, and the LiteSpeed Cache, WP Rocket and W3 Total
+  Cache plugins. A cache plugin the live site already runs stays on with its own settings
+  through a full copy (those three, plus WP Super Cache and WP Fastest Cache). Any other
+  cache is not cleared: a host's own page cache (an nginx cache, a hosting company's
+  cache plugin) or a CDN. If the home page still shows the old site, purge it in that
+  plugin or in the hosting panel.
 - **A design push sends upload files live has never had**, such as an image you placed in
   a template. It does not put back a file that was deleted on live: the plan shows a
   `leave media` line instead. The tool remembers what it has seen there in
@@ -374,6 +381,7 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
 
 - **Open WP Admin** — a fresh one-click, already-logged-in link every time (they're
   single-use), falling back to the normal login form with a note when it can't mint one.
+  **Open the site** opens the front end.
 - **Open your agent** (Claude Code, Cursor, Codex, OpenCode) right in the site — warning
   first when an agent's MCP wiring points at a *different* site, with a
   **Point MCP here** item that runs `rewire` for you whenever that warning is showing.
