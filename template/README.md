@@ -14,9 +14,12 @@ npm run wp -- <command...>   # WP-CLI, e.g. npm run wp -- plugin list
 ```
 
 Worth knowing about the menu: **Snapshot the database** before letting an AI agent loose on
-the site gives you a two-keystroke rollback (**Restore the latest snapshot**) if the session
-goes sideways. Snapshots land in `snapshots/`, gitignored — a dump is the whole site,
-password hashes included.
+the site gives you a rollback if the session goes sideways. It asks what the snapshot is
+for, and **Restore or delete a snapshot…** lists every one with its date, note and size.
+Each snapshot is a new file and old ones stay until you delete them there. Restoring saves
+the database as it is now first, so you can go back if you picked the wrong one. A snapshot
+is the database only, not uploaded files. They land in `snapshots/`, gitignored — a dump is
+the whole site, password hashes included.
 
 **Live site** in the menu sends this site's design to a live server and brings its content
 back down. The first time, it walks you through connecting the two. The rules are in the
@@ -49,7 +52,7 @@ day one, and again any time MCP starts returning 401.
 - `.claude/commands/verify.md` — the `/verify` procedure. Any agent can read it, not just
   Claude Code.
 - `snapshots/` — dated database dumps from the menu's Snapshot item (only exists once you
-  take one). Gitignored; treat dumps as secrets.
+  take one), named `db-<time>_<your note>.sql`. Gitignored; treat dumps as secrets.
 - `public/` — WordPress core + your content.
 
 ## Updating AgentPress's own tooling

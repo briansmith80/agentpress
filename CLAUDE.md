@@ -521,6 +521,114 @@ failed first push, not the empty install, because each swap replaces the kept se
   design push sent it to live's uploads. `files_manifest` now leaves those out
   (`agentpress_push_upgrader_leftovers`), found by that mark and not by file type.
   Proven on the local site that held the real leftover: on disk, not listed.
+- **Stories written on the dev site go up with `push content` (plugin 0.1.9, 2026-11-12),
+  the one way UP for content.** The reason is the agent plugins rule above: the agent only
+  works on the dev site, so what it writes is born on the wrong side, and before this a
+  design push ignored it, a full copy replaced the editor's work to deliver it, and a pull
+  deleted it without a word (`pull` now names such stories and wants `--force`). It only
+  ADDS. What makes that safe is two notes, not a guess from titles: on the DEV site each
+  story carries `_agentpress_story_sent` (`live` = the live site has it as its own, a
+  fingerprint = this tool sent it, nothing = written here), and on the RECEIVER a sent
+  story carries `_agentpress_story_live`, the fingerprint of how it read on arrival. An
+  update needs that second fingerprint to still match; otherwise the editor touched it
+  and it is left, with the reason printed. A pull or a full copy sets every note to `live`
+  (`stories_level`), and a site connected before this existed gets its notes from the live
+  site's list of stories, matched as the same ROW (number plus publish time, or number
+  plus title for a draft), because a pull to "level" would delete the very stories
+  waiting to go up. `_agentpress_uid` on a `post` is safe: `design_apply` only bins
+  design types and pages. Do not stamp a uid on a page for this. Proven between two local
+  sites, each step run and read back: three stories with an inline image, a featured
+  image, a nested category, tags and custom fields (10 files sent, numbers and addresses
+  rewritten, `/slug/` 200); undo (both to the bin, 404) and undo twice (refused); send
+  again (taken out of the bin, no twin, no second media row); a changed story updated,
+  that update undone and offered again; an edit on the receiver, then left alone;
+  deleted on the receiver, left; same address as a receiver story, left, published or
+  draft; an image already there with no library row (adopted, nothing sent); a different
+  file under an image's name (story left, file untouched); `--draft`; a pull refused,
+  forced, then "nothing to send", and `pull undo` bringing the notes back; a full copy
+  and its undo. The first run found three things reading had not: `stories.json` was not
+  a name a session accepts (refused before anything started); `wp_insert_attachment`
+  given a FULL path keeps it whole on Windows, where WordPress's own uploads path has a
+  backslash ours does not, so the image was "missing" with the file sitting there (it
+  gets the path relative to uploads now); and `get_posts` by `name` is a single-story
+  query that WordPress empties for a draft when nobody is logged in, which a key-only
+  request never is, so the same-address check asks the table. On the real server the
+  same day (capital-letter prefix, the host's security measures on): the preview with
+  the site's real stories matched every one to live's row and offered nothing; a test
+  draft with a featured image went up (7 files, the image 200 by address, its library
+  row readable by REST with the right address, posts 8 to 9, the caches cleared), the
+  author fell back to live's first administrator and the plan said so; the undo put it
+  in the bin (9 to 8) and a second undo was refused; the next preview offered `restore`.
+  **Not run there:** a story arriving public, an update to a sent story (the test's own
+  helper looked the draft up by name and hit the same no-login quirk, so the edit never
+  happened and nothing was sent), the restore itself, and every "left alone" case. The
+  text is not kses-filtered on arrival (an embed would arrive as nothing), so a story's
+  HTML is published as written: SECURITY.md says so. The command is `push content`
+  (operator's call, to sit beside "Pull content"); `push stories` still works, and the
+  plugin's ops keep the `stories_` names.
+- **Pages on a live site are locked to administrators (plugin 0.1.10, operator's call
+  2026-11-12).** The person writing on live is the client, with the Editor role, and a
+  page built in Oxygen is replaced by the next design push without a word. So
+  `agentpress_push_lock_pages` takes the nine page capabilities from anyone without
+  `manage_options` unless pages were opened on purpose (`push pages open`, the menu, or
+  the button under Tools → AgentPress Push). Default: locked on a public host, open on a
+  local one. The switch is a FILE (`agentpress-push-data/pages-access.txt`), for the
+  connection key's reason: an option would arrive from the dev site inside a full copy.
+  Proven between two local sites: the Editor lost `edit_pages` and `edit_post` on a real
+  page and kept every story capability, the administrator kept all, and the lock read
+  `locked` after a full copy AND after its undo. `test/php/pages-harness.php` runs the
+  real filter. Not run on the real server yet. It is a guard against an accident, not a
+  boundary: SECURITY.md lists what it does not cover. Menus, custom field groups and
+  widgets are in no design or content push; only `push --full` and `pull` move them.
+- **What an editor sees in live's wp-admin is a ticked list (plugin 0.1.11, operator's
+  ask 2026-11-12): Pages, Comments, Tools, WordPress news.** Only what an Editor is
+  really shown, read off a site and not from memory: Dashboard, Posts, Media, Pages,
+  Comments, Profile, Tools. The operator also asked for Appearance, Plugins, Users,
+  Settings and Oxygen; none of them appears for an editor (each needs an administrator's
+  capability), so they are not in the list and every surface says why. Pages stays a real
+  lock (capabilities, its own file, locked by default on a public host). The other three
+  are tidying: `remove_menu_page`, a redirect off their screens, the toolbar node, the
+  dashboard box, and nothing is hidden until someone ticks it. `push editor` shows the
+  list and asks "Switch which?", where Enter changes NOTHING (`pickSwitches`; in "Send
+  which?" Enter means all, and that reflex here would hide everything the client uses).
+  `push pages open|lock` still work as the same switch. The site menu has ONE item for
+  it because the list is the live site's to give: the frozen menu cannot know it. Proven
+  on a local site with a real Editor cookie, by address and by reading the page: see
+  SECURITY.md. Through the real menu (Herdr): typed `2,3`, both flipped. The wp-admin
+  tick boxes were posted as an administrator with an extra made-up value (`plugins`),
+  which was ignored. On the real server the same day (0.1.11 uploaded by the operator,
+  all four unticked there): `push status` read the four back, listed the one plugin
+  that differs and the two that update themselves (Oxygen is one: a design push is
+  refused the day live's Oxygen moves ahead of the local one), and a pull after both
+  live passwords were changed did what the rules say, checked by fingerprint before and
+  after: the editor's hash changed, both LOCAL administrators' hashes did not, so the
+  new live administrator password did not come down. Administrators are matched by
+  login name.
+- **`push status` compares plugins, and the local end's PHP limits are not its web
+  server's.** `info` sends `plugins`, `search_visible`, `memory_limit`,
+  `upload_max_bytes`, `pages_open`. The first run printed a "local" column of `-1` and
+  `16 MB`: the local end is read through WP-CLI, whose PHP has no memory limit and its
+  own upload size. So those two are printed for LIVE only, as one line. `comparePlugins`
+  returns only differences and leaves out the agent plugins and this tool's own (their
+  being absent on live is correct, not a finding); `compareVersions` answers null for
+  anything that is not plain dotted numbers rather than guess which end is newer.
+- **The status line draws a bar, and is cut to the window like the chooser's rows.**
+  `ticker().progress(done, total, note)`; `\r` plus erase-line clears ONE row, so a
+  wrapped line leaves its first half behind on every repaint. Seen for real in a full
+  copy between two local sites with stdout made to claim a 100-column terminal: 16
+  frames, the widest 99 columns; at 50 columns, 49.
+- **The design preview is three blocks, not one table** (operator, 2026-11-12).
+  `designPlanScreen` draws "Changes on <host>", "Files to send" and "Left alone" under
+  bold headings, the left-alone rows dim, every row cut to the window on the raw text,
+  and a preview ends with the next step (`say(site, 'push')`, a menu item inside the
+  menu). Before, kept files sat in the same column as a footer's name ("leave themes
+  393 files in themes this site does not run on (…)") and wrapped in a narrow pane. A
+  heading is never printed with nothing under it. Seen in the real menu through Herdr:
+  a renamed footer, one code file, and two uploads deleted on the receiver listed under
+  Left alone; then a real push and its undo with the same screen above the question.
+  The content preview (`push content`) is laid out the same way by `describeStoryPlan`:
+  "Stories to send to <host>" (numbered, the number is what "Send which?" takes, notes
+  under the title they belong to) and "Left alone" with each reason.
 - **The plugin version changes whenever the PHP changes, even by one field.** The
   version is the only thing `assertCompatible` sees, and a live site may be running the
   build from an hour ago. 0.1.6 and 0.1.7 were both cut in one night for that reason;
@@ -530,6 +638,53 @@ failed first push, not the empty install, because each swap replaces the kept se
   a managed host). Say so rather than assume. (`pull undo` left this list 2026-11-12:
   run after a pull from the real server, local media went 9 back to 8, home and REST
   200, and the pulled files stayed on disk, which the ledger then holds back.)
+- **Snapshots are a list ordered by TIME, each restore saves first, and the note lives in
+  the file name** (operator's ask, 2026-11-12: "how can we then delete? how many are
+  there and when were they made?"). Every snapshot was always a new file and nothing ever
+  removed one; the menu just could not show them, and "Restore the latest snapshot" took
+  the last NAME. On a real site with six dumps, four named by hand (`db-before-…`), that
+  offered one that was not the newest: a letter sorts after a digit. `listSnapshots`
+  reads the time from the name when it is ours (`db-<UTC>_<note>.sql`) and from the file
+  date otherwise. No index file: a note typed at the prompt is cut to letters, digits and
+  hyphens and goes in the name, which is also the only typed text that reaches the shell
+  and mysql's SOURCE. Only names safe inside a quoted argument are listed. A restore
+  first saves the database as it is ("before restore") and does nothing if that save
+  fails; a failed save deletes its half-written file, or it would head the list as the
+  newest. The list is paged (the chooser cannot scroll). Through the real menu (Herdr) on
+  a local site: a note with `&` and `%PATH%` in it became a clean name; an option planted
+  after the snapshot was gone after the restore and was inside the before-restore file;
+  Cancel kept the file and Delete removed it; eleven files paged 8 and 3; Ctrl+C at the
+  note prompt took nothing. **A snapshot leaves out the `apold_` and `apnew_` tables**
+  (operator's call the same day). `wp db export` dumps every table in the database, so a
+  snapshot carried the sets a pull or full copy keeps for its undo, and restoring one
+  wound a LATER pull's undo back. `keptTablesArg` lists the tables and passes
+  `--exclude_tables`; names that are not plain letters, digits and underscores stay in,
+  and if the listing fails or the list would not fit on a cmd.exe line the snapshot is
+  taken whole, never skipped. Same site, same hour: 23.4 MB with them, 7.9 MB without
+  (54 tables in the dump, none of the 108 kept ones), and after a restore all 108 were
+  still there. A dump made before this still holds them. `test/menu-snapshots.test.mjs`
+  runs the real functions cut from the menu and pins the two prefixes to the plugin's.
+- **The chooser shows each row's key, lines the hints up in one column, and groups rows
+  with blank lines; the blank lines and the key legend go first when the window is
+  short** (menu review, 2026-11-12). A list taller than the window scrolls it, the climb
+  stops at the top row, and each keypress then paints a second copy. So `menuScreen(options)`
+  returns the rows it used, drops the wordmark when the list would not fit under it, and
+  `choose(message, options, above)` only draws a gap (`gap: true` on an option) or the
+  legend with rows to spare. A hint is coloured by `paint` AFTER the cut: one that
+  arrived already yellow was measured with its escape codes. Both are run against a
+  fake terminal in `test/parity.test.mjs`.
+- **The clipboard helper is PowerShell with the text in an environment variable, not
+  clip.exe.** clip.exe fed UTF-16 with a byte-order mark put the mark ON the clipboard,
+  an invisible first character in a path about to be pasted into WordPress's file box,
+  and PowerShell's `-eq` said the two strings matched because that comparison ignores
+  it. Compare ordinally (`[string]::Equals(a, b, 'Ordinal')`) when a check is about
+  exact characters. `showInFolder` passes `/select,"path"` verbatim; Explorer was seen
+  to open the folder with the zip selected.
+- **"First launch: full copy to live" lives under "Set up or reconnect…"** (operator's
+  call, 2026-11-12), shown only once a live site is connected. It is run once per live
+  site and replaces everything there; in the day-to-day list it sat one key from
+  "Undo…". `MENU_LABELS['push --full']` carries the two-step path, so `push connect`'s
+  "Next:" line names where it is.
 - **The chooser cuts every row to the window width, on the raw text.** Its repaint climbs
   one terminal row per entry it drew, so a row that wraps is two on screen and one in the
   count: each keypress left the question line behind (eight stacked "? Live site …" lines

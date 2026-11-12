@@ -170,6 +170,56 @@ so they get their own section.
   its undo, after which the site read the same as before by its public REST API. The pull,
   the full copy and its undo ran there once more with 0.1.8, to see the agent connector's
   tables and settings stay where they were. The retry lock has never been seen to fire.
+- **Sending stories up (plugin 0.1.9).** `push content` creates posts on the live site from
+  the dev site, with the connection key and no WordPress login. It is the one place
+  content travels up, and it is narrow on purpose. Only the `post` type. It adds, and
+  changes a story only when that story was sent by this tool and reads exactly as it did
+  when it arrived (a fingerprint of its title, text, status, address, date, terms and
+  featured image is kept beside it). It never writes over an upload: an image whose name
+  is taken on live by a different file stops that story. A file that could run as code is
+  refused as an image. At most 50 stories per run. The text is not passed through
+  WordPress's content filter, because the sender is the site owner's own dev site and a
+  filtered story would lose its embeds: **whatever HTML or script is in a story on the dev
+  site is published as written.** That is the same trust a full copy has always had, but
+  it now applies to text an AI agent wrote, so read a story before sending it; `--draft`
+  sends it unpublished. Custom fields travel as stored text and are never turned into
+  objects. The undo puts sent stories in the bin and does not delete them; images it
+  added stay in the media library. Every case has run between two local sites. Against the
+  one real server (2026-11-12) only this much: the preview with real stories (all matched
+  to the live site's, nothing offered), one test draft with an image sent and found there,
+  and its undo. Not run there: a story that goes public, a change to a sent story, taking
+  one back out of the bin, and every "left alone" case.
+- **Pages are locked to administrators on a live site (plugin 0.1.10).** While the plugin
+  is active on a site that is not a dev machine, every account that cannot manage options
+  has the nine page capabilities taken away by a `user_has_cap` filter, so the Pages
+  screens, the "Edit page" links and the REST routes all refuse it. This is a guard
+  against an accident (a client editing a page the next design push replaces), **not a
+  security boundary**: it does nothing to an administrator, it stops when the plugin is
+  switched off, a plugin that grants its own capabilities or writes to the database
+  directly is not covered, and it does not hide a page from being READ. The switch is a
+  file beside the connection key, never an option, so a full copy cannot carry the dev
+  site's answer onto live. Proven between two local sites with an Editor account: locked,
+  it could not edit a real page and kept every story capability; an administrator was
+  untouched; the lock was still on after a full copy and after its undo. On the one real
+  server (0.1.11, the same day) it was switched on by the operator and read back by
+  `push status`.
+- **Hiding Comments, Tools and the WordPress news from editors is tidying, not a lock
+  (plugin 0.1.11).** Unlike Pages, no capability is taken away: the menu entry and the
+  toolbar item are removed and the wp-admin screens behind them redirect to the
+  dashboard. An editor can still moderate a comment through the REST API or a link in a
+  notification email. Use it to keep a client's screen simple, never to keep someone out.
+  Only an administrator can change the list (the tick boxes need `manage_options`; the
+  command needs the connection key), and it is kept in a file beside the pages switch.
+  Proven on a local site with a real Editor login: the menu lost Comments and Tools, both
+  screens answered 302 to the dashboard, the news box and the W menu were gone from the
+  page, Posts, Media and Profile answered 200, the administrator saw all eleven entries,
+  and the settings page answered the editor 403. On the one real server the same day the
+  operator unticked all four and looked as the client; `push status` then reported the
+  four as hidden. What was not checked there by address: the redirects themselves.
+- **`push status` reads more than it used to (0.1.10):** each end now lists its plugins
+  (folder, name, version, on or off, auto-update, update waiting), whether search engines
+  are discouraged, and its PHP memory and upload limits. All of it is behind the same
+  connection key as everything else and none of it decides anything.
 - **A password lock in front of the site stops the tool.** When the hosting panel's
   password protection is on, the server answers 401 before WordPress runs, so the
   connection key is never looked at. The tool says so and sends nothing further. It does

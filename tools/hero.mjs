@@ -173,7 +173,7 @@ function makeDoc({ width, height, seconds, label }) {
 {
   const X = 36;
   const LINE = 23;
-  const doc = makeDoc({ width: 860, height: 440, seconds: 24, label: 'm' });
+  const doc = makeDoc({ width: 860, height: 560, seconds: 24, label: 'm' });
   const LIVE = 'my-site.example';
 
   // Like the hero: open with the command that gets you here, then the menu.
@@ -189,7 +189,7 @@ function makeDoc({ width, height, seconds, label }) {
     ['Password', 'wp-....-....', C.text],
   ];
   for (const [name, value, fill] of header) {
-    doc.raw(`<text x="${X}" y="${y}" ${FONT}>${t(name)}</text><text x="${X + 110}" y="${y}" ${FONT}>${t(value, fill)}</text>`, doc.vis([8, 66], { snap: true }));
+    doc.raw(`<text x="${X}" y="${y}" ${FONT}>${t(name, C.dim)}</text><text x="${X + 110}" y="${y}" ${FONT}>${t(value, fill)}</text>`, doc.vis([8, 66], { snap: true }));
     y += LINE;
   }
   const questionY = y + LINE * 0.5;
@@ -201,12 +201,21 @@ function makeDoc({ width, height, seconds, label }) {
    */
   const screen = (question, items, [from, to], walk) => {
     doc.text(X, questionY, t('? ', C.pink) + t(question), doc.vis([from, to], { snap: true }));
-    items.forEach(([labelText, hint, hintFill = C.dim], i) => {
-      const rowY = questionY + LINE * 1.2 + i * LINE;
+    // As the real chooser lays a row out: the key that picks it, the label
+    // padded so every hint starts in one column, a blank row between groups
+    // (a fourth entry of `true`), and the key legend underneath.
+    const widest = Math.max(...items.map(([labelText]) => labelText.length));
+    const leaves = items.findIndex(([labelText]) => labelText === 'Exit' || labelText === 'Back');
+    let rowY = questionY + LINE * 0.2;
+    items.forEach(([labelText, hint, hintFill = C.dim, gap = false], i) => {
+      rowY += LINE * (gap ? 1.6 : 1);
+      const key = i === leaves ? '0' : i < 9 ? String(i + 1) : ' ';
+      const padded = hint ? labelText.padEnd(widest) : labelText;
       const hintPart = hint ? t('  ' + hint, hintFill) : '';
       const on = walk.filter(([row]) => row === i).map(([, a, b]) => [a, b]);
+      const plainRow = t('  ') + t(key, C.dim) + t('  ' + padded) + hintPart;
       if (!on.length) {
-        doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis([from, to], { snap: true }));
+        doc.text(X, rowY, plainRow, doc.vis([from, to], { snap: true }));
         return;
       }
       // Plain in the gaps around the cursor's visit; the pink overlay covers the visit.
@@ -217,9 +226,11 @@ function makeDoc({ width, height, seconds, label }) {
         at = b;
       }
       if (at < to) plain.push([at, to]);
-      if (plain.length) doc.text(X, rowY, t('  ') + t(labelText) + hintPart, doc.vis(plain, { snap: true }));
-      doc.text(X, rowY, t('> ', C.pink) + t(labelText, C.pink) + hintPart, doc.vis(on, { snap: true }));
+      if (plain.length) doc.text(X, rowY, plainRow, doc.vis(plain, { snap: true }));
+      doc.text(X, rowY, t('> ' + key + '  ' + padded, C.pink) + hintPart, doc.vis(on, { snap: true }));
     });
+    const leave = leaves >= 0 ? ` · 0 ${items[leaves][0].toLowerCase()}` : '';
+    doc.text(X, rowY + LINE * 1.6, t(`  ↑↓ move · Enter or a number picks${leave}`, C.dim), doc.vis([from, to], { snap: true }));
   };
 
   // Screen 1: the real option list, hints included. The cursor walks down to Live site.
@@ -229,12 +240,13 @@ function makeDoc({ width, height, seconds, label }) {
       ['Open WP Admin', 'one-click login'],
       ['Open the site', 'front end'],
       ['Open Claude Code', 'MCP points here'],
-      ['Snapshot the database', 'rollback point before agent sessions'],
-      ['Restore the latest snapshot', 'db-2026-11-11T09-12-44Z.sql'],
-      ['Live site', `push and pull · ${LIVE}`],
-      ['Show recent errors', 'debug on — nothing logged yet'],
+      ['Snapshot the database', 'rollback point before agent sessions', C.dim, true],
+      ['Restore or delete a snapshot…', '3 saved, 14.2 MB · newest 11 Nov 2026 09:12'],
+      ['Live site', `push and pull · ${LIVE}`, C.dim, true],
+      ['Show recent errors', 'debug on — nothing logged yet', C.dim, true],
       ['Open in VS Code', 'this site folder'],
       ['Open a terminal here', ''],
+      ['Give feedback or report a bug', 'opens a new GitHub issue in your browser', C.dim, true],
       ['Exit', ''],
     ],
     [9, 36],
@@ -254,12 +266,12 @@ function makeDoc({ width, height, seconds, label }) {
     [
       ['Check status', 'compare this site with live'],
       ['Preview a design push', 'shows the plan, sends nothing'],
-      ['Push design to live', 'asks first; stories on live are kept'],
+      ['Push design to live', 'asks first; stories on live are kept', C.dim, true],
+      ['Push content to live', 'stories written here; asks first, only adds'],
       ['Pull content from live', 'asks first; this local site becomes a copy of live'],
-      ['Undo…', 'the last push, pull or full copy'],
-      ['First launch: full copy to live', 'replaces everything on live', '#d9a441'],
-      ['Set up or reconnect…', 'plugin zip, new connection key'],
-      ['Back', ''],
+      ['Undo…', 'the last design or content push, pull or full copy', C.dim, true],
+      ['Set up or reconnect…', 'plugin zip, connection key, first full copy, what editors see'],
+      ['Back', '', C.dim, true],
     ],
     [38, 66],
     [
@@ -280,11 +292,14 @@ function makeDoc({ width, height, seconds, label }) {
   out(72, t('  … reading the design here', C.dim));
   out(74, t('  … comparing files (mu-plugins, themes)', C.dim));
   out(76, t('  … comparing files (uploads)', C.dim), 1.6);
-  out(79, t(`  On ${LIVE} this will:`));
-  out(81, t('    change  footer    Site Footer'));
-  out(83, t('    send    media     2 files live does not have (412 KB)'));
-  out(85, t("  Stories, users, comments and the editor's own uploads are not touched.", C.dim), 1.6);
-  out(88, t('· ', C.dim) + t('Dry run: nothing was changed.'), 1.6);
+  out(79, `<tspan font-weight="bold">${t(`  Changes on ${LIVE}`)}</tspan>`);
+  out(80, t('    change   footer     Site Footer'), 1.6);
+  out(82, `<tspan font-weight="bold">${t('  Files to send')}</tspan>`);
+  out(83, t(`    media    2 files    412 KB, not on ${LIVE} yet`), 1.6);
+  out(85, `<tspan font-weight="bold">${t('  Left alone')}</tspan>`);
+  out(86, t("    content             stories, users, comments and the editor's own uploads", C.dim), 1.6);
+  out(88, t('· ', C.dim) + t('Preview only: nothing was sent or changed.'));
+  out(89, t('→ ', C.cyan) + t('To send it: ') + t('Push design to live', C.pink) + t(' in this menu', C.dim), 1.6);
   out(91, t('  Press any key to go back to the menu…', C.dim));
 
   const svg = doc.render('The per-site menu, one screen at a time: pick Live site, preview a design push, read the plan it would send');

@@ -110,7 +110,7 @@ test("the agent connector's tables and settings stay on the site they belong to,
   // read by the sender, refused by the receiver, settings put back at the switch.
   assert.ok(copy.includes("'db_export', { session: sessions.from, own_tables: LOCAL_AGENT_TABLES }"));
   assert.ok(copy.includes("'db_import', { session: sessions.to, own_tables: LOCAL_AGENT_TABLES }"));
-  assert.ok(copy.includes("'db_swap', { ...swapArgs, own_option_prefixes: LOCAL_AGENT_OPTIONS, session: sessions.to }"));
+  assert.ok(copy.includes("'db_swap', { ...swapArgs, own_option_prefixes: OWN_OPTIONS, session: sessions.to }"));
   // A table the receiver refused still counts, or an honest copy would fail the totals check.
   assert.ok(copy.includes('imported.rows + refusedRows !== exported.rows || imported.tables + refusedTables !== exported.tables'));
 

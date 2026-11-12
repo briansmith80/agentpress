@@ -2237,6 +2237,8 @@ async function pushOrPullCommand(args) {
     force: flagOn(args.flags.force),
     dryRun: flagOn(args.flags['dry-run']),
     full: flagOn(args.flags.full),
+    draft: flagOn(args.flags.draft),
+    content: flagOn(args.flags.content) || flagOn(args.flags.stories),
     positional: args.positional,
   };
   await runPushLike(() => (args.command === 'pull' ? pullCommand(site, options) : pushCommand(site, options)));
@@ -2547,8 +2549,10 @@ function printUsage() {
       cmd('push connect <line>', 'Connect this site to a live one, using the line that plugin shows'),
       cmd('push --full', 'First copy: put this whole site on the live one'),
       cmd('push', "Send this site's design up; the live site's stories are not touched"),
+      cmd('push content', 'Send stories written here up to the live site (--draft: as drafts)'),
       cmd('pull', "Bring the live site's content down here"),
       cmd('push status', 'Compare the two; push undo / pull undo step back'),
+      cmd('push editor', 'What editors see on live: push editor hide comments tools / show pages'),
       cmd('npm run agentpress', 'The site menu: admin login, DB snapshots, recent errors'),
       cmd('/verify', 'In an agent: exercise both MCP servers and Oxygen end to end'),
       '',
@@ -2563,7 +2567,8 @@ function printUsage() {
       cmd('--adopt', 'resume: proceed on a folder with no AgentPress marker (it will be overwritten)'),
       cmd('--force-name', 'Scaffold a site whose name looks like a mistyped command'),
       cmd('--dry-run', 'push, pull: show what would change and change nothing'),
-      cmd('--force', 'push --full onto a site with content; pull over unpushed design changes'),
+      cmd('--force', 'push --full onto a site with content; pull over unpushed design or stories'),
+      cmd('--draft', 'push content: every story arrives as a draft, whatever it is here'),
       cmd('--help, -h', 'This screen'),
       cmd('--version, -v', 'Print the version'),
       `  ${dim('Values attach with =, not a space: --premium=none, never --premium none.')}`,
@@ -2581,7 +2586,7 @@ function printUsage() {
   );
 }
 
-const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all', 'full', 'dry-run', 'force']);
+const KNOWN_FLAGS = new Set(['plugins', 'premium', 'adopt', 'force-name', 'all', 'full', 'dry-run', 'force', 'draft', 'content', 'stories']);
 
 /**
  * Is a boolean flag on? The same trap as environment variables (see `envOn` in

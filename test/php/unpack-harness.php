@@ -55,6 +55,9 @@ function is_wp_error($x)
 function add_action()
 {
 }
+function add_filter()
+{
+}
 function wp_mkdir_p($d)
 {
     return is_dir($d) || @mkdir($d, 0777, true);

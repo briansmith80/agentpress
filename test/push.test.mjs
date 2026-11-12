@@ -241,7 +241,7 @@ test('the plugin keeps its connection key out of the database', async () => {
 async function phpReplace(value, from, to) {
   const stub =
     "define('ABSPATH','/');define('MINUTE_IN_SECONDS',60);define('DAY_IN_SECONDS',86400);" +
-    'function add_action(){} function untrailingslashit($s){return rtrim($s,"/\\\\");}' +
+    'function add_action(){} function add_filter(){} function untrailingslashit($s){return rtrim($s,"/\\\\");}' +
     'function is_serialized($d){return is_string($d)&&(bool)preg_match(\'/^([adObis]:|N;)/\',trim($d));}';
   const code = `${stub} require ${JSON.stringify(PLUGIN_PATH)}; $in = json_decode(base64_decode('${Buffer.from(JSON.stringify(value)).toString('base64')}'), true); echo 'OUT:' . base64_encode(json_encode(agentpress_push_replace_value($in, agentpress_push_url_pairs([${JSON.stringify(from)}], ${JSON.stringify(to)}))));`;
   // Skip ONLY when PHP itself is missing: no Laragon PHP folder (the resolver
@@ -292,7 +292,7 @@ test('URL replacement never builds an object out of data that arrived over the n
 async function phpSkipped(paths) {
   const stub =
     "define('ABSPATH','/');define('MINUTE_IN_SECONDS',60);define('DAY_IN_SECONDS',86400);" +
-    'function add_action(){} function untrailingslashit($s){return rtrim($s,"/\\\\");}';
+    'function add_action(){} function add_filter(){} function untrailingslashit($s){return rtrim($s,"/\\\\");}';
   const code = `${stub} require ${JSON.stringify(PLUGIN_PATH)}; $in = json_decode(base64_decode('${Buffer.from(JSON.stringify(paths)).toString('base64')}'), true); $out = []; foreach ($in as $p) { $out[$p] = agentpress_push_path_skipped($p); } echo 'OUT:' . base64_encode(json_encode($out));`;
   let res;
   try {

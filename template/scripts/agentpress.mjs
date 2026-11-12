@@ -7,7 +7,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createInterface, emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, release, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -158,6 +158,67 @@ function openBrowser(url) {
   } catch {
     note(`  ${dim('Open:')} ${url}`);
   }
+}
+
+/**
+ * Put one line of text on the clipboard. Windows PowerShell by absolute path,
+ * with the text handed over in an environment variable, so it is never part
+ * of a command line and nothing parses it.
+ *
+ * Not clip.exe, which was tried first (2026-11-12). It reads plain bytes in
+ * the console's OLD code page, so a folder with an accent in its name arrives
+ * mangled, and the usual cure, UTF-16 with a byte-order mark, puts the mark
+ * itself on the clipboard: an invisible first character in a path that is
+ * about to be pasted into a "File name" box. Windows compares text in a way
+ * that ignores that character, so the first check said the two matched.
+ * Resolves false when it could not, never throws: this is a convenience.
+ */
+function copyText(text) {
+  return new Promise((resolve) => {
+    try {
+      const exe = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const child = spawn(exe, ['-NoProfile', '-NonInteractive', '-Command', 'Set-Clipboard -Value $env:AGENTPRESS_CLIP'], {
+        stdio: 'ignore',
+        shell: false,
+        env: { ...process.env, AGENTPRESS_CLIP: text },
+      });
+      child.on('error', () => resolve(false));
+      child.on('close', (code) => resolve(code === 0));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Open the file's folder in Explorer with the file selected, ready to drag.
+ * The argument is passed verbatim: Explorer wants `/select,"path"` as typed,
+ * and Node's own quoting would wrap the whole thing, switch included, which
+ * opens Documents instead. A `"` cannot be part of a Windows path, so the
+ * quotes cannot be broken out of.
+ */
+function showInFolder(file) {
+  try {
+    spawn(join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [`/select,"${file}"`], {
+      detached: true,
+      stdio: 'ignore',
+      shell: false,
+      windowsVerbatimArguments: true,
+    }).unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A new GitHub issue with the versions already filled in. Only versions:
+ * never the site's name, address or folder, which are nobody else's business
+ * and would be published the moment the issue is.
+ */
+function feedbackUrl() {
+  const body = `**What happened**\n\n\n**What I expected**\n\n\n---\nAgentPress ${VERSION} · Node ${process.version} · Windows ${release()}\n`;
+  return `https://github.com/briansmith80/agentpress/issues/new?body=${encodeURIComponent(body)}`;
 }
 
 /** Where a command resolves on PATH, via System32's where.exe (absolute path: bare-name spawn searches the CWD first, and this runs inside a folder agents write to). Null when not found. */
@@ -449,19 +510,138 @@ async function adminUrl() {
 // --- database snapshots ---
 // A rollback point before letting an AI agent loose on the site. Kept in the
 // site itself (gitignored — a dump is the whole site, password hashes
-// included) and named by timestamp so "latest" is a lexicographic sort, no
-// index file to corrupt.
+// included). There is no index file to corrupt: everything the menu shows
+// about a snapshot is read off the file itself, its name and its size.
 const SNAPSHOT_DIR = join(CWD, 'snapshots');
-function newestSnapshot() {
+// db-<UTC time>[_<note>].sql. The time comes first, so the names still sort
+// oldest to newest for anything that only sorts them (a menu frozen before
+// the list existed picks "the latest" that way).
+const SNAPSHOT_STAMP = /^db-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z(?:_([A-Za-z0-9-]+))?\.sql$/;
+
+/**
+ * The file a snapshot taken at `when` is saved as. The note rides in the
+ * NAME, cut down to letters, digits and hyphens: the path goes through a
+ * shell on its way to wp db export and into a mysql SOURCE statement on the
+ * way back, and this is the one thing a person types that reaches either.
+ */
+function snapshotName(when, noteText = '') {
+  const slug = String(noteText)
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+  return `db-${when.toISOString().replace(/[:.]/g, '-')}${slug ? `_${slug}` : ''}.sql`;
+}
+
+/** When a file in snapshots\ was taken and what it was for. A dump somebody named by hand has no time in its name, so its date is the file's and its name is the note. */
+function describeSnapshot(name, modifiedMs) {
+  const m = SNAPSHOT_STAMP.exec(name);
+  if (m) return { name, at: Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6], +m[7]), note: (m[8] || '').replace(/-/g, ' ') };
+  return { name, at: modifiedMs, note: name.replace(/\.sql$/, '') };
+}
+
+/**
+ * Every snapshot, newest first BY TIME. Sorting the names stopped being right
+ * the day a folder held dumps named by hand: with db-2026-…sql beside
+ * db-before-redesign-…sql, "Restore the latest snapshot" offered the
+ * hand-named one, which was not the newest, because a letter sorts after a
+ * digit (seen on a real site, 2026-11-12: six files, the wrong one offered).
+ * Only names that are safe inside a quoted shell argument are listed; a dump
+ * dropped in under another kind of name is not offered rather than quoted and
+ * hoped for.
+ */
+function listSnapshots() {
+  let names;
   try {
-    const files = readdirSync(SNAPSHOT_DIR)
-      .filter((f) => /^db-.*\.sql$/.test(f))
-      .sort()
-      .reverse();
-    return files[0] || null;
+    names = readdirSync(SNAPSHOT_DIR);
   } catch {
-    return null;
+    return [];
   }
+  return names
+    .filter((f) => /^[A-Za-z0-9][A-Za-z0-9._-]*\.sql$/.test(f))
+    .flatMap((f) => {
+      try {
+        const stat = statSync(join(SNAPSHOT_DIR, f));
+        return stat.isFile() ? [{ ...describeSnapshot(f, stat.mtimeMs), bytes: stat.size }] : [];
+      } catch {
+        // deleted between the listing and the look
+        return [];
+      }
+    })
+    .sort((a, b) => b.at - a.at || (a.name < b.name ? 1 : -1));
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** Local time, and every one the same width so a list of them reads as a column. */
+function snapshotWhen(ms) {
+  const d = new Date(ms);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${two(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+const megabytes = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+// What a pull or a full copy keeps for its own undo (apold_), and what a job
+// that stopped half way left loaded (apnew_). Copies of src/push's plugin
+// constants; test/menu-snapshots.test.mjs holds them together.
+const KEPT_TABLE_PREFIXES = ['apnew_', 'apold_'];
+
+/**
+ * The --exclude_tables argument that keeps those tables out of a snapshot,
+ * and how many it names. They are not the site: `wp db export` dumps every
+ * table in the database, so one snapshot of a site that had been pulled was
+ * 23.4 MB where the site itself was 2.6 MB (seen 2026-11-12), and restoring
+ * it wound the undo of a LATER pull back to whatever it was that day.
+ * Left out, a restore does not touch them at all: a dump only drops the
+ * tables it holds. If the tables cannot be listed, or the list would not fit
+ * on a cmd.exe line (8191 characters), the snapshot is taken whole: bigger,
+ * never missing.
+ */
+async function keptTablesArg() {
+  const r = await runWp(['db', 'tables', '--all-tables']);
+  if (r.code !== 0) return { arg: '', count: 0 };
+  // Names come from the database and go onto a shell line, so only plain
+  // ones are named. A kept table called anything else simply stays in.
+  const kept = r.stdout
+    .split(/\r?\n/)
+    .map((t) => t.trim())
+    .filter((t) => /^[A-Za-z0-9_]+$/.test(t) && KEPT_TABLE_PREFIXES.some((prefix) => t.startsWith(prefix)));
+  const arg = kept.length ? `--exclude_tables=${kept.join(',')}` : '';
+  return arg.length > 6000 ? { arg: '', count: 0 } : { arg, count: kept.length };
+}
+
+/** Save the database as it is now. Answers { ok, name, bytes, left } (left = undo tables kept out of it) or { ok: false, reason }. */
+async function takeSnapshot(noteText = '') {
+  try {
+    mkdirSync(SNAPSHOT_DIR, { recursive: true });
+    // The folder carries its own ignore file, not just an entry in the
+    // site's .gitignore: a site that picked this menu up via `update` may
+    // keep its original .gitignore, and a dump is the whole site including
+    // password hashes — it must never reach a repo either way.
+    const marker = join(SNAPSHOT_DIR, '.gitignore');
+    if (!existsSync(marker)) writeFileSync(marker, '*\n');
+  } catch {
+    // the export below will fail loudly with the real reason
+  }
+  const name = snapshotName(new Date(), noteText);
+  // FORWARD slashes, both directions. `wp db import` feeds the path to the
+  // mysql client inside a SOURCE statement, whose parser reads backslash
+  // pairs as client commands — a real C:\laragon\... path died live with
+  // "ERROR at line 1: Unknown command '\l'". Export takes either; both get
+  // the same shape so the paths in receipts and errors always match.
+  const file = join(SNAPSHOT_DIR, name).replace(/\\/g, '/');
+  // --add-drop-table so restoring is a clean replace, not a pile of
+  // duplicate-key errors on top of the current content.
+  const kept = await keptTablesArg();
+  const r = await runWp(['db', 'export', `"${file}"`, '--add-drop-table', ...(kept.arg ? [kept.arg] : [])]);
+  if (r.code === 0 && existsSync(file)) return { ok: true, name, bytes: statSync(file).size, left: kept.count };
+  // Half a dump must not stay behind: it would head the list as the newest
+  // snapshot, and restoring it drops every table and brings back some.
+  try {
+    unlinkSync(file);
+  } catch {
+    // never written
+  }
+  return { ok: false, name, reason: (r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0] };
 }
 
 /**
@@ -578,10 +758,17 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
  * OS, so this needs no Windows-specific branching. Number keys 1-9 jump
  * straight to that option, matching the Docker original's shortcut.
  */
-async function choose(message, options) {
+async function choose(message, options, above = 0) {
   return new Promise((resolve) => {
     let cursor = 0;
     let renderedLines = 0;
+    // 0 = Exit, but ONLY when an exit option exists. The obvious
+    // "0 selects the last item" is a trap: this same chooser renders the
+    // restore confirm, whose last item is Restore — a reflex 0 there
+    // would overwrite the database instead of leaving the menu.
+    // 'back' is the same promise one level down: it leaves a submenu and
+    // changes nothing.
+    const exitAt = options.findIndex((o) => o.value === 'exit' || o.value === 'back');
     const render = (final) => {
       if (renderedLines > 0) process.stdout.write(`\x1b[${renderedLines}A\x1b[J`);
       // The confirmed choice collapses to ONE line, question and answer
@@ -609,16 +796,44 @@ async function choose(message, options) {
         const answer = fit(options[cursor].label, room - 2 - q.length - 3);
         rows.push(`${pink('?')} ${q}${answer ? ` ${dim('›')} ${answer}` : ''}`);
       } else {
+        // The same rule top to bottom: a list taller than the window scrolls
+        // it, the climb stops at the top row, and every keypress then paints
+        // a second copy below the first. So the two things that only make
+        // the list easier to read (blank rows between groups, the key
+        // legend) are drawn only when the window has rows to spare. `above`
+        // is what the caller already printed over this list.
+        const height = process.stdout.rows || 0;
+        const gaps = options.filter((o, i) => o.gap && i > 0).length;
+        const spare = height ? height - above - options.length - 3 : Infinity;
+        const legend = spare >= 2;
+        const spaced = spare >= 2 + gaps;
+        // Hints start in one column, so the eye reads labels down the left
+        // and reasons down the right instead of a ragged edge (menu review,
+        // 2026-11-12). Dropped in a narrow window, where the padding would
+        // push every hint off the row.
+        const widest = Math.min(32, Math.max(...options.map((o) => o.label.length)));
+        const aligned = room >= 5 + widest + 2 + 30;
         rows.push(`${pink('?')} ${fit(message, room - 2)}`);
         rows.push('');
         options.forEach((o, i) => {
-          const marker = i === cursor ? pink('>') : ' ';
-          const rawLabel = fit(o.label, room - 2);
-          const label = i === cursor ? pink(rawLabel) : rawLabel;
+          if (spaced && o.gap && i > 0) rows.push('');
+          const on = i === cursor;
+          // The key that picks this row. They always worked; nothing showed them.
+          const key = i === exitAt ? '0' : i < 9 ? String(i + 1) : ' ';
+          const rawLabel = fit(o.label, room - 5);
+          const label = o.hint && aligned ? rawLabel.padEnd(widest) : rawLabel;
           // The hint is the part that gives: the label is what gets picked.
-          const hint = o.hint ? fit(o.hint, room - 2 - rawLabel.length - 2) : '';
-          rows.push(`${marker} ${label}${hint ? `  ${dim(hint)}` : ''}`);
+          const hint = o.hint ? fit(o.hint, room - 5 - label.length - 2) : '';
+          // `paint` colours a hint AFTER the cut. A hint that arrived already
+          // coloured was measured with its escape codes and could be cut
+          // through the middle of one.
+          rows.push(`${on ? pink('>') : ' '} ${on ? pink(key) : dim(key)}  ${on ? pink(label) : label}${hint ? `  ${(o.paint || dim)(hint)}` : ''}`);
         });
+        if (legend) {
+          const leave = exitAt >= 0 ? ` · 0 ${String(options[exitAt].label).toLowerCase()}` : '';
+          rows.push('');
+          rows.push(`  ${dim(fit(`↑↓ move · Enter or a number picks${leave}`, room - 2))}`);
+        }
       }
       process.stdout.write(`${rows.join('\n')}\n`);
       renderedLines = rows.length;
@@ -644,18 +859,9 @@ async function choose(message, options) {
       } else if (/^[1-9]$/.test(str || '') && Number(str) <= options.length) {
         cursor = Number(str) - 1;
         return finish(options[cursor].value, true);
-      } else if (str === '0') {
-        // 0 = Exit, but ONLY when an exit option exists. The obvious
-        // "0 selects the last item" is a trap: this same chooser renders the
-        // restore confirm, whose last item is Restore — a reflex 0 there
-        // would overwrite the database instead of leaving the menu.
-        // 'back' is the same promise one level down: it leaves a submenu and
-        // changes nothing.
-        const exitAt = options.findIndex((o) => o.value === 'exit' || o.value === 'back');
-        if (exitAt >= 0) {
-          cursor = exitAt;
-          return finish(options[cursor].value, true);
-        }
+      } else if (str === '0' && exitAt >= 0) {
+        cursor = exitAt;
+        return finish(options[cursor].value, true);
       }
       render(false);
     };
@@ -720,8 +926,9 @@ process.on('exit', showNormalScreen);
 const notes = [];
 const note = (line) => notes.push(line);
 
-function drawHeader() {
-  if (SHOW_BANNER) {
+/** Draws the header and returns how many rows it took, so the list under it knows what is left. */
+function drawHeader(banner) {
+  if (banner) {
     const subtitle = `v${VERSION} · AI-agent-ready WordPress`;
     // Right-aligned by measuring the art, never a hardcoded run of spaces, so
     // the subtitle stays flush with the wordmark's right edge when the version
@@ -730,20 +937,35 @@ function drawHeader() {
     console.log(`\n${BANNER_LINES.map((l) => pink(l)).join('\n')}`);
     console.log(`${pad}${dim(subtitle)}`);
   }
-  console.log(`\n  WordPress  ${link(SITE)}`);
-  console.log(`  Admin      ${link(`${SITE}/wp-admin`)}`);
-  console.log(`  Username   ${env.WP_ADMIN_USER || 'admin'}`);
-  console.log(`  Password   ${env.WP_ADMIN_PASSWORD || '(see .env)'}\n`);
+  // Names dim, values not: the four things someone came here to copy are the
+  // values. Padded RAW, then dimmed.
+  const field = (name, value) => `  ${dim(name.padEnd(9))}  ${value}`;
+  console.log(`\n${field('WordPress', link(SITE))}`);
+  console.log(field('Admin', link(`${SITE}/wp-admin`)));
+  console.log(field('Username', env.WP_ADMIN_USER || 'admin'));
+  console.log(`${field('Password', env.WP_ADMIN_PASSWORD || '(see .env)')}\n`);
   // The version rides in the banner subtitle, so a welcome line is redundant
-  // there. With the banner suppressed it is the only place the version shows.
-  if (!SHOW_BANNER) console.log(`Welcome to AgentPress v${VERSION}.\n`);
+  // there. Without the banner it is the only place the version shows.
+  if (!banner) console.log(`Welcome to AgentPress v${VERSION}.\n`);
+  return banner ? BANNER_LINES.length + 2 + 6 : 6 + 2;
 }
 
-/** A fresh menu screen: the header, then whatever the last action left to say. */
-function menuScreen() {
+/**
+ * A fresh menu screen: the header, then whatever the last action left to say.
+ * Give it the list about to be drawn and it returns the rows used above that
+ * list. In a window too short for everything the wordmark is what goes: it is
+ * the only part nobody needs, and a list that runs off the bottom cannot be
+ * repainted (see the chooser).
+ */
+function menuScreen(options = []) {
   showMenuScreen();
-  drawHeader();
-  if (notes.length) console.log(`${notes.splice(0).join('\n')}\n`);
+  const pending = notes.splice(0);
+  const noteRows = pending.length ? pending.join('\n').split('\n').length + 1 : 0;
+  const height = process.stdout.isTTY ? process.stdout.rows || 0 : 0;
+  const banner = SHOW_BANNER && !(height && BANNER_LINES.length + 2 + 6 + noteRows + options.length + 3 > height);
+  const used = drawHeader(banner);
+  if (pending.length) console.log(`${pending.join('\n')}\n`);
+  return used + noteRows;
 }
 
 /**
@@ -766,18 +988,22 @@ function resultScreen(trail) {
   console.log(`\n${pink('?')} ${trail.join(` ${dim('›')} `)}\n`);
 }
 
-/** Hold a result until it has been read, then take the prompt away again so it never ends up in that log. */
-function holdResult() {
+/**
+ * Hold a result until it has been read, then take the prompt away again so it
+ * never ends up in that log. Resolves with the key pressed, lower case, for
+ * the one caller that offers a second key.
+ */
+function holdResult(prompt = 'Press any key to go back to the menu…') {
   return new Promise((resolve) => {
-    process.stdout.write(`\n  ${dim('Press any key to go back to the menu…')}`);
+    process.stdout.write(`\n  ${dim(prompt)}`);
     emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdin.once('keypress', () => {
+    process.stdin.once('keypress', (str) => {
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdout.write('\r\x1b[2K');
-      resolve();
+      resolve(String(str || '').toLowerCase());
     });
   });
 }
@@ -831,6 +1057,10 @@ function runInherit(cmd, args = [], { ownErrors = false, env = undefined } = {})
 
 // --- the live site (push and pull) ---
 
+// The file `push plugin` writes into the site folder. A copy, like everything
+// else in this frozen file; test/parity.test.mjs holds it to PLUGIN_SLUG.
+const PUSH_ZIP = 'agentpress-push.zip';
+
 /** Run the main tool in this site folder: the checkout it came from if that is still there, else the published package. */
 function runCli(args) {
   // Quoted for the shell: a checkout can live under a path with spaces, and
@@ -849,14 +1079,14 @@ function liveHost() {
   }
 }
 
-/** One typed or pasted line. Ctrl+C gives '' instead of leaving a dead prompt: with no SIGINT listener readline only pauses, and the menu would sit there unable to read a key. */
-function askLine(question) {
+/** One typed or pasted line. Ctrl+C gives `cancelled` ('' unless the caller needs to tell it from a bare Enter) instead of leaving a dead prompt: with no SIGINT listener readline only pauses, and the menu would sit there unable to read a key. */
+function askLine(question, cancelled = '') {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     let answered = false;
     rl.on('SIGINT', () => rl.close());
     rl.on('close', () => {
-      if (!answered) resolve('');
+      if (!answered) resolve(cancelled);
     });
     rl.question(question, (answer) => {
       answered = true;
@@ -878,32 +1108,46 @@ async function liveSiteMenu() {
     const setup = [
       { value: 'push plugin', label: 'Make the plugin zip', hint: 'step 1: upload it on the live site and activate it' },
       { value: 'connect', label: 'Connect', hint: 'step 2: paste the line from Tools → AgentPress Push on the live site' },
-      { value: 'back', label: 'Back' },
+      // Only once there is a live site to ask. Locked is what a live site
+      // starts as: pages are the design's, and a design push replaces them.
+      ...(host
+        ? [
+            // Here and not in the day-to-day list (operator's call, 2026-11-12):
+            // it is used once per live site, it is the one item that replaces
+            // everything there, and it sat one key away from "Undo…".
+            { value: 'push --full', label: 'First launch: full copy to live', hint: 'step 3, once: replaces everything on live', paint: yellow, gap: true },
+            // One item, and the command asks which to flip: the list is the
+            // live site's to give, and this frozen file cannot know it.
+            { value: 'push editor', label: 'What editors see on live', hint: 'hide Pages, Comments, Tools or the news box from the client', gap: true },
+          ]
+        : []),
+      { value: 'back', label: 'Back', gap: true },
     ];
     const main = [
       { value: 'push status', label: 'Check status', hint: 'compare this site with live' },
       { value: 'push --dry-run', label: 'Preview a design push', hint: 'shows the plan, sends nothing' },
-      { value: 'push', label: 'Push design to live', hint: 'asks first; stories on live are kept' },
+      { value: 'push', label: 'Push design to live', hint: 'asks first; stories on live are kept', gap: true },
+      { value: 'push content', label: 'Push content to live', hint: 'stories written here; asks first, only adds' },
       { value: 'pull', label: 'Pull content from live', hint: 'asks first; this local site becomes a copy of live' },
-      { value: 'undo', label: 'Undo…', hint: 'the last push, pull or full copy' },
-      { value: 'push --full', label: 'First launch: full copy to live', hint: yellow('replaces everything on live') },
-      { value: 'setup', label: 'Set up or reconnect…', hint: 'plugin zip, new connection key' },
-      { value: 'back', label: 'Back' },
+      { value: 'undo', label: 'Undo…', hint: 'the last design or content push, pull or full copy', gap: true },
+      { value: 'setup', label: 'Set up or reconnect…', hint: 'plugin zip, connection key, first full copy, what editors see' },
+      { value: 'back', label: 'Back', gap: true },
     ];
     // Back first, like every other chooser that can lose work: Enter on a
     // reflex must not roll a site back. Each command asks again itself.
     const undo = [
       { value: 'back', label: 'Back' },
       { value: 'push undo', label: 'The last design push', hint: 'live goes back to its saved design' },
+      { value: 'push undo --content', label: 'The last content push', hint: 'those stories go to the bin on live' },
       { value: 'pull undo', label: 'The last pull', hint: 'this local database goes back' },
-      { value: 'push undo --full', label: 'The last full copy', hint: yellow('live goes back to its earlier database') },
+      { value: 'push undo --full', label: 'The last full copy', hint: 'live goes back to its earlier database', paint: yellow },
     ];
     const title = host ? `Live site ${host}` : 'Live site: not connected yet';
     // The path shown above a command's output: the menus that led to it.
     const trail = [title];
     let picked = host ? main : setup;
-    menuScreen();
-    let choice = await choose(title, picked);
+    let above = menuScreen(picked);
+    let choice = await choose(title, picked, above);
     // Back (or Esc) inside a nested chooser returns to THIS menu, not all the
     // way out: one step back per keypress.
     if (choice === 'setup' || choice === 'undo') {
@@ -911,8 +1155,8 @@ async function liveSiteMenu() {
       const heading = choice === 'setup' ? 'Set up the live site' : 'Undo what?';
       trail.push(picked.find((o) => o.value === choice).label);
       picked = nested;
-      menuScreen();
-      choice = await choose(heading, nested);
+      above = menuScreen(nested);
+      choice = await choose(heading, nested, above);
       if (choice === null || choice === 'back') continue;
     }
     if (choice === null || choice === 'back') return;
@@ -925,10 +1169,127 @@ async function liveSiteMenu() {
       if (!line) console.log(`  ${dim('(nothing pasted, nothing changed)')}`);
       else if (!/^agentpress-push:[A-Za-z0-9_-]+$/.test(line)) console.log(`  ${red('✖')} That is not a connection line. It starts with "agentpress-push:".`);
       else await runCli(['push', 'connect', line]);
+    } else if (choice === 'push plugin') {
+      await runCli(choice.split(' '));
+      // The next step is in a browser, in WordPress's "choose a file" box, a
+      // long way from this folder (operator's ask, 2026-11-12). So the path
+      // is already on the clipboard to paste there, and one key opens the
+      // folder with the zip selected, to drag onto the upload box instead.
+      const zip = join(CWD, PUSH_ZIP);
+      if (existsSync(zip)) {
+        if (await copyText(zip)) console.log(`  ${dim('→ copied its path: paste it into the "File name" box when WordPress asks for the file')}`);
+        const key = await holdResult('Press o to open its folder and drag the zip across, any other key for the menu…');
+        if (key === 'o') note(showInFolder(zip) ? `  ${dim('→ opened the folder with the plugin zip selected')}` : `  ${dim(`(could not open Explorer; the zip is at ${zip})`)}`);
+        continue;
+      }
     } else {
       await runCli(choice.split(' '));
     }
     await holdResult();
+  }
+}
+
+/** A snapshot or restore that did not work: the reason on the normal screen, held until read. */
+async function snapshotFailed(trail, what, reason, tool) {
+  resultScreen(trail);
+  console.log(`  ${red('✖')} ${what} failed: ${reason}`);
+  // Only reachable when the resolver found nothing to prepend to PATH —
+  // the machine has no Laragon-shaped MySQL tree and no tools on PATH.
+  if (/not recognized/i.test(reason)) {
+    console.log(`  ${dim(`${tool} isn't on PATH and no Laragon MySQL was found — in Laragon:`)}`);
+    console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
+  }
+  await holdResult();
+}
+
+/**
+ * Every snapshot with its date, note and size; pick one to restore or delete
+ * it (operator's ask, 2026-11-12: the menu could make snapshots and restore
+ * only "the latest", so nothing said how many there were, when they were
+ * made or what for, and the only way to remove one was Explorer).
+ */
+async function snapshotsMenu() {
+  const title = 'Restore or delete a snapshot';
+  let page = 0;
+  for (;;) {
+    const all = listSnapshots();
+    if (!all.length) return;
+    // The chooser cannot scroll (see its repaint), so a long list is paged.
+    // Under the header without its wordmark there are 8 rows gone, then the
+    // question, a blank, up to three rows that are not snapshots, and the
+    // row the cursor rests on.
+    const height = process.stdout.rows || 0;
+    const size = Math.max(3, Math.min(8, height ? height - 14 : 8));
+    const pages = Math.ceil(all.length / size);
+    page = Math.min(page, pages - 1);
+    const list = [
+      ...all.slice(page * size, page * size + size).map((s) => ({ value: s.name, label: snapshotWhen(s.at), hint: [s.note, megabytes(s.bytes)].filter(Boolean).join(' · ') })),
+      ...(page + 1 < pages ? [{ value: 'older', label: 'Older…', hint: `${all.length - (page + 1) * size} more`, gap: true }] : []),
+      ...(page > 0 ? [{ value: 'newer', label: 'Newer…', gap: page + 1 >= pages }] : []),
+      { value: 'back', label: 'Back', gap: true },
+    ];
+    const total = megabytes(all.reduce((sum, s) => sum + s.bytes, 0));
+    const above = menuScreen(list);
+    const picked = await choose(`Snapshots: ${all.length} saved, ${total}, newest first`, list, above);
+    if (picked === null || picked === 'back') return;
+    if (picked === 'older' || picked === 'newer') {
+      page += picked === 'older' ? 1 : -1;
+      continue;
+    }
+    const shot = all.find((s) => s.name === picked);
+    const when = snapshotWhen(shot.at);
+    // Back first ON PURPOSE, like every chooser that can lose work: Enter on
+    // a reflex must not overwrite the database or delete a file.
+    // "overwrites", not "replaces ALL": the dump drops and recreates the
+    // tables IT contains, so posts/pages/settings/users roll back — but a
+    // table some plugin created after the snapshot survives. The hint must
+    // not promise a cleaner wipe than wp db import performs.
+    const actions = [
+      { value: 'back', label: 'Back' },
+      { value: 'restore', label: 'Restore it', hint: 'saves the database as it is now, then overwrites it', paint: yellow },
+      { value: 'delete', label: 'Delete it', hint: `removes the file for good (${megabytes(shot.bytes)})`, paint: yellow },
+    ];
+    note(`  ${dim(`snapshots\\${shot.name}`)}`);
+    const room = menuScreen(actions);
+    const what = await choose(`${when}${shot.note && shot.note !== shot.name.replace(/\.sql$/, '') ? ` · ${shot.note}` : ''}`, actions, room);
+    if (what === 'restore') {
+      console.log(`  ${dim('… saving the database as it is now, then restoring…')}`);
+      // A restore used to be the one thing here with no way back: pick the
+      // wrong one of six and the work since is gone. So what is about to be
+      // overwritten is saved first, and if that cannot be saved nothing is
+      // restored.
+      const kept = await takeSnapshot('before restore');
+      if (!kept.ok) {
+        await snapshotFailed([title, when, 'Restore it'], 'nothing was restored: saving the current database first', kept.reason, 'mysqldump');
+        continue;
+      }
+      // Forward slashes for the same reason as the export: mysql's SOURCE
+      // parser eats backslash pairs as client commands.
+      const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, shot.name).replace(/\\/g, '/')}"`]);
+      if (r.code === 0) {
+        note(`  ${dim(`→ database restored from snapshots\\${shot.name}`)}`);
+        note(`  ${dim(`→ what it replaced was saved as snapshots\\${kept.name} (${megabytes(kept.bytes)})`)}`);
+      } else {
+        const reason = (r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0];
+        await snapshotFailed([title, when, 'Restore it'], 'restore', reason, 'mysql');
+      }
+    } else if (what === 'delete') {
+      const confirm = [
+        { value: false, label: 'Cancel' },
+        { value: true, label: 'Delete', hint: 'it cannot be brought back', paint: yellow },
+      ];
+      note(`  ${dim(`snapshots\\${shot.name}`)}`);
+      const under = menuScreen(confirm);
+      const sure = await choose(`Delete the snapshot from ${when}?`, confirm, under);
+      if (sure) {
+        try {
+          unlinkSync(join(SNAPSHOT_DIR, shot.name));
+          note(`  ${dim(`→ deleted snapshots\\${shot.name} (${megabytes(shot.bytes)})`)}`);
+        } catch (err) {
+          note(`  ${dim(`(could not delete snapshots\\${shot.name}: ${err.message})`)}`);
+        }
+      }
+    }
   }
 }
 
@@ -1044,47 +1405,54 @@ for (;;) {
   const agents = (cfg.agents || []).filter((a) => AGENT_LABELS[a]);
   // Detection-driven entries: an item appears only when its situation does.
   // "Point MCP here" shows up exactly when some agent's hint above it carries
-  // a ⚠ (wiring absent or claimed by another site); "Restore" only once a
-  // snapshot exists; "Update this site" only when npm has a newer version.
+  // a ⚠ (wiring absent or claimed by another site); the snapshot list only
+  // once a snapshot exists; "Update this site" only when npm has a newer version.
   // A menu of remedies for problems you don't have is noise.
   let wiringBroken = false;
   const agentOptions = agents.map((a) => {
     const wired = wiredHostFor(a);
     let hint;
     if (wired === false) {
-      hint = yellow('⚠ no MCP wiring — run rewire');
+      hint = '⚠ no MCP wiring — run rewire';
       wiringBroken = true;
     } else if (wired && wired !== HOST.toLowerCase()) {
-      hint = yellow(`⚠ MCP points at ${wired}`);
+      hint = `⚠ MCP points at ${wired}`;
       wiringBroken = true;
     } else if (wired) hint = 'MCP points here';
-    return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint };
+    // A warning is yellow, and painted after the row is cut to the window.
+    return { value: `agent:${a}`, label: `Open ${AGENT_LABELS[a]}`, hint, ...(hint && hint.startsWith('⚠') ? { paint: yellow } : {}) };
   });
-  const latestSnapshot = newestSnapshot();
+  const snapshots = listSnapshots();
   const debug = debugLogState();
   const live = liveHost();
   const options = [
     { value: 'admin', label: 'Open WP Admin', hint: 'one-click login' },
     { value: 'site', label: 'Open the site', hint: 'front end' },
     ...agentOptions,
-    ...(wiringBroken ? [{ value: 'rewire', label: 'Point MCP here', hint: yellow('⚠ fixes the wiring above') }] : []),
-    { value: 'snapshot', label: 'Snapshot the database', hint: 'rollback point before agent sessions' },
-    ...(latestSnapshot ? [{ value: 'restore', label: 'Restore the latest snapshot', hint: latestSnapshot }] : []),
+    ...(wiringBroken ? [{ value: 'rewire', label: 'Point MCP here', hint: '⚠ fixes the wiring above', paint: yellow }] : []),
+    { value: 'snapshot', label: 'Snapshot the database', hint: 'rollback point before agent sessions', gap: true },
+    ...(snapshots.length
+      ? [{ value: 'snapshots', label: 'Restore or delete a snapshot…', hint: `${snapshots.length} saved, ${megabytes(snapshots.reduce((sum, x) => sum + x.bytes, 0))} · newest ${snapshotWhen(snapshots[0].at)}` }]
+      : []),
     // Always listed, unlike the remedies above: it is a feature, not a fix,
     // and an unconnected site is exactly where someone goes looking for it.
-    { value: 'live', label: 'Live site', hint: live ? `push and pull · ${live}` : 'connect one to push and pull' },
+    { value: 'live', label: 'Live site', hint: live ? `push and pull · ${live}` : 'connect one to push and pull', gap: true },
     {
+      gap: true,
       value: 'errors',
       label: 'Show recent errors',
       hint: existsSync(debug.path) ? 'wp-content/debug.log' : debug.enabled ? 'debug on — nothing logged yet' : 'debug logging is off',
     },
     ...(codeEditor ? [{ value: 'editor', label: `Open in ${codeEditor.label}`, hint: 'this site folder' }] : []),
     { value: 'shell', label: 'Open a terminal here' },
+    // Opens a page in the browser and sends nothing by itself: the person
+    // reads what will be published and presses the button, or does not.
+    { value: 'feedback', label: 'Give feedback or report a bug', hint: 'opens a new GitHub issue in your browser', gap: true },
     ...(latestVersion ? [{ value: 'update', label: 'Update this site', hint: `v${VERSION} → v${latestVersion}` }] : []),
     { value: 'exit', label: 'Exit' },
   ];
-  menuScreen();
-  const choice = await choose('What would you like to do?', options);
+  const above = menuScreen(options);
+  const choice = await choose('What would you like to do?', options, above);
   const label = options.find((o) => o.value === choice)?.label;
 
   // Two kinds of action, two ways of answering:
@@ -1105,6 +1473,9 @@ for (;;) {
   } else if (choice === 'site') {
     openBrowser(SITE);
     note(`  ${dim(`→ opened ${SITE} in your browser`)}`);
+  } else if (choice === 'feedback') {
+    openBrowser(feedbackUrl());
+    note(`  ${dim('→ opened a new GitHub issue in your browser, with your versions filled in (needs a GitHub account)')}`);
   } else if (choice === 'editor') {
     const ok = await trySpawnDetached(codeEditor.exe, [CWD], { shell: false });
     note(ok ? `  ${dim(`→ opened ${codeEditor.label} in this folder`)}` : `  ${dim(`(could not launch ${codeEditor.label} — is it still installed?)`)}`);
@@ -1121,74 +1492,19 @@ for (;;) {
     // confirmation.
     await holdResult();
   } else if (choice === 'snapshot') {
-    try {
-      mkdirSync(SNAPSHOT_DIR, { recursive: true });
-      // The folder carries its own ignore file, not just an entry in the
-      // site's .gitignore: a site that picked this menu up via `update` may
-      // keep its original .gitignore, and a dump is the whole site including
-      // password hashes — it must never reach a repo either way.
-      const marker = join(SNAPSHOT_DIR, '.gitignore');
-      if (!existsSync(marker)) writeFileSync(marker, '*\n');
-    } catch {
-      // the export below will fail loudly with the real reason
+    // A note is what makes six of these tellable apart a week later. Enter
+    // skips it; Ctrl+C backs out without taking one.
+    menuScreen();
+    const typed = await askLine(`${pink('?')} What is this snapshot for? ${dim('(a few words, or Enter for none; Ctrl+C cancels)')} `, null);
+    if (typed === null) note(`  ${dim('(no snapshot taken)')}`);
+    else {
+      console.log(`  ${dim('… saving the database…')}`);
+      const shot = await takeSnapshot(typed);
+      if (shot.ok) note(`  ${dim(`→ database saved to snapshots\\${shot.name} (${megabytes(shot.bytes)}${shot.left ? `, without the ${shot.left} tables kept for a push or pull undo` : ''})`)}`);
+      else await snapshotFailed([label], 'snapshot', shot.reason, 'mysqldump');
     }
-    const name = `db-${new Date().toISOString().replace(/[:.]/g, '-')}.sql`;
-    // FORWARD slashes, both directions. `wp db import` feeds the path to the
-    // mysql client inside a SOURCE statement, whose parser reads backslash
-    // pairs as client commands — a real C:\laragon\... path died live with
-    // "ERROR at line 1: Unknown command '\l'". Export takes either; both get
-    // the same shape so the paths in receipts and errors always match.
-    const file = join(SNAPSHOT_DIR, name).replace(/\\/g, '/');
-    // --add-drop-table so restoring is a clean replace, not a pile of
-    // duplicate-key errors on top of the current content.
-    const r = await runWp(['db', 'export', `"${file}"`, '--add-drop-table']);
-    if (r.code === 0 && existsSync(file)) {
-      const mb = (statSync(file).size / (1024 * 1024)).toFixed(1);
-      note(`  ${dim(`→ database saved to snapshots\\${name} (${mb} MB)`)}`);
-    } else {
-      const reason = (r.stderr || r.stdout || 'wp db export did not run').trim().split('\n')[0];
-      resultScreen([label]);
-      console.log(`  ${red('✖')} snapshot failed: ${reason}`);
-      // Only reachable when the resolver above found nothing to prepend —
-      // the machine has no Laragon-shaped MySQL tree and no tools on PATH.
-      if (/not recognized/i.test(reason)) {
-        console.log(`  ${dim("mysqldump isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
-        console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
-      }
-      await holdResult();
-    }
-  } else if (choice === 'restore') {
-    const name = newestSnapshot();
-    if (!name) {
-      note(`  ${dim('(no snapshot found — take one first)')}`);
-    } else {
-      // Cancel is first ON PURPOSE: Enter on a reflex must not overwrite the
-      // database. "overwrites", not "replaces ALL": the dump drops and
-      // recreates the tables IT contains, so posts/pages/settings/users roll
-      // back — but a table some plugin created after the snapshot survives.
-      // The hint must not promise a cleaner wipe than wp db import performs.
-      menuScreen();
-      const sure = await choose(`Restore ${name} over the current database?`, [
-        { value: false, label: 'Cancel' },
-        { value: true, label: 'Restore', hint: yellow('overwrites the current WordPress content') },
-      ]);
-      if (sure) {
-        // Forward slashes for the same reason as the export above: mysql's
-        // SOURCE parser eats backslash pairs as client commands.
-        const r = await runWp(['db', 'import', `"${join(SNAPSHOT_DIR, name).replace(/\\/g, '/')}"`]);
-        if (r.code === 0) note(`  ${dim(`→ database restored from snapshots\\${name}`)}`);
-        else {
-          const reason = (r.stderr || r.stdout || 'wp db import did not run').trim().split('\n')[0];
-          resultScreen([label]);
-          console.log(`  ${red('✖')} restore failed: ${reason}`);
-          if (/not recognized/i.test(reason)) {
-            console.log(`  ${dim("mysql isn't on PATH and no Laragon MySQL was found — in Laragon:")}`);
-            console.log(`  ${dim('right-click menu ▸ Tools ▸ Path ▸ Add Laragon to Path, then retry.')}`);
-          }
-          await holdResult();
-        }
-      }
-    }
+  } else if (choice === 'snapshots') {
+    await snapshotsMenu();
   } else if (choice === 'errors') {
     resultScreen([label]);
     if (!existsSync(debug.path)) {

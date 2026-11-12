@@ -142,6 +142,10 @@ One rule decides what travels:
   code the design needs and the theme the site runs on (none, with Oxygen's themes off).
 - **Content belongs to the live site and only comes down.** Stories, comments, users, media
   the editor uploaded.
+- **One way up for content: stories written locally.** Your AI agent works on the local
+  site only (its plugins never go to the live one), so what it writes starts on the wrong
+  side. `push content` sends those stories up once you have read them. It only adds: a
+  story the live site already has is the editor's and is not replaced.
 
 So after launch you keep designing locally and `push`, while the editor keeps writing on
 live, and neither wipes the other.
@@ -169,16 +173,22 @@ Your connection key stays valid, and the command tells you when this is needed.
 **Day to day:**
 
 ```bash
-… push status            # compare the two sites: versions, counts, same design or not
+… push status            # compare the two sites: versions, plugins that differ, counts, design
+… push editor            # what editors see in live's wp-admin; asks which to switch
+… push editor hide comments tools news    # or say it outright (show puts them back)
 … push --full            # first launch only: files + whole database up
 … push                   # after that: design only. Shows the plan, then asks
+… push content           # stories written here, up to live. Shows the plan, then asks
+… push content --draft   # the same, but every one arrives as a draft
 … push undo              # put live back on the design it had before the last push
+… push undo --content    # the stories last sent go to the bin on live
 … push undo --full       # put live back on the database it had before the last full copy
 … pull                   # live's database and uploads down; local becomes a copy of live
 … pull undo              # put the local database back as it was before the pull
 ```
 
-Add `--dry-run` to `push`, `push --full` or `pull` to see the plan and send nothing.
+Add `--dry-run` to `push`, `push content`, `push --full` or `pull` to see the plan and send
+nothing. `push content 153 my-slug` sends only the stories you name, by number or slug.
 
 All of it is also in the site menu: `npm run agentpress`, then **Live site**. Run `update`
 in a site scaffolded before 1.11.0 to get that entry.
@@ -205,6 +215,17 @@ in a site scaffolded before 1.11.0 to get that entry.
 - **A full copy is a copy.** `push --full` sends every theme folder and every upload file,
   including ones a design push would leave alone. Use it for the first launch, and `push`
   after that.
+- **A sent story arrives as it is here.** Published here means public there the moment it
+  lands, so the plan names those and asks; answer `d` to send them as drafts instead, or
+  use `--draft`. Its images, featured image, categories, tags and custom fields go with it.
+  The author is matched by username; with no such account on live it goes up under the
+  live site's first administrator, and the plan says so.
+- **What `push content` leaves alone, and says so:** a story the editor changed on live
+  after you sent it, one that was deleted there, one in the bin there, one whose address
+  another story on live already has, and one built in Oxygen. Change a sent story here
+  and send again, and live is updated only if nobody touched it there.
+- **After a pull, every story is the live site's.** To change one after that, change it on
+  live. Write new ones locally and send them.
 
 **Built to be hard to hurt yourself with:**
 
@@ -214,9 +235,39 @@ in a site scaffolded before 1.11.0 to get that entry.
   `--yes` alone is refused there; a script needs `--force` as well.
 - `pull` refuses if the local design has changes that were never pushed, because a pull
   would replace them. Push first, or `--force`.
+- `pull` refuses the same way while stories written here have not been sent, and names
+  them: a pull replaces the local database, and they live in it.
+- `push content` never writes over an upload on live. If live has a different file under
+  the same name as one of a story's images, that story is left and the file is named.
 - A design push saves the live design first (last ten kept), and puts design items it
   removes in the bin instead of deleting them.
 - Files are never deleted on the receiving end.
+- **Pages on the live site are locked to administrators** from the moment the plugin is
+  active there. Pages are part of the design, and a design push replaces a page built in
+  Oxygen whatever was changed on live, so an Editor account (usually the client's) no
+  longer sees Pages at all. Stories, media and comments are untouched. A local site
+  starts open.
+- **You choose what an editor sees in the live site's wp-admin.** `push editor` lists
+  Pages, Comments, Tools and WordPress news (the dashboard news box and the W menu), shows
+  which are hidden, and asks which to switch. `push editor hide comments tools` and
+  `push editor show pages` do it without asking, and the same list is a set of tick boxes
+  under Tools → AgentPress Push on the live site. A hidden entry leaves the menu and its
+  screens send the person back to the dashboard. Administrators always see everything.
+  Appearance, Plugins, Users, Settings and Oxygen are not in the list because an editor
+  is never shown them; Posts, Media and Profile are not because they are the job.
+- **`push status` says where the two sites have drifted:** WordPress, PHP and Oxygen
+  versions, every plugin that is a different version or switched on at one end only, which
+  plugins the live site updates by itself and which have an update waiting, whether each
+  site is hidden from search engines, and live's upload and memory limits. A live site
+  with auto-updates on moves ahead of the local one without anyone touching it; update
+  the local copy so you build against what live runs.
+- **What does not travel with a design or content push:** WordPress menus (Appearance →
+  Menus), custom field GROUPS (the definitions a plugin like ACF stores), widgets and
+  settings. They move only with `push --full` or `pull`. The custom field VALUES on a
+  story do go up with `push content`.
+- A long transfer shows a progress bar. In the site menu, **Make the plugin zip** also
+  copies the zip's path to the clipboard (paste it into the file box when WordPress asks)
+  and offers to open the folder with the file selected.
 - **The agent plugins stay local.** `agent-connector-for-wp` and
   `universal-abilities-plugin` give AI agents shell and PHP access. A push never sends
   them and never switches them on at the other end. Their sign-in tokens and settings
@@ -326,16 +377,26 @@ Every site ships a small interactive menu — `npm run agentpress` from the site
 - **Open your agent** (Claude Code, Cursor, Codex, OpenCode) right in the site — warning
   first when an agent's MCP wiring points at a *different* site, with a
   **Point MCP here** item that runs `rewire` for you whenever that warning is showing.
-- **Snapshot the database** / **Restore the latest snapshot** — a dated `wp db export`
+- **Snapshot the database** / **Restore or delete a snapshot…** — a dated `wp db export`
   kept in the site's `snapshots\` folder (gitignored: a dump is the whole site, password
-  hashes included). Take one before letting an agent loose on the site; restoring is a
-  two-keystroke rollback.
+  hashes included). Take one before letting an agent loose on the site, and say in a few
+  words what it is for: the note goes into the file name. Every snapshot is a new file and
+  none is ever removed for you. The list shows each one's date, note and size, newest
+  first; pick one to restore it or delete it. Restoring saves the database as it is now
+  first (noted "before restore"), so a restore can itself be rolled back, and if that save
+  fails nothing is restored. A snapshot is the database only: uploaded files are not in
+  it, and nor are the copies a pull or a full copy keeps for its own undo, so restoring a
+  snapshot leaves those undos as they are.
 - **Live site** — push and pull without typing the commands: check status, preview a
-  design push, push, pull, undo, and the two set-up steps (make the plugin zip, paste the
-  connection line). Each item runs the same command you could type, so the plan and the
+  design push, push, pull, undo, and under **Set up or reconnect…** the set-up steps
+  (make the plugin zip, paste the connection line, the first full copy, what editors
+  see on live). Each item runs the same command you could type, so the plan and the
   questions are identical. See "Push to live, pull from live" above.
 - **Show recent errors** — the tail of `wp-content\debug.log`, or how to turn debug
   logging on when there isn't one.
+- **Give feedback or report a bug** — opens a new GitHub issue in your browser with the
+  AgentPress, Node and Windows versions filled in. Nothing is sent until you press
+  submit there, and nothing about the site (its name, address or folder) is included.
 - **Open in VS Code** (or Cursor) — the site folder in your editor. Appears only when one
   is actually installed.
 - **Open a terminal here** — Windows Terminal with your default profile, already in the

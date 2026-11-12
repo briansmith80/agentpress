@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AgentPress Push
  * Description: Receives a site pushed from a local AgentPress install, and hands this site's content back for a pull. Driven by `agentpress push` / `agentpress pull`; does nothing until a connection key is created under Tools > AgentPress Push.
- * Version: 0.1.8
+ * Version: 0.1.11
  * Author: AgentPress
  * License: GPL-2.0-or-later
  * Requires PHP: 7.4
@@ -28,10 +28,20 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-const AGENTPRESS_PUSH_VERSION = '0.1.8';
+const AGENTPRESS_PUSH_VERSION = '0.1.11';
 const AGENTPRESS_PUSH_FORMAT = 1;
 const AGENTPRESS_PUSH_STEP_SECONDS = 8;
 const AGENTPRESS_PUSH_UID = '_agentpress_uid';
+// Stories (see the Stories section). SENT is the dev site's note on a story:
+// `live` when the live site has it as its own, a fingerprint when this tool
+// sent it. LIVE is the receiving site's note of what arrived, UNDONE marks a
+// story an undo of ours put in the bin. SYNCED names the live site those
+// notes were taken against; it is an option, so it must stay with its own
+// site through a copy (LOCAL_STORY_OPTIONS in push.mjs).
+const AGENTPRESS_PUSH_STORY_SENT = '_agentpress_story_sent';
+const AGENTPRESS_PUSH_STORY_LIVE = '_agentpress_story_live';
+const AGENTPRESS_PUSH_STORY_UNDONE = '_agentpress_story_undone';
+const AGENTPRESS_PUSH_STORIES_SYNCED = 'agentpress_push_stories_synced';
 const AGENTPRESS_PUSH_NEW = 'apnew_';
 const AGENTPRESS_PUSH_OLD = 'apold_';
 const AGENTPRESS_PUSH_TMP = 'aptmp_';
@@ -87,7 +97,7 @@ function agentpress_push_session_dir($session, $create = false)
 /** Files a client may put into, or get out of, a session. Nothing else. */
 function agentpress_push_session_files()
 {
-    return ['db.ndjson', 'files.pack', 'want.ndjson', 'manifest.ndjson', 'design.json'];
+    return ['db.ndjson', 'files.pack', 'want.ndjson', 'manifest.ndjson', 'design.json', 'stories.json'];
 }
 
 function agentpress_push_rrmdir($dir)
@@ -390,8 +400,255 @@ function agentpress_push_resolve_path($rel)
 }
 
 /* ------------------------------------------------------------------------
+ * Pages are the design's, so on a live site only administrators edit them
+ *
+ * The person writing on the live site is usually a client with the Editor
+ * role. Editors can edit pages, and a page is not theirs the way a story is:
+ * the ones built in Oxygen are pushed from the dev site, and a change made
+ * on live is replaced by the next push without anyone being told. So on a
+ * site that is not a dev machine, page editing is closed to everyone but
+ * administrators unless it is opened on purpose (operator's call,
+ * 2026-11-12). Stories, media and comments are untouched.
+ *
+ * The switch is a FILE, like the connection key and for the same reason: a
+ * full copy replaces the options table, and the answer must not arrive from
+ * the dev site inside it.
+ * --------------------------------------------------------------------- */
+
+/** May people who are not administrators edit pages here? `$set` ('open', 'locked') changes the answer first. */
+function agentpress_push_pages_open($set = null)
+{
+    static $cached = null;
+    // Not agentpress_push_data_dir(): that creates the folder, and this is asked on every admin request.
+    $file = WP_CONTENT_DIR . '/agentpress-push-data/pages-access.txt';
+    if ($set === 'open' || $set === 'locked') {
+        @file_put_contents(agentpress_push_data_dir() . '/pages-access.txt', $set);
+        $cached = null;
+    }
+    if ($cached === null) {
+        $state = is_file($file) ? trim((string) @file_get_contents($file)) : '';
+        // Never chosen: closed on a public site, open on a dev machine, where the only person is the developer.
+        $cached = $state === 'open' ? true : ($state === 'locked' ? false : agentpress_push_is_local_host());
+    }
+    return $cached;
+}
+
+/**
+ * Takes the page capabilities away from anyone who is not an administrator
+ * while pages are closed. WordPress then hides the Pages menu, the "Edit
+ * page" links and the REST routes by itself: every one of them asks for
+ * these. Reading a page is not touched.
+ */
+function agentpress_push_lock_pages($allcaps)
+{
+    if (!empty($allcaps['manage_options']) || agentpress_push_pages_open()) {
+        return $allcaps;
+    }
+    foreach (['edit_pages', 'edit_others_pages', 'edit_published_pages', 'edit_private_pages', 'publish_pages', 'delete_pages', 'delete_others_pages', 'delete_published_pages', 'delete_private_pages'] as $cap) {
+        if (!empty($allcaps[$cap])) {
+            $allcaps[$cap] = false;
+        }
+    }
+    return $allcaps;
+}
+add_filter('user_has_cap', 'agentpress_push_lock_pages', 10, 1);
+
+/** Ask, or set, whether pages are open here. */
+function agentpress_push_op_pages_access($args)
+{
+    $set = (string) ($args['set'] ?? '');
+    if ($set !== '' && $set !== 'open' && $set !== 'locked') {
+        return agentpress_push_fail('bad_state', 'Pages can be open or locked.', 422);
+    }
+    $open = agentpress_push_pages_open($set === '' ? null : $set);
+    return ['open' => $open, 'chosen' => is_file(WP_CONTENT_DIR . '/agentpress-push-data/pages-access.txt')];
+}
+
+/* ------------------------------------------------------------------------
+ * What an editor is shown in wp-admin
+ *
+ * The pages lock above, widened into a short list an administrator ticks
+ * (operator's ask, 2026-11-12: the client should see what they need and
+ * nothing that confuses them). The list is only what an Editor is really
+ * shown. Checked on a site, not from memory: Dashboard, Posts, Media, Pages,
+ * Comments, Profile, Tools. Appearance, Plugins, Users, Settings and Oxygen
+ * need an administrator's capabilities and never appear for an editor, so
+ * there is nothing to hide. Posts, Media and Profile are the job itself and
+ * are not offered.
+ *
+ * Pages is a LOCK: the capabilities go, so every screen and route refuses.
+ * The rest is TIDYING: the menu entry goes, its screens send the person back
+ * to the dashboard, and that is all. Someone who can moderate comments can
+ * still do it through the REST API. SECURITY.md says so.
+ *
+ * Administrators are never touched. Like the pages switch, the list is a
+ * file: an option would arrive from the dev site inside a full copy.
+ * --------------------------------------------------------------------- */
+
+/** key => what wp-admin calls it. The order is the order it is listed in. */
+function agentpress_push_editor_items()
+{
+    return [
+        'pages' => 'Pages',
+        'comments' => 'Comments',
+        'tools' => 'Tools',
+        'news' => 'WordPress news',
+    ];
+}
+
+/** The keys hidden from non-administrators here. `$hide` and `$show` change the list first. */
+function agentpress_push_editor_hidden(array $hide = [], array $show = [])
+{
+    static $cached = null;
+    $known = array_keys(agentpress_push_editor_items());
+    // Not agentpress_push_data_dir(): that creates the folder, and this is asked on every admin request.
+    $file = WP_CONTENT_DIR . '/agentpress-push-data/editor-hidden.txt';
+    $read = static function () use ($file, $known) {
+        $kept = is_file($file) ? preg_split('/\s+/', trim((string) @file_get_contents($file)), -1, PREG_SPLIT_NO_EMPTY) : [];
+        // Pages has its own switch (and its own default), so it is never kept here.
+        return array_values(array_diff(array_intersect($known, (array) $kept), ['pages']));
+    };
+    if ($hide || $show) {
+        if (in_array('pages', $show, true)) {
+            agentpress_push_pages_open('open');
+        } elseif (in_array('pages', $hide, true)) {
+            agentpress_push_pages_open('locked');
+        }
+        $now = array_diff(array_unique(array_merge($read(), $hide)), $show, ['pages']);
+        @file_put_contents(agentpress_push_data_dir() . '/editor-hidden.txt', implode("\n", array_values(array_intersect($known, $now))));
+        $cached = null;
+    }
+    if ($cached === null) {
+        $cached = $read();
+    }
+    return agentpress_push_pages_open() ? $cached : array_merge(['pages'], $cached);
+}
+
+/** Is the person asking someone this list applies to? Never an administrator. */
+function agentpress_push_editor_limited()
+{
+    return is_user_logged_in() && !current_user_can('manage_options');
+}
+
+function agentpress_push_editor_menu()
+{
+    if (!agentpress_push_editor_limited()) {
+        return;
+    }
+    $hidden = agentpress_push_editor_hidden();
+    if (in_array('comments', $hidden, true)) {
+        remove_menu_page('edit-comments.php');
+    }
+    if (in_array('tools', $hidden, true)) {
+        remove_menu_page('tools.php');
+    }
+}
+add_action('admin_menu', 'agentpress_push_editor_menu', 999);
+
+/** The wp-admin files behind each hidden entry. A bookmark or a typed address lands on the dashboard instead. */
+function agentpress_push_editor_blocked_screens(array $hidden)
+{
+    $screens = [];
+    if (in_array('comments', $hidden, true)) {
+        $screens = array_merge($screens, ['edit-comments.php', 'comment.php']);
+    }
+    if (in_array('tools', $hidden, true)) {
+        $screens = array_merge($screens, ['tools.php', 'import.php', 'export.php', 'site-health.php', 'export-personal-data.php', 'erase-personal-data.php']);
+    }
+    return $screens;
+}
+
+function agentpress_push_editor_screens()
+{
+    global $pagenow;
+    if (wp_doing_ajax() || !agentpress_push_editor_limited()) {
+        return;
+    }
+    if (in_array((string) $pagenow, agentpress_push_editor_blocked_screens(agentpress_push_editor_hidden()), true)) {
+        wp_safe_redirect(admin_url());
+        exit;
+    }
+}
+add_action('admin_init', 'agentpress_push_editor_screens');
+
+function agentpress_push_editor_toolbar($bar)
+{
+    if (!agentpress_push_editor_limited()) {
+        return;
+    }
+    $hidden = agentpress_push_editor_hidden();
+    if (in_array('comments', $hidden, true)) {
+        $bar->remove_node('comments');
+    }
+    if (in_array('news', $hidden, true)) {
+        // The W menu: About WordPress, documentation, forums. Same family as the news box.
+        $bar->remove_node('wp-logo');
+    }
+}
+add_action('admin_bar_menu', 'agentpress_push_editor_toolbar', 999);
+
+function agentpress_push_editor_dashboard()
+{
+    if (agentpress_push_editor_limited() && in_array('news', agentpress_push_editor_hidden(), true)) {
+        remove_meta_box('dashboard_primary', 'dashboard', 'side');
+    }
+}
+add_action('wp_dashboard_setup', 'agentpress_push_editor_dashboard', 999);
+
+/** Ask, or change, what editors are shown here. `hide` and `show` are lists of keys. */
+function agentpress_push_op_editor_view($args)
+{
+    $items = agentpress_push_editor_items();
+    $hide = array_values(array_map('strval', (array) ($args['hide'] ?? [])));
+    $show = array_values(array_map('strval', (array) ($args['show'] ?? [])));
+    foreach (array_merge($hide, $show) as $key) {
+        if (!isset($items[$key])) {
+            return agentpress_push_fail('bad_item', 'Not something that can be hidden here: ' . sanitize_key($key) . '. It can be: ' . implode(', ', array_keys($items)) . '.', 422);
+        }
+    }
+    if (array_intersect($hide, $show)) {
+        return agentpress_push_fail('bad_item', 'The same thing cannot be both hidden and shown.', 422);
+    }
+    $hidden = agentpress_push_editor_hidden($hide, $show);
+    $list = [];
+    foreach ($items as $key => $label) {
+        $list[] = ['key' => $key, 'label' => $label, 'hidden' => in_array($key, $hidden, true)];
+    }
+    return ['items' => $list];
+}
+
+/* ------------------------------------------------------------------------
  * info
  * --------------------------------------------------------------------- */
+
+/**
+ * Every plugin here: its folder, version, whether it is switched on, whether
+ * it updates itself, and the version waiting if one is. For `push status`: a
+ * live site with auto-updates on drifts ahead of the dev site without anyone
+ * touching it, and the design is then tested against older code than runs it.
+ */
+function agentpress_push_plugin_list()
+{
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $auto = (array) get_site_option('auto_update_plugins', []);
+    $waiting = get_site_transient('update_plugins');
+    $waiting = is_object($waiting) && isset($waiting->response) ? (array) $waiting->response : [];
+    $list = [];
+    foreach (get_plugins() as $file => $data) {
+        $slash = strpos($file, '/');
+        $list[] = [
+            'dir' => $slash === false ? (string) $file : substr($file, 0, $slash),
+            'name' => (string) ($data['Name'] ?? $file),
+            'version' => (string) ($data['Version'] ?? ''),
+            'active' => is_plugin_active($file),
+            'auto' => in_array($file, $auto, true),
+            'update' => is_object($waiting[$file] ?? null) && isset($waiting[$file]->new_version) ? (string) $waiting[$file]->new_version : '',
+        ];
+    }
+    return $list;
+}
 
 function agentpress_push_op_info()
 {
@@ -442,6 +699,19 @@ function agentpress_push_op_info()
         'design_items' => $design ? count($design['items']) : 0,
         'design_hash' => $design ? agentpress_push_design_hash($design) : null,
         'is_local' => agentpress_push_is_local_host(),
+        // Which live site this site's story notes were taken against, and
+        // how many stories here carry no note (written here, never sent).
+        // The count means nothing until the first is the site being asked about.
+        'stories_synced_with' => (string) get_option(AGENTPRESS_PUSH_STORIES_SYNCED, ''),
+        'stories_unsent' => agentpress_push_stories_unsent(),
+        // For `push status`, which is where two sites that should match are
+        // found not to. None of it is used to decide anything.
+        'plugins' => agentpress_push_plugin_list(),
+        'search_visible' => (bool) get_option('blog_public'),
+        'memory_limit' => (string) ini_get('memory_limit'),
+        'upload_max_bytes' => (float) wp_max_upload_size(),
+        'pages_open' => agentpress_push_pages_open(),
+        'editor_hidden' => agentpress_push_editor_hidden(),
     ];
 }
 
@@ -2015,6 +2285,999 @@ function agentpress_push_op_design_undo($args)
 }
 
 /* ------------------------------------------------------------------------
+ * Stories: posts written on the dev site, sent up one at a time
+ *
+ * Content is the live site's and comes down in a pull. This is the one way
+ * UP for it, and it exists for a single case: stories written on the dev
+ * site, which is the only place the AI agent works. Before this they had
+ * nowhere to go: a design push ignores them, a full copy would send them by
+ * replacing everything the editor wrote, and the next pull deleted them.
+ *
+ * A story is not copied, it is created again: its author, categories and
+ * images are different rows with different numbers on the other site. And
+ * it is only ever ADDED. A story the live site already has is the editor's,
+ * and is never overwritten, with one exception: one this tool sent that
+ * nobody has touched there since.
+ *
+ * Which stories does live "already have"? Not a question a title or a slug
+ * can answer (the editor renames, reschedules and deletes), so the DEV site
+ * keeps a note on each story: `live` when it came down in a pull or went up
+ * in a full copy, a fingerprint when this tool sent it. A story with no note
+ * was written here. Same lesson as the uploads ledger: "live does not have
+ * it" is two facts, and only a note taken at the time tells them apart.
+ * --------------------------------------------------------------------- */
+
+function agentpress_push_story_statuses()
+{
+    return ['publish', 'draft', 'pending', 'future', 'private'];
+}
+
+/** Every story on this site, as little of each as it takes to recognise it. Reads only. */
+function agentpress_push_op_stories_index()
+{
+    global $wpdb;
+    $rows = $wpdb->get_results("SELECT ID, post_date_gmt, post_title FROM {$wpdb->posts} WHERE post_type = 'post' AND post_status <> 'auto-draft' ORDER BY ID ASC", ARRAY_A);
+    $stories = [];
+    foreach ((array) $rows as $row) {
+        $stories[] = ['id' => (int) $row['ID'], 'date_gmt' => (string) $row['post_date_gmt'], 'title' => (string) $row['post_title']];
+    }
+    return ['stories' => $stories];
+}
+
+/** The live site's stories_index, keyed by post number. */
+function agentpress_push_story_live_map($index)
+{
+    $live = [];
+    foreach ((array) $index as $row) {
+        if (is_array($row) && isset($row['id'])) {
+            $live[(int) $row['id']] = $row;
+        }
+    }
+    return $live;
+}
+
+/**
+ * Is this story the same ROW as one on the live site? Same number and same
+ * publish time: the two databases were one database at the last pull or full
+ * copy, and both count upwards from there, so a story written here since and
+ * one written there since can share a number but not the second they were
+ * published. A draft has no publish time, so there it is number and title.
+ */
+function agentpress_push_story_same_row($id, $date_gmt, $title, $live)
+{
+    $theirs = $live[(int) $id] ?? null;
+    if (!$theirs) {
+        return false;
+    }
+    $none = '0000-00-00 00:00:00';
+    $their_date = (string) ($theirs['date_gmt'] ?? $none);
+    if ((string) $date_gmt !== $none && $their_date !== $none) {
+        return (string) $date_gmt === $their_date;
+    }
+    return (string) $title === (string) ($theirs['title'] ?? '');
+}
+
+/**
+ * Writes down, on the dev site, which of its stories the live site has.
+ *
+ * Without `index`: all of them. That is the state straight after a pull or a
+ * full copy, when the two databases are the same rows.
+ *
+ * With `index` (the live site's stories_index): the ones that are the same
+ * row on both. That is how a site connected before this existed gets its
+ * notes without a pull, which would delete the very stories waiting to go
+ * up. A story that matches nothing stays "written here", and the receiver
+ * has a second check (same address) before it makes anything.
+ */
+function agentpress_push_op_stories_level($args)
+{
+    global $wpdb;
+    $mark = (string) ($args['mark'] ?? '');
+    if (!preg_match('/^[A-Za-z0-9.:-]+$/', $mark)) {
+        return agentpress_push_fail('bad_mark', 'No live site was named to level the stories with.', 422);
+    }
+    $key = AGENTPRESS_PUSH_STORY_SENT;
+    $index = isset($args['index']) && is_array($args['index']) ? $args['index'] : null;
+    // Notes taken against another live site say nothing about this one.
+    $stale = !empty($args['reset']) || (string) get_option(AGENTPRESS_PUSH_STORIES_SYNCED, '') !== $mark;
+    $clear = "DELETE m FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p ON p.ID = m.post_id WHERE m.meta_key = %s AND p.post_type = 'post'";
+    $noted = 0;
+    if ($index === null) {
+        $wpdb->query($wpdb->prepare($clear, $key));
+        $noted = (int) $wpdb->query($wpdb->prepare("INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) SELECT ID, %s, 'live' FROM {$wpdb->posts} WHERE post_type = 'post' AND post_status <> 'auto-draft'", $key));
+    } else {
+        $live = agentpress_push_story_live_map($index);
+        if ($stale) {
+            $wpdb->query($wpdb->prepare($clear, $key));
+        }
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT p.ID, p.post_date_gmt, p.post_title FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = %s
+             WHERE p.post_type = 'post' AND p.post_status <> 'auto-draft' AND m.meta_id IS NULL ORDER BY p.ID ASC",
+            $key
+        ), ARRAY_A);
+        foreach ((array) $rows as $row) {
+            if (agentpress_push_story_same_row($row['ID'], $row['post_date_gmt'], $row['post_title'], $live)) {
+                add_post_meta((int) $row['ID'], $key, 'live', true);
+                $noted++;
+            }
+        }
+    }
+    update_option(AGENTPRESS_PUSH_STORIES_SYNCED, $mark, false);
+    wp_cache_flush();
+    return ['noted' => $noted, 'unsent' => agentpress_push_stories_unsent(), 'synced_with' => $mark];
+}
+
+/** How many stories on this site carry no note, so were written here and never sent. */
+function agentpress_push_stories_unsent()
+{
+    global $wpdb;
+    $in = "'" . implode("','", agentpress_push_story_statuses()) . "'";
+    return (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->posts} p LEFT JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = %s
+         WHERE p.post_type = 'post' AND p.post_status IN ($in) AND m.meta_id IS NULL AND NOT (p.ID = 1 AND p.post_name = 'hello-world')",
+        AGENTPRESS_PUSH_STORY_SENT
+    ));
+}
+
+/** The "Hello world!" every new WordPress starts with: post 1, at that address. */
+function agentpress_push_story_is_sample($id, $slug)
+{
+    return (int) $id === 1 && (string) $slug === 'hello-world';
+}
+
+/**
+ * The permanent id a story written here goes up under, and is found again
+ * by. Worked out, not stored, until the live site confirms it has the story.
+ * Asked again after a send that failed halfway it gives the same answer, so
+ * the story is found there instead of being made twice.
+ */
+function agentpress_push_story_uid($post)
+{
+    $h = sha1(site_url() . '|' . $post->ID . '|' . $post->post_date . '|' . $post->post_type);
+    return substr($h, 0, 8) . '-' . substr($h, 8, 4) . '-' . substr($h, 12, 4) . '-' . substr($h, 16, 4) . '-' . substr($h, 20, 12);
+}
+
+/** The blocks whose `id` is a media-library number. Any other block's `id` is its own business. */
+function agentpress_push_story_media_blocks()
+{
+    return '(?:core\/)?(?:image|cover|media-text|file|video|audio|gallery)';
+}
+
+/** Every media-library number a story's text points at, by the places WordPress writes one. */
+function agentpress_push_story_media_ids($content)
+{
+    $ids = [];
+    foreach (['/\bwp-image-(\d+)\b/', '/\bdata-id="(\d+)"/', '/\battachment_(\d+)\b/'] as $pattern) {
+        if (preg_match_all($pattern, $content, $m)) {
+            $ids = array_merge($ids, $m[1]);
+        }
+    }
+    if (preg_match_all('/<!--\s+wp:' . agentpress_push_story_media_blocks() . '\s+(\{.*?\})\s+\/?-->/s', $content, $m)) {
+        foreach ($m[1] as $json) {
+            if (preg_match_all('/"(?:id|mediaId)":(\d+)/', $json, $n)) {
+                $ids = array_merge($ids, $n[1]);
+            }
+            if (preg_match_all('/"ids":\[([\d,\s]*)\]/', $json, $n)) {
+                foreach ($n[1] as $list) {
+                    $ids = array_merge($ids, preg_split('/[\s,]+/', $list, -1, PREG_SPLIT_NO_EMPTY));
+                }
+            }
+        }
+    }
+    if (preg_match_all('/\[gallery\b[^\]]*\bids="([\d,\s]+)"/', $content, $m)) {
+        foreach ($m[1] as $list) {
+            $ids = array_merge($ids, preg_split('/[\s,]+/', $list, -1, PREG_SPLIT_NO_EMPTY));
+        }
+    }
+    return array_values(array_unique(array_filter(array_map('intval', $ids))));
+}
+
+/** The same places, with each number swapped for the one the image has on this site. */
+function agentpress_push_story_rewrite_ids($content, $map)
+{
+    if (!$map) {
+        return $content;
+    }
+    $swap = function ($id) use ($map) {
+        $id = (int) $id;
+        return isset($map[$id]) ? (int) $map[$id] : $id;
+    };
+    $list = function ($text) use ($swap) {
+        return implode(',', array_map($swap, preg_split('/[\s,]+/', $text, -1, PREG_SPLIT_NO_EMPTY)));
+    };
+    $content = preg_replace_callback('/\bwp-image-(\d+)\b/', function ($m) use ($swap) { return 'wp-image-' . $swap($m[1]); }, $content);
+    $content = preg_replace_callback('/\bdata-id="(\d+)"/', function ($m) use ($swap) { return 'data-id="' . $swap($m[1]) . '"'; }, $content);
+    $content = preg_replace_callback('/\battachment_(\d+)\b/', function ($m) use ($swap) { return 'attachment_' . $swap($m[1]); }, $content);
+    $content = preg_replace_callback('/(<!--\s+wp:' . agentpress_push_story_media_blocks() . '\s+)(\{.*?\})(\s+\/?-->)/s', function ($m) use ($swap, $list) {
+        $json = preg_replace_callback('/"(id|mediaId)":(\d+)/', function ($n) use ($swap) { return '"' . $n[1] . '":' . $swap($n[2]); }, $m[2]);
+        $json = preg_replace_callback('/"ids":\[([\d,\s]*)\]/', function ($n) use ($list) { return '"ids":[' . $list($n[1]) . ']'; }, $json);
+        return $m[1] . $json . $m[3];
+    }, $content);
+    $content = preg_replace_callback('/(\[gallery\b[^\]]*\bids=")([\d,\s]+)(")/', function ($m) use ($list) { return $m[1] . $list($m[2]) . $m[3]; }, $content);
+    return $content;
+}
+
+/** One media-library item as the other site needs it to make its own: the file, every size of it, and what was typed about it. */
+function agentpress_push_story_media_record($id)
+{
+    $post = get_post($id);
+    $rel = $post && $post->post_type === 'attachment' ? (string) get_post_meta($id, '_wp_attached_file', true) : '';
+    $base = agentpress_push_roots()['uploads'] ?? '';
+    if ($rel === '' || $base === '' || !is_file($base . '/' . $rel)) {
+        return null;
+    }
+    $meta = wp_get_attachment_metadata($id, true);
+    $dir = dirname($rel) === '.' ? '' : dirname($rel) . '/';
+    $files = [$rel];
+    if (is_array($meta)) {
+        foreach ((array) ($meta['sizes'] ?? []) as $size) {
+            if (!empty($size['file'])) {
+                $files[] = $dir . $size['file'];
+            }
+        }
+        if (!empty($meta['original_image'])) {
+            $files[] = $dir . $meta['original_image'];
+        }
+    }
+    $files = array_values(array_unique(array_filter($files, function ($file) use ($base) { return is_file($base . '/' . $file); })));
+    return [
+        'id' => (int) $id,
+        'file' => $rel,
+        'size' => (int) filesize($base . '/' . $rel),
+        'files' => $files,
+        'mime' => (string) $post->post_mime_type,
+        'title' => (string) $post->post_title,
+        'caption' => (string) $post->post_excerpt,
+        'description' => (string) $post->post_content,
+        'alt' => (string) get_post_meta($id, '_wp_attachment_image_alt', true),
+        'date' => (string) $post->post_date,
+        'meta' => is_array($meta) ? $meta : null,
+    ];
+}
+
+/** Meta that is this install's bookkeeping, or another feature's to carry, and so stays behind. */
+function agentpress_push_story_meta_skipped($key)
+{
+    if (in_array($key, ['_edit_lock', '_edit_last', '_thumbnail_id', '_wp_old_slug', '_wp_old_date', '_wp_desired_post_slug', '_pingme', '_encloseme'], true)) {
+        return true;
+    }
+    foreach (['_agentpress_', '_wp_trash_', '_oxygen_', '_breakdance_'] as $prefix) {
+        if (strpos($key, $prefix) === 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The stories on this site that could go up: the ones written here, and the
+ * ones already sent that were changed here since. One that came from the
+ * live site is not in the list at all, changed here or not: that one is the
+ * editor's. `only` narrows it to the ids or slugs asked for, and brings in a
+ * sent story even when it has not changed (to send it again as a draft, say).
+ *
+ * `index` + `mark` are for a site whose notes were never taken against this
+ * live site (see stories_level): the answer is worked out as if they had
+ * been, and nothing is written. A dry run and a pull's warning ask this way.
+ */
+function agentpress_push_op_stories_export($args)
+{
+    global $wpdb;
+    $only = array_values(array_filter(array_map('strval', (array) ($args['only'] ?? [])), 'strlen'));
+    $live = isset($args['index']) && is_array($args['index']) ? agentpress_push_story_live_map($args['index']) : null;
+    $stale = $live !== null && (string) get_option(AGENTPRESS_PUSH_STORIES_SYNCED, '') !== (string) ($args['mark'] ?? '');
+    $matched = [];
+    $design_key = agentpress_push_oxygen_ready() ? agentpress_push_design_meta_keys()[0] : '';
+    $uploads = wp_get_upload_dir();
+    $upload_url = preg_replace('#^https?:#i', '', untrailingslashit((string) $uploads['baseurl']));
+    $items = [];
+    $media = [];
+    $on_live = [];
+    $posts = get_posts(['post_type' => 'post', 'post_status' => agentpress_push_story_statuses(), 'posts_per_page' => -1, 'orderby' => 'date', 'order' => 'DESC', 'suppress_filters' => true]);
+    foreach ($posts as $post) {
+        $picked = false;
+        foreach ($only as $want) {
+            if ($want === (string) $post->ID || $want === $post->post_name) {
+                $picked = true;
+                $matched[$want] = true;
+            }
+        }
+        if ($only && !$picked) {
+            continue;
+        }
+        $uid = (string) get_post_meta($post->ID, AGENTPRESS_PUSH_UID, true);
+        $sent = $stale ? '' : (string) get_post_meta($post->ID, AGENTPRESS_PUSH_STORY_SENT, true);
+        if ($sent === '' && $live !== null && agentpress_push_story_same_row($post->ID, $post->post_date_gmt, $post->post_title, $live)) {
+            $sent = 'live';
+        }
+        $fresh = $sent === '';
+        // WordPress's own sample post. Without this the first pull onto a
+        // new site is refused over "Hello world!", a story nobody wrote.
+        if ($fresh && !$picked && agentpress_push_story_is_sample($post->ID, $post->post_name)) {
+            continue;
+        }
+        if ($sent === 'live') {
+            if ($picked) {
+                $on_live[] = (string) $post->post_title;
+            }
+            continue;
+        }
+
+        $terms = [];
+        foreach (get_object_taxonomies('post') as $tax) {
+            if ($tax === 'post_format') {
+                continue;
+            }
+            $found = wp_get_object_terms($post->ID, $tax);
+            foreach (is_wp_error($found) ? [] : $found as $term) {
+                $chain = [];
+                foreach (array_reverse(get_ancestors($term->term_id, $tax, 'taxonomy')) as $parent_id) {
+                    $parent = get_term($parent_id, $tax);
+                    if ($parent && !is_wp_error($parent)) {
+                        $chain[] = ['name' => (string) $parent->name, 'slug' => (string) $parent->slug];
+                    }
+                }
+                $chain[] = ['name' => (string) $term->name, 'slug' => (string) $term->slug];
+                $terms[$tax][] = $chain;
+            }
+        }
+        ksort($terms);
+
+        $thumbnail = (int) get_post_thumbnail_id($post->ID);
+        $wanted = agentpress_push_story_media_ids($post->post_content);
+        $loose = [];
+        // An image placed by address alone has no number in the text. Find
+        // its library item by the file it names, with the size suffix
+        // WordPress adds taken off; a file with no library item still travels.
+        if (preg_match_all('#https?:' . preg_quote($upload_url, '#') . '/([^"\'\s<>\)\]\?\#]+)#i', $post->post_content, $m)) {
+            foreach (array_unique($m[1]) as $rel) {
+                $rel = rawurldecode($rel);
+                $plain = preg_replace('/-\d+x\d+(\.[A-Za-z0-9]+)$/', '$1', $rel);
+                $hit = (int) $wpdb->get_var($wpdb->prepare("SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value IN (%s, %s) ORDER BY post_id ASC LIMIT 1", $rel, $plain));
+                if ($hit) {
+                    $wanted[] = $hit;
+                } elseif (!empty($uploads['basedir']) && is_file($uploads['basedir'] . '/' . $rel)) {
+                    $loose[] = ['file' => $rel, 'size' => (int) filesize($uploads['basedir'] . '/' . $rel)];
+                }
+            }
+        }
+        if ($thumbnail) {
+            $wanted[] = $thumbnail;
+        }
+        $used = [];
+        foreach (array_unique($wanted) as $media_id) {
+            if (!isset($media[$media_id])) {
+                $media[$media_id] = agentpress_push_story_media_record($media_id);
+            }
+            if ($media[$media_id]) {
+                $used[] = (int) $media_id;
+            }
+        }
+        sort($used);
+
+        $meta = [];
+        foreach ((array) get_post_meta($post->ID) as $key => $values) {
+            if (agentpress_push_story_meta_skipped((string) $key)) {
+                continue;
+            }
+            $meta[(string) $key] = array_map('strval', (array) $values);
+        }
+        ksort($meta);
+
+        $author = get_userdata((int) $post->post_author);
+        $item = [
+            // A story an undo took back keeps the id it went up under: that is how the one in the bin there is found.
+            'uid' => preg_match('/^[a-f0-9-]{36}$/', $uid) ? $uid : agentpress_push_story_uid($post),
+            'fresh' => $fresh,
+            'source_id' => (int) $post->ID,
+            'post_title' => (string) $post->post_title,
+            'post_name' => (string) $post->post_name,
+            'post_content' => (string) $post->post_content,
+            'post_excerpt' => (string) $post->post_excerpt,
+            'post_status' => (string) $post->post_status,
+            'post_date' => (string) $post->post_date,
+            'post_date_gmt' => (string) $post->post_date_gmt,
+            'post_password' => (string) $post->post_password,
+            'comment_status' => (string) $post->comment_status,
+            'ping_status' => (string) $post->ping_status,
+            'author' => $author ? (string) $author->user_login : '',
+            'format' => (string) (get_post_format($post->ID) ?: ''),
+            'terms' => $terms,
+            'thumbnail' => $thumbnail && !empty($media[$thumbnail]) ? $thumbnail : 0,
+            'media' => $used,
+            'loose' => $loose,
+            'meta' => $meta,
+            'builder' => $design_key !== '' && metadata_exists('post', $post->ID, $design_key),
+        ];
+        // What "changed here since it was sent" is judged on: the story as
+        // this site holds it, with nothing the other site adds.
+        $facts = $item;
+        unset($facts['uid'], $facts['fresh'], $facts['source_id']);
+        $facts['thumbnail'] = $item['thumbnail'] ? $media[$item['thumbnail']]['file'] : '';
+        $facts['media'] = array_map(function ($id) use ($media) { return $media[$id]['file']; }, $used);
+        $item['hash'] = sha1((string) wp_json_encode($facts));
+        if (!$fresh && !$picked && $item['hash'] === $sent) {
+            continue;
+        }
+        $items[] = $item;
+    }
+    return [
+        'format' => AGENTPRESS_PUSH_FORMAT,
+        'source_url' => site_url(),
+        'home_url' => home_url(),
+        'items' => $items,
+        'media' => array_values(array_filter($media)),
+        'on_live' => $on_live,
+        'unknown' => array_values(array_filter($only, function ($want) use ($matched) { return !isset($matched[$want]); })),
+        'stories' => count($posts),
+    ];
+}
+
+/**
+ * A story as it stands on THIS site, as one fingerprint: its text, status,
+ * categories and image. Kept when a story arrives, and compared before it is
+ * ever written to again. Equal means nobody here has touched it since.
+ */
+function agentpress_push_story_live_hash($id)
+{
+    clean_post_cache($id);
+    $post = get_post($id);
+    if (!$post) {
+        return '';
+    }
+    $terms = [];
+    foreach (get_object_taxonomies('post') as $tax) {
+        $ids = wp_get_object_terms($id, $tax, ['fields' => 'ids']);
+        $ids = is_wp_error($ids) ? [] : array_map('intval', $ids);
+        sort($ids);
+        $terms[$tax] = $ids;
+    }
+    ksort($terms);
+    return sha1((string) wp_json_encode([$post->post_title, $post->post_content, $post->post_excerpt, $post->post_status, $post->post_name, $post->post_date, $terms, (int) get_post_thumbnail_id($id)]));
+}
+
+/**
+ * Where a file a story needs stands on this site. `have`: the same file with
+ * a library item. `adopt`: the same file, no library item yet. `new`: not
+ * here. `clash`: another file already has that name, and writing over an
+ * upload on the receiving site is the one thing this never does.
+ */
+function agentpress_push_story_media_state($rel, $size)
+{
+    global $wpdb;
+    $abs = is_string($rel) ? agentpress_push_resolve_path('uploads/' . $rel) : null;
+    if (!$abs || is_wp_error($abs) || agentpress_push_runs_as_code($rel)) {
+        return ['state' => 'bad', 'id' => 0];
+    }
+    $row = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT m.post_id FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p ON p.ID = m.post_id
+         WHERE m.meta_key = '_wp_attached_file' AND m.meta_value = %s AND p.post_type = 'attachment' ORDER BY m.post_id ASC LIMIT 1",
+        $rel
+    ));
+    if (!is_file($abs)) {
+        return ['state' => 'new', 'id' => $row];
+    }
+    if ((int) filesize($abs) !== (int) $size) {
+        return ['state' => 'clash', 'id' => 0];
+    }
+    return ['state' => $row ? 'have' : 'adopt', 'id' => $row];
+}
+
+/** Find or make a category (or tag) by its path of names. `$dry` only says what would be made. */
+function agentpress_push_story_term($tax, $chain, $dry, &$made)
+{
+    $parent = 0;
+    $id = 0;
+    foreach ((array) $chain as $node) {
+        $name = (string) ($node['name'] ?? '');
+        $slug = (string) ($node['slug'] ?? '');
+        $term = $slug !== '' ? get_term_by('slug', $slug, $tax) : false;
+        if (!$term && $name !== '') {
+            $term = get_term_by('name', $name, $tax);
+        }
+        if ($term && !is_wp_error($term)) {
+            $id = (int) $term->term_id;
+        } elseif ($name === '') {
+            return 0;
+        } else {
+            $made[$tax . ':' . $slug] = $name;
+            if ($dry) {
+                // Nothing under a category that does not exist yet can exist either.
+                $id = -1;
+            } else {
+                $new = wp_insert_term(wp_slash($name), $tax, ['slug' => $slug, 'parent' => max(0, $parent)]);
+                if (is_wp_error($new)) {
+                    return 0;
+                }
+                $id = (int) $new['term_id'];
+            }
+        }
+        $parent = $id;
+    }
+    return $id;
+}
+
+/**
+ * Plans, or carries out, the stories in the uploaded bundle. `dry` answers
+ * with the plan and writes nothing; `only` is the ids the sender chose;
+ * `draft` makes every one arrive as a draft whatever it was. A real run
+ * decides everything again from this site as it stands NOW: the plan the
+ * sender looked at is a thing shown to a person, not something to act on.
+ */
+function agentpress_push_op_stories_import($args)
+{
+    global $wpdb;
+    $dry = !empty($args['dry']);
+    $draft = !empty($args['draft']);
+    $only = isset($args['only']) && is_array($args['only']) ? array_map('strval', $args['only']) : null;
+    $dir = agentpress_push_session_dir($args['session'] ?? '');
+    if (is_wp_error($dir)) {
+        return $dir;
+    }
+    $bundle = json_decode((string) @file_get_contents($dir . '/stories.json'), true);
+    if (!is_array($bundle) || (int) ($bundle['format'] ?? 0) !== AGENTPRESS_PUSH_FORMAT || !isset($bundle['items'], $bundle['media']) || !is_array($bundle['items']) || !is_array($bundle['media'])) {
+        return agentpress_push_fail('bad_bundle', 'The stories were not uploaded, or were made by a different version of AgentPress Push.', 422);
+    }
+    $base = agentpress_push_roots()['uploads'] ?? '';
+    if ($base === '') {
+        return agentpress_push_fail('bad_root', "This site's uploads folder is not inside wp-content, so a story's images have nowhere to go.", 409);
+    }
+    $items = [];
+    foreach ($bundle['items'] as $item) {
+        if (!is_array($item) || !preg_match('/^[a-f0-9-]{36}$/', (string) ($item['uid'] ?? ''))) {
+            return agentpress_push_fail('bad_bundle', 'A story in the bundle has no permanent id.', 422);
+        }
+        if ($only === null || in_array($item['uid'], $only, true)) {
+            $items[] = $item;
+        }
+    }
+    if (count($items) > 50) {
+        return agentpress_push_fail('too_many', 'That is ' . count($items) . ' stories in one go. Send up to 50 at a time.', 413);
+    }
+    $library = [];
+    foreach ($bundle['media'] as $record) {
+        if (is_array($record) && isset($record['id'], $record['file'])) {
+            $library[(int) $record['id']] = $record;
+        }
+    }
+    $pairs = agentpress_push_url_pairs([(string) ($bundle['source_url'] ?? ''), (string) ($bundle['home_url'] ?? '')], site_url());
+    $admins = get_users(['role' => 'administrator', 'orderby' => 'ID', 'order' => 'ASC', 'number' => 1, 'fields' => 'ID']);
+    $fallback_author = $admins ? (int) $admins[0] : 0;
+    $fallback_name = $fallback_author ? (string) get_userdata($fallback_author)->user_login : '';
+
+    $states = [];   // source media id => where it stands here
+    $plan = [];
+    foreach ($items as $i => $item) {
+        $status = $draft ? 'draft' : (in_array($item['post_status'] ?? '', agentpress_push_story_statuses(), true) ? $item['post_status'] : 'draft');
+        $entry = ['uid' => $item['uid'], 'source_id' => (int) ($item['source_id'] ?? 0), 'title' => (string) ($item['post_title'] ?? ''), 'status' => $status,
+            'action' => 'create', 'reason' => '', 'target' => 0, 'images' => 0, 'files' => [], 'notes' => [], 'new_terms' => []];
+
+        $found = get_posts(['post_type' => 'post', 'post_status' => array_merge(agentpress_push_story_statuses(), ['trash']), 'posts_per_page' => 1, 'fields' => 'ids',
+            'orderby' => 'ID', 'order' => 'ASC', 'meta_key' => AGENTPRESS_PUSH_UID, 'meta_value' => $item['uid'], 'suppress_filters' => true]);
+        if (!empty($item['builder'])) {
+            $entry['action'] = 'leave';
+            $entry['reason'] = 'builder';
+        } elseif (!$found) {
+            if (empty($item['fresh'])) {
+                $entry['action'] = 'leave';
+                $entry['reason'] = 'gone';
+            } elseif ((string) ($item['post_name'] ?? '') !== '') {
+                // The second check behind the sender's notes: a story already
+                // at this address here is either the same story or one the
+                // editor wrote. WordPress would make ours `-2` and publish a twin.
+                // Asked of the table, not of WP_Query: a query by name is a
+                // "single story" query, and WordPress empties its answer when
+                // the story is a draft and nobody is logged in. This request
+                // has a key, not a login (local test: the editor's draft at
+                // the same address was not seen).
+                $in = "'" . implode("','", agentpress_push_story_statuses()) . "'";
+                $twin = (int) $wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type = 'post' AND post_name = %s AND post_status IN ($in) ORDER BY ID ASC LIMIT 1", (string) $item['post_name']));
+                if ($twin) {
+                    $entry['action'] = 'leave';
+                    $entry['reason'] = 'same_address';
+                    $entry['target'] = $twin;
+                }
+            }
+        } else {
+            $target = (int) $found[0];
+            $entry['target'] = $target;
+            $arrived = (string) get_post_meta($target, AGENTPRESS_PUSH_STORY_LIVE, true);
+            if (get_post_status($target) === 'trash') {
+                // In the bin because an undo of ours put it there: take it
+                // back out. In the bin for any other reason: somebody's choice.
+                $entry['action'] = get_post_meta($target, AGENTPRESS_PUSH_STORY_UNDONE, true) ? 'restore' : 'leave';
+                $entry['reason'] = $entry['action'] === 'leave' ? 'binned' : '';
+            } elseif ($arrived === '') {
+                $entry['action'] = 'leave';
+                $entry['reason'] = 'on_live';
+            } elseif (agentpress_push_story_live_hash($target) !== $arrived) {
+                $entry['action'] = 'leave';
+                $entry['reason'] = 'edited';
+            } else {
+                $entry['action'] = 'update';
+            }
+        }
+
+        if ($entry['action'] !== 'leave') {
+            $wanted = array_map('intval', (array) ($item['media'] ?? []));
+            foreach ($wanted as $media_id) {
+                if (!isset($library[$media_id])) {
+                    continue;
+                }
+                if (!isset($states[$media_id])) {
+                    $record = $library[$media_id];
+                    $state = agentpress_push_story_media_state($record['file'], $record['size'] ?? -1);
+                    $state['need'] = [];
+                    foreach ((array) ($record['files'] ?? []) as $file) {
+                        $abs = is_string($file) ? agentpress_push_resolve_path('uploads/' . $file) : null;
+                        if (!$abs || is_wp_error($abs) || agentpress_push_runs_as_code($file)) {
+                            $state['state'] = 'bad';
+                        } elseif (!is_file($abs)) {
+                            $state['need'][] = 'uploads/' . $file;
+                        }
+                    }
+                    $states[$media_id] = $state;
+                }
+                $state = $states[$media_id];
+                if ($state['state'] === 'clash' || $state['state'] === 'bad') {
+                    $entry['action'] = 'leave';
+                    $entry['reason'] = $state['state'] === 'clash' ? 'image_clash' : 'image_bad';
+                    $entry['notes'][] = basename((string) $library[$media_id]['file']);
+                    break;
+                }
+                $entry['images']++;
+                $entry['files'] = array_merge($entry['files'], $state['need']);
+            }
+        }
+        if ($entry['action'] !== 'leave') {
+            foreach ((array) ($item['loose'] ?? []) as $loose) {
+                $state = agentpress_push_story_media_state($loose['file'] ?? null, $loose['size'] ?? -1);
+                if ($state['state'] === 'clash' || $state['state'] === 'bad') {
+                    $entry['action'] = 'leave';
+                    $entry['reason'] = $state['state'] === 'clash' ? 'image_clash' : 'image_bad';
+                    $entry['notes'][] = basename((string) ($loose['file'] ?? ''));
+                    break;
+                }
+                if ($state['state'] === 'new') {
+                    $entry['files'][] = 'uploads/' . $loose['file'];
+                }
+            }
+        }
+        if ($entry['action'] === 'leave') {
+            $entry['files'] = [];
+            $entry['images'] = 0;
+        } else {
+            $entry['files'] = array_values(array_unique($entry['files']));
+            $author = (string) ($item['author'] ?? '');
+            if ($author === '' || !get_user_by('login', $author)) {
+                $entry['notes'][] = 'author:' . $author . ':' . $fallback_name;
+            }
+            $made = [];
+            foreach ((array) ($item['terms'] ?? []) as $tax => $chains) {
+                if (!taxonomy_exists($tax)) {
+                    $entry['notes'][] = 'no_taxonomy:' . $tax;
+                    continue;
+                }
+                foreach ((array) $chains as $chain) {
+                    agentpress_push_story_term($tax, $chain, true, $made);
+                }
+            }
+            $entry['new_terms'] = array_values($made);
+        }
+        $plan[$i] = $entry;
+    }
+    if ($dry) {
+        return ['dry' => true, 'draft' => $draft, 'plan' => array_values($plan)];
+    }
+
+    // The source is the developer's own site and the content is theirs to
+    // publish. Without this WordPress filters the text as an anonymous
+    // visitor's (this request has a key, not a login) and an embed or a
+    // script block arrives as nothing.
+    kses_remove_filters();
+    $record = ['created' => [], 'restored' => [], 'updated' => [], 'attachments' => [], 'at' => gmdate('c')];
+    $made_media = [];   // source media id => this site's id
+    $sent = [];
+    foreach ($items as $i => $item) {
+        $entry = $plan[$i];
+        if ($entry['action'] === 'leave') {
+            continue;
+        }
+        $fail = function ($why) use (&$plan, $i) {
+            $plan[$i]['action'] = 'failed';
+            $plan[$i]['reason'] = $why;
+        };
+
+        // Images first: the text and the featured image point at their numbers.
+        $map = [];
+        $ok = true;
+        foreach (array_map('intval', (array) ($item['media'] ?? [])) as $media_id) {
+            if (!isset($library[$media_id])) {
+                continue;
+            }
+            if (!isset($made_media[$media_id])) {
+                $media = $library[$media_id];
+                $state = agentpress_push_story_media_state($media['file'], $media['size'] ?? -1);
+                if ($state['state'] === 'have') {
+                    $made_media[$media_id] = (int) $state['id'];
+                } elseif ($state['state'] === 'adopt') {
+                    $attachment = wp_insert_attachment(wp_slash([
+                        'post_title' => (string) ($media['title'] ?? ''), 'post_content' => (string) ($media['description'] ?? ''), 'post_excerpt' => (string) ($media['caption'] ?? ''),
+                        'post_mime_type' => (string) ($media['mime'] ?? ''), 'post_status' => 'inherit', 'post_date' => (string) ($media['date'] ?? ''),
+                        'post_author' => $fallback_author,
+                    // The path as WordPress stores it: relative to uploads.
+                    // Given the full path, WordPress only shortens it when it
+                    // starts with its own spelling of the uploads folder, and
+                    // on Windows that spelling has a backslash ours does not.
+                    // First local run: the row kept `C:/...` whole, the image
+                    // was "missing" to WordPress with the file sitting there,
+                    // and a second send would not have found the row.
+                    ]), (string) $media['file'], 0, true);
+                    if (is_wp_error($attachment)) {
+                        $ok = false;
+                        break;
+                    }
+                    if (is_array($media['meta'] ?? null)) {
+                        wp_update_attachment_metadata($attachment, $media['meta']);
+                    }
+                    if ((string) ($media['alt'] ?? '') !== '') {
+                        update_post_meta($attachment, '_wp_attachment_image_alt', wp_slash((string) $media['alt']));
+                    }
+                    $made_media[$media_id] = (int) $attachment;
+                    $record['attachments'][] = (int) $attachment;
+                } else {
+                    // Still not here after the files were sent: do not publish a story with a hole in it.
+                    $ok = false;
+                    break;
+                }
+            }
+            $map[$media_id] = $made_media[$media_id];
+        }
+        if (!$ok) {
+            $fail('image_missing');
+            continue;
+        }
+
+        $author = get_user_by('login', (string) ($item['author'] ?? ''));
+        $content = agentpress_push_story_rewrite_ids(agentpress_push_replace_value((string) ($item['post_content'] ?? ''), $pairs), $map);
+        $fields = [
+            'post_type' => 'post',
+            'post_status' => $entry['status'],
+            'post_title' => (string) ($item['post_title'] ?? ''),
+            'post_name' => (string) ($item['post_name'] ?? ''),
+            'post_content' => $content,
+            'post_excerpt' => agentpress_push_replace_value((string) ($item['post_excerpt'] ?? ''), $pairs),
+            'post_date' => (string) ($item['post_date'] ?? ''),
+            'post_date_gmt' => (string) ($item['post_date_gmt'] ?? ''),
+            'post_password' => (string) ($item['post_password'] ?? ''),
+            'comment_status' => (string) ($item['comment_status'] ?? 'closed'),
+            'ping_status' => (string) ($item['ping_status'] ?? 'closed'),
+            'post_author' => $author ? (int) $author->ID : $fallback_author,
+        ];
+
+        $target = (int) $entry['target'];
+        if ($entry['action'] === 'create') {
+            $target = wp_insert_post(wp_slash($fields), true);
+            if (is_wp_error($target) || !$target) {
+                $fail('insert');
+                continue;
+            }
+            $target = (int) $target;
+            $record['created'][] = $target;
+        } else {
+            if ($entry['action'] === 'restore') {
+                wp_untrash_post($target);
+                $record['restored'][] = $target;
+            } else {
+                $before = get_post($target, ARRAY_A);
+                $terms_before = [];
+                foreach (get_object_taxonomies('post') as $tax) {
+                    $ids = wp_get_object_terms($target, $tax, ['fields' => 'ids']);
+                    $terms_before[$tax] = is_wp_error($ids) ? [] : array_map('intval', $ids);
+                }
+                $record['updated'][$target] = [
+                    'fields' => array_intersect_key((array) $before, array_flip(['post_title', 'post_name', 'post_content', 'post_excerpt', 'post_status', 'post_date', 'post_date_gmt', 'post_password', 'comment_status', 'ping_status', 'post_author'])),
+                    'terms' => $terms_before,
+                    'thumbnail' => (int) get_post_thumbnail_id($target),
+                ];
+            }
+            $done = wp_update_post(wp_slash(array_merge($fields, ['ID' => $target])), true);
+            if (is_wp_error($done)) {
+                $fail('update');
+                continue;
+            }
+        }
+
+        foreach ((array) ($item['terms'] ?? []) as $tax => $chains) {
+            if (!taxonomy_exists($tax)) {
+                continue;
+            }
+            $ids = [];
+            $unused = [];
+            foreach ((array) $chains as $chain) {
+                $term_id = agentpress_push_story_term($tax, $chain, false, $unused);
+                if ($term_id > 0) {
+                    $ids[] = $term_id;
+                }
+            }
+            wp_set_object_terms($target, $ids, $tax, false);
+        }
+        if (current_theme_supports('post-formats') || (string) ($item['format'] ?? '') === '') {
+            set_post_format($target, (string) ($item['format'] ?? ''));
+        }
+        $thumbnail = (int) ($item['thumbnail'] ?? 0);
+        if ($thumbnail && isset($map[$thumbnail])) {
+            set_post_thumbnail($target, $map[$thumbnail]);
+        } else {
+            delete_post_thumbnail($target);
+        }
+        foreach ((array) ($item['meta'] ?? []) as $key => $values) {
+            $key = (string) $key;
+            if ($key === '' || agentpress_push_story_meta_skipped($key)) {
+                continue;
+            }
+            delete_post_meta($target, $key);
+            foreach ((array) $values as $value) {
+                // Stored values arrive as WordPress stored them. One that
+                // was serialized is unpacked first, or add_post_meta would
+                // serialize the string a second time. Never into an object.
+                $value = (string) $value;
+                if (is_serialized($value)) {
+                    $unpacked = @unserialize($value, ['allowed_classes' => false]);
+                    if ($unpacked === false && $value !== 'b:0;') {
+                        continue;
+                    }
+                    if (is_object($unpacked) || strpos($value, 'O:') !== false || strpos($value, 'C:') !== false) {
+                        continue;
+                    }
+                    $value = agentpress_push_replace_deep($unpacked, $pairs);
+                } else {
+                    $value = agentpress_push_replace_value($value, $pairs);
+                }
+                add_post_meta($target, $key, wp_slash($value));
+            }
+        }
+        update_post_meta($target, AGENTPRESS_PUSH_UID, $item['uid']);
+        delete_post_meta($target, AGENTPRESS_PUSH_STORY_UNDONE);
+        update_post_meta($target, AGENTPRESS_PUSH_STORY_LIVE, agentpress_push_story_live_hash($target));
+        $plan[$i]['target'] = $target;
+        $plan[$i]['url'] = (string) get_permalink($target);
+        $sent[] = ['id' => (int) ($item['source_id'] ?? 0), 'uid' => $item['uid'], 'hash' => (string) ($item['hash'] ?? '')];
+    }
+    kses_init();
+
+    $undo = null;
+    if ($record['created'] || $record['restored'] || $record['updated']) {
+        $undo_dir = agentpress_push_data_dir() . '/stories-sent';
+        wp_mkdir_p($undo_dir);
+        if (!file_exists($undo_dir . '/index.php')) {
+            @file_put_contents($undo_dir . '/index.php', "<?php\n// Silence is golden.\n");
+        }
+        $undo = 'stories-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(16)) . '.json';
+        @file_put_contents($undo_dir . '/' . $undo, wp_json_encode($record));
+        $kept = glob($undo_dir . '/stories-*.json*') ?: [];
+        sort($kept);
+        foreach (array_slice($kept, 0, max(0, count($kept) - 10)) as $old) {
+            @unlink($old);
+        }
+    }
+    wp_cache_flush();
+    return ['dry' => false, 'draft' => $draft, 'plan' => array_values($plan), 'sent' => $sent, 'undo' => $undo];
+}
+
+/**
+ * Takes back the last send: stories it made go to the bin (marked, so that
+ * sending them again takes them back out instead of making a twin), and a
+ * story it changed gets the text it had before. Each send is undone once.
+ */
+function agentpress_push_op_stories_undo($args)
+{
+    $kept = glob(agentpress_push_data_dir() . '/stories-sent/stories-*.json') ?: [];
+    sort($kept);
+    $file = end($kept);
+    $record = $file ? json_decode((string) file_get_contents($file), true) : null;
+    if (!is_array($record)) {
+        return agentpress_push_fail('no_undo', 'No stories were sent to this site that can still be taken back.', 404);
+    }
+    $dry = !empty($args['dry']);
+    $binned = [];
+    $reverted = [];
+    $uids = [];
+    $reverted_uids = [];
+    kses_remove_filters();
+    foreach (array_merge((array) ($record['created'] ?? []), (array) ($record['restored'] ?? [])) as $id) {
+        $id = (int) $id;
+        $post = get_post($id);
+        if (!$post || $post->post_type !== 'post' || $post->post_status === 'trash') {
+            continue;
+        }
+        $binned[] = (string) $post->post_title;
+        $uids[] = (string) get_post_meta($id, AGENTPRESS_PUSH_UID, true);
+        if (!$dry) {
+            update_post_meta($id, AGENTPRESS_PUSH_STORY_UNDONE, '1');
+            wp_trash_post($id);
+        }
+    }
+    foreach ((array) ($record['updated'] ?? []) as $id => $was) {
+        $id = (int) $id;
+        $post = get_post($id);
+        if (!$post || $post->post_type !== 'post' || $post->post_status === 'trash' || !is_array($was['fields'] ?? null)) {
+            continue;
+        }
+        $reverted[] = (string) $post->post_title;
+        $reverted_uids[] = (string) get_post_meta($id, AGENTPRESS_PUSH_UID, true);
+        if (!$dry) {
+            wp_update_post(wp_slash(array_merge($was['fields'], ['ID' => $id])));
+            foreach ((array) ($was['terms'] ?? []) as $tax => $ids) {
+                if (taxonomy_exists($tax)) {
+                    wp_set_object_terms($id, array_map('intval', (array) $ids), $tax, false);
+                }
+            }
+            if (!empty($was['thumbnail'])) {
+                set_post_thumbnail($id, (int) $was['thumbnail']);
+            } else {
+                delete_post_thumbnail($id);
+            }
+            // Back as it was sent the time before, and still untouched by anyone here.
+            update_post_meta($id, AGENTPRESS_PUSH_STORY_LIVE, agentpress_push_story_live_hash($id));
+        }
+    }
+    kses_init();
+    if (!$dry) {
+        @rename($file, $file . '.undone');
+        wp_cache_flush();
+    }
+    return ['dry' => $dry, 'binned' => $binned, 'reverted' => $reverted, 'uids' => array_values(array_filter($uids)), 'reverted_uids' => array_values(array_filter($reverted_uids)), 'sent_at' => (string) ($record['at'] ?? '')];
+}
+
+/**
+ * The dev site's own note of what went up. `sent`: these stories are on the
+ * live site now, under this id, as they stood at this fingerprint. `unsent`:
+ * these were taken back there, so here they are stories written here again.
+ * `changed`: an update to these was taken back there, so what is here is
+ * newer than what is there, and they are offered again.
+ */
+function agentpress_push_op_stories_mark($args)
+{
+    $marked = 0;
+    foreach ((array) ($args['sent'] ?? []) as $row) {
+        $id = (int) ($row['id'] ?? 0);
+        $uid = (string) ($row['uid'] ?? '');
+        if (!$id || get_post_type($id) !== 'post' || !preg_match('/^[a-f0-9-]{36}$/', $uid)) {
+            continue;
+        }
+        update_post_meta($id, AGENTPRESS_PUSH_UID, $uid);
+        update_post_meta($id, AGENTPRESS_PUSH_STORY_SENT, (string) ($row['hash'] ?? ''));
+        $marked++;
+    }
+    $cleared = 0;
+    foreach ((array) ($args['unsent'] ?? []) as $uid) {
+        if (!is_string($uid) || !preg_match('/^[a-f0-9-]{36}$/', $uid)) {
+            continue;
+        }
+        $ids = get_posts(['post_type' => 'post', 'post_status' => 'any', 'posts_per_page' => -1, 'fields' => 'ids', 'meta_key' => AGENTPRESS_PUSH_UID, 'meta_value' => $uid, 'suppress_filters' => true]);
+        foreach ($ids as $id) {
+            // The id stays: it is how the story in the bin there is found if this one is sent again.
+            delete_post_meta($id, AGENTPRESS_PUSH_STORY_SENT);
+            $cleared++;
+        }
+    }
+    foreach ((array) ($args['changed'] ?? []) as $uid) {
+        if (!is_string($uid) || !preg_match('/^[a-f0-9-]{36}$/', $uid)) {
+            continue;
+        }
+        $ids = get_posts(['post_type' => 'post', 'post_status' => 'any', 'posts_per_page' => -1, 'fields' => 'ids', 'meta_key' => AGENTPRESS_PUSH_UID, 'meta_value' => $uid, 'suppress_filters' => true]);
+        foreach ($ids as $id) {
+            // Any value that is not a fingerprint of the story as it stands.
+            update_post_meta($id, AGENTPRESS_PUSH_STORY_SENT, 'changed');
+            $cleared++;
+        }
+    }
+    return ['marked' => $marked, 'cleared' => $cleared];
+}
+
+/* ------------------------------------------------------------------------
  * After a copy lands
  * --------------------------------------------------------------------- */
 
@@ -2098,6 +3361,14 @@ function agentpress_push_ops()
         'design_export' => 'agentpress_push_op_design_export',
         'design_apply' => 'agentpress_push_op_design_apply',
         'design_undo' => 'agentpress_push_op_design_undo',
+        'stories_index' => 'agentpress_push_op_stories_index',
+        'stories_level' => 'agentpress_push_op_stories_level',
+        'stories_export' => 'agentpress_push_op_stories_export',
+        'stories_import' => 'agentpress_push_op_stories_import',
+        'stories_undo' => 'agentpress_push_op_stories_undo',
+        'stories_mark' => 'agentpress_push_op_stories_mark',
+        'pages_access' => 'agentpress_push_op_pages_access',
+        'editor_view' => 'agentpress_push_op_editor_view',
         'rebuild_css' => 'agentpress_push_op_rebuild_css',
         'finish' => 'agentpress_push_op_finish',
     ];
@@ -2270,6 +3541,12 @@ function agentpress_push_admin_page()
             $made = agentpress_push_key_create();
         } elseif ($_POST['agentpress_push_action'] === 'revoke') {
             agentpress_push_key_revoke();
+        } elseif ($_POST['agentpress_push_action'] === 'editor_view') {
+            // A ticked box is a thing editors SEE. Anything not in the list we offer is ignored.
+            $ticked = array_map('sanitize_key', (array) wp_unslash($_POST['agentpress_push_show'] ?? []));
+            $all = array_keys(agentpress_push_editor_items());
+            $show = array_values(array_intersect($all, $ticked));
+            agentpress_push_editor_hidden(array_values(array_diff($all, $show)), $show);
         }
     }
     $record = agentpress_push_key_record();
@@ -2293,5 +3570,23 @@ function agentpress_push_admin_page()
         echo '<button class="button" name="agentpress_push_action" value="revoke">Revoke it</button>';
     }
     echo '</p></form>';
-    echo '<p class="description">Replacing or revoking the key disconnects the local site that holds the old one.</p></div>';
+    echo '<p class="description">Replacing or revoking the key disconnects the local site that holds the old one.</p>';
+    $hidden = agentpress_push_editor_hidden();
+    $notes = [
+        'pages' => 'Unticked, only administrators can edit pages. A page built in Oxygen is replaced by the next design push, whatever was changed here.',
+        'comments' => 'The Comments screen and the comment bubble in the toolbar.',
+        'tools' => 'The Tools menu.',
+        'news' => 'The "WordPress Events and News" box on the dashboard and the W menu in the toolbar.',
+    ];
+    echo '<h2>What editors see</h2>';
+    echo '<p>Tick what people who are not administrators should see in wp-admin. Administrators always see everything.</p>';
+    echo '<form method="post">';
+    wp_nonce_field('agentpress_push_key');
+    echo '<fieldset>';
+    foreach (agentpress_push_editor_items() as $key => $label) {
+        echo '<p><label><input type="checkbox" name="agentpress_push_show[]" value="' . esc_attr($key) . '"' . (in_array($key, $hidden, true) ? '' : ' checked') . '> <strong>' . esc_html($label) . '</strong></label><br><span class="description">' . esc_html($notes[$key] ?? '') . '</span></p>';
+    }
+    echo '</fieldset>';
+    echo '<p><button class="button button-primary" name="agentpress_push_action" value="editor_view">Save</button></p></form>';
+    echo '<p class="description">Posts, Media and Profile are always there: they are the job. Appearance, Plugins, Users, Settings and Oxygen are never shown to an editor, so they are not in this list.</p></div>';
 }

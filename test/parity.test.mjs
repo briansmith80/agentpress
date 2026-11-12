@@ -205,7 +205,8 @@ test('every menu question is drawn on a fresh screen', () => {
   lines.forEach((line, i) => {
     if (!/await choose\(/.test(line)) return;
     const before = lines.slice(Math.max(0, i - 3), i).join('\n');
-    assert.match(before, /menuScreen\(\);/, `choose() at line ${i + 1} is not preceded by menuScreen()`);
+    // With or without the list it is about to draw: menuScreen(options) hands back the rows it used.
+    assert.match(before, /menuScreen\(\w*\);/, `choose() at line ${i + 1} is not preceded by menuScreen()`);
   });
 });
 
@@ -215,15 +216,16 @@ test('the chooser never draws a row wider than the window, at any width', async 
   // after eight keypresses in a 75-column pane (operator screenshot,
   // 2026-11-11). This RUNS the real chooser against a fake terminal.
   const src = menu.replace(/\r\n/g, '\n');
-  const start = src.indexOf('async function choose(message, options) {');
+  const start = src.indexOf('async function choose(message, options, above = 0) {');
   assert.ok(start >= 0, 'chooser not found');
   const body = src.slice(start, src.indexOf('\n}\n', start) + 3);
   const strip = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const options = [
     { label: 'Check status', hint: 'compare this site with live', value: 'a' },
     { label: 'Pull content from live', hint: 'asks first; this local site becomes a copy of live', value: 'b' },
-    { label: 'A label that is itself far too long to fit in a narrow window at all', hint: 'and a hint', value: 'c' },
-    { label: 'Back', value: 'back' },
+    // A blank row above it, and a hint painted by the row itself: both are rows and widths the repaint must count.
+    { label: 'A label that is itself far too long to fit in a narrow window at all', hint: 'and a hint', value: 'c', gap: true, paint: (s) => `\x1b[33m${s}\x1b[0m` },
+    { label: 'Back', value: 'back', gap: true },
   ];
   for (const columns of [30, 60, 75, 120]) {
     const writes = [];
@@ -248,4 +250,57 @@ test('the chooser never draws a row wider than the window, at any width', async 
       else drawn = strip(w).split('\n').length - 1;
     }
   }
+});
+
+test('the chooser gives up its blank rows and key legend before it runs off the bottom', async () => {
+  // A list taller than the window scrolls it; the climb then stops at the top
+  // row and every keypress paints a second copy underneath. Groups and the
+  // legend are the only rows that can go, so they go first.
+  const src = menu.replace(/\r\n/g, '\n');
+  const start = src.indexOf('async function choose(message, options, above = 0) {');
+  const body = src.slice(start, src.indexOf('\n}\n', start) + 3);
+  const strip = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const options = [
+    { label: 'One', value: 'a' },
+    { label: 'Two', value: 'b', gap: true },
+    { label: 'Three', value: 'c', gap: true },
+    { label: 'Back', value: 'back', gap: true },
+  ];
+  const paint = (rows, above) => {
+    const writes = [];
+    const fake = { stdout: { columns: 80, rows, write: (s) => writes.push(s) }, stdin: { setRawMode() {}, resume() {}, pause() {}, on() {}, removeListener() {} } };
+    new Function('process', 'emitKeypressEvents', 'pink', 'dim', `${body}; return choose;`)(fake, () => {}, (s) => s, (s) => s)('Pick', options, above);
+    return strip(writes[0]).split('\n').slice(0, -1);
+  };
+  // question + blank + 4 options, then 3 blank rows between groups and 2 for the legend.
+  assert.equal(paint(40, 10).length, 11, 'room for everything');
+  assert.equal(paint(19, 10).length, 8, 'no room for the groups: the legend stays, the blank rows go');
+  assert.equal(paint(17, 10).length, 6, 'no room for either');
+  for (const [rows, above] of [[40, 10], [19, 10], [17, 10], [12, 10]]) {
+    const drawn = paint(rows, above);
+    // The cursor ends on the row after the list, so the list plus one must fit under what is above it.
+    if (rows >= above + 7) assert.ok(above + drawn.length + 1 <= rows, `${rows} rows: ${drawn.length} drawn under ${above} runs off the bottom`);
+  }
+  assert.ok(paint(40, 10).some((row) => row.includes('0  Back')), 'the row that leaves shows the key that picks it');
+  assert.ok(paint(40, 10).some((row) => row.includes('1  One')), 'a row shows its number');
+});
+
+test('the menu names the plugin zip the tool writes', async () => {
+  // `push plugin` writes <slug>.zip into the site folder and the menu then
+  // copies that path and offers the folder. A different name is a copied
+  // path to a file that is not there.
+  const { PLUGIN_SLUG } = await import('../src/push.mjs');
+  assert.ok(menu.includes(`const PUSH_ZIP = '${PLUGIN_SLUG}.zip';`), 'the menu looks for a different file than push plugin writes');
+});
+
+test('the feedback link carries versions and nothing about the site', () => {
+  const src = menu.replace(/\r\n/g, '\n');
+  const start = src.indexOf('function feedbackUrl() {');
+  assert.ok(start >= 0, 'feedbackUrl not found');
+  const body = src.slice(start, src.indexOf('\n}\n', start) + 3);
+  // An issue is public the moment it is filed, and this repo's are indexed.
+  for (const name of ['SITE', 'HOST', 'CWD', 'env.', 'liveHost']) assert.ok(!body.includes(name), `the prefilled issue reads ${name}`);
+  const url = new Function('VERSION', 'process', 'release', `${body}; return feedbackUrl();`)('9.9.9', { version: 'v22.0.0' }, () => '10.0.1');
+  assert.ok(url.startsWith('https://github.com/briansmith80/agentpress/issues/new?body='), url);
+  assert.match(decodeURIComponent(url), /AgentPress 9\.9\.9 · Node v22\.0\.0 · Windows 10\.0\.1/);
 });

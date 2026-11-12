@@ -60,6 +60,16 @@ export const LOCAL_AGENT_TABLES = ['acfw_oauth_clients', 'acfw_oauth_codes', 'ac
 export const LOCAL_AGENT_OPTIONS = ['agent_connector_for_wp_'];
 
 /**
+ * The dev site's note of which live site its story notes were taken against
+ * (see pushStories). It is an option, so it would ride along in a database
+ * copy: up to live, where it means nothing, and away from here in a pull,
+ * which replaces the options table. It stays with its own site the same way
+ * the agent connector's settings do.
+ */
+export const LOCAL_STORY_OPTIONS = ['agentpress_push_stories_synced'];
+const OWN_OPTIONS = [...LOCAL_AGENT_OPTIONS, ...LOCAL_STORY_OPTIONS];
+
+/**
  * A file list with the local-only agent plugins taken out. Applied to the
  * SOURCE list before the compare, so those files are not sent, not counted in
  * the byte total and not shown in a dry run. Caught before any real server
@@ -105,11 +115,14 @@ export const MENU_LABELS = {
   'push status': 'Check status',
   'push --dry-run': 'Preview a design push',
   push: 'Push design to live',
+  'push content': 'Push content to live',
   pull: 'Pull content from live',
-  'push --full': 'First launch: full copy to live',
+  'push --full': 'Set up or reconnect… → First launch: full copy to live',
   'push undo': 'Undo… → The last design push',
+  'push undo --content': 'Undo… → The last content push',
   'pull undo': 'Undo… → The last pull',
   'push undo --full': 'Undo… → The last full copy',
+  'push editor': 'Set up or reconnect… → What editors see on live',
 };
 
 /**
@@ -394,21 +407,203 @@ export function chunkSizeFor(postMaxBytes) {
   return Math.max(256 * 1024, Math.min(4 * 1024 * 1024, Math.floor(limit / 2)));
 }
 
-/** The design plan, as lines a person can read before saying yes. */
-export function describeDesignPlan(result) {
-  const lines = [];
+/** What a design push would change, as [verb, kind, title]. Everything from the other site goes through shown(). */
+export function designChanges(result) {
+  const rows = [];
   const label = { create: 'new', restore: 'new', adopt: 'match', update: 'change', bin: 'remove' };
   for (const change of result.changes ?? []) {
     // A match that changes nothing only records which post is which. True, but
     // not something to ask a person to approve seventeen times.
     if (change.action === 'same' || (change.action === 'adopt' && !(change.changed ?? []).length)) continue;
-    const kind = shown(change.type).replace(/^(oxygen|breakdance)_/, '');
-    lines.push(`${shown(label[change.action] ?? change.action).padEnd(7)} ${kind.padEnd(9)} ${shown(change.title)}`);
+    rows.push([shown(label[change.action] ?? change.action), shown(change.type).replace(/^(oxygen|breakdance)_/, ''), shown(change.title)]);
   }
   for (const [part, verdict] of Object.entries(result.site ?? {})) {
-    if (verdict === 'update') lines.push(`${'change'.padEnd(7)} ${'site'.padEnd(9)} ${shown(part).replace(/_/g, ' ')}`);
+    if (verdict === 'update') rows.push(['change', 'site', shown(part).replace(/_/g, ' ')]);
+  }
+  return rows;
+}
+
+/** The design plan, as lines a person can read before saying yes. */
+export function describeDesignPlan(result) {
+  return designChanges(result).map(([verb, kind, title]) => `${verb.padEnd(7)} ${kind.padEnd(9)} ${title}`);
+}
+
+/**
+ * The design plan as a screen: what changes, what is sent, what is left
+ * alone, each under its own heading. It used to be one table with all three
+ * in it, where "leave themes 393 files in themes this site does not run on
+ * (…)" sat in the same column as a footer's name and wrapped in any pane
+ * narrower than the sentence (operator, 2026-11-12: "looks like it can be
+ * laid out better"). The question a person brings to this screen is "what
+ * happens to live?", and the answer has three parts of different weight:
+ * the changes are the point, the files follow from them, and the left-alone
+ * rows are reassurance, so they are dim.
+ *
+ * `width` cuts every row on the RAW text, before any colour. Pass nothing
+ * when the output is not a terminal: a log file has no window to wrap in.
+ */
+export function designPlanScreen({ host, changes = [], code = [], media = { count: 0, bytes: 0 }, held = [], themes = { files: 0, names: [] }, width = Infinity }) {
+  const fit = (text) => (text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`);
+  const row = (a, b, text, paint = (x) => x) => paint(fit(`    ${a.padEnd(8)} ${b.padEnd(10)} ${text}`.trimEnd()));
+  const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
+  const some = (list, n) => `${list.slice(0, n).join(', ')}${list.length > n ? ', …' : ''}`;
+  const lines = [];
+  const section = (title) => lines.push('', bold(fit(`  ${title}`)));
+  if (changes.length) {
+    section(`Changes on ${host}`);
+    for (const [verb, kind, title] of changes) lines.push(row(verb, kind, title));
+  }
+  if (code.length || media.count) {
+    section('Files to send');
+    if (code.length) lines.push(row('code', files(code.length), some(code, 3)));
+    if (media.count) lines.push(row('media', files(media.count), `${formatBytes(media.bytes)}, not on ${host} yet`));
+  }
+  const anything = changes.length || code.length || media.count;
+  if (anything || held.length || themes.files) {
+    section('Left alone');
+    if (held.length) lines.push(row('media', files(held.length), `deleted on ${host}, so not sent back (${some(held, 2)})`, dim));
+    if (themes.files) lines.push(row('themes', files(themes.files), `in ${themes.names.length === 1 ? 'a theme' : 'themes'} this site does not run on (${some(themes.names.map(shown), 3)})`, dim));
+    // Only beside a real plan: under "nothing to push" it is a row about nothing.
+    if (anything) lines.push(row('content', '', "stories, users, comments and the editor's own uploads", dim));
   }
   return lines;
+}
+
+const STORY_STATUS = { publish: 'public', future: 'scheduled', draft: 'draft', pending: 'pending review', private: 'private' };
+const STORY_VERB = { create: 'add', update: 'update', restore: 'restore' };
+const STORY_LEFT = {
+  builder: () => 'built in Oxygen, which this cannot send',
+  gone: (host) => `deleted on ${host} after it was sent`,
+  binned: (host) => `in the bin on ${host}`,
+  on_live: (host) => `${host} has it as its own; change it there`,
+  edited: (host) => `edited on ${host} since it was sent`,
+  same_address: (host) => `${host} already has a story at that address`,
+  image_clash: (host, e) => `${host} has a different file called ${shown(e.notes?.[0] ?? 'the same name')}`,
+  image_bad: (host, e) => `an image has a name that cannot travel (${shown(e.notes?.[0] ?? '?')})`,
+};
+const STORY_FAILED = { image_missing: 'an image did not arrive', insert: 'WordPress refused it', update: 'WordPress refused the change' };
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const storyCount = (n) => plural(n, 'story', 'stories');
+const storyTitle = (title) => {
+  const text = shown(title) || '(no title)';
+  return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+};
+
+/**
+ * The receiver's plan for a set of stories, as a screen. Laid out like the
+ * design preview (see designPlanScreen) so the two read as one tool: what
+ * will be sent under one bold heading, what is left alone, dim, under
+ * another. Stories that will travel are numbered (the number is what the
+ * "send which?" question takes) and come back in `sendable`, in that order.
+ * One left alone always says why: a story quietly not sent is a question later.
+ *
+ * `width` cuts every row on the RAW text, before any colour.
+ */
+export function describeStoryPlan(entries, host, width = Infinity) {
+  const fit = (text, max = width) => (text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`);
+  const all = entries ?? [];
+  const sendable = all.filter((e) => e.action !== 'leave');
+  const left = all.filter((e) => e.action === 'leave');
+  const REST = 'everything else';
+  // Titles share one column so the second column starts in one place. A title
+  // longer than the cap pushes only its own row out.
+  const wide = Math.min(40, Math.max(REST.length, ...all.map((e) => storyTitle(e.title).length)));
+  const lines = [];
+  const section = (title) => lines.push('', bold(fit(`  ${title}`)));
+  // A plain head and a dim tail, cut as ONE raw line and coloured afterwards.
+  const row = (head, tail, paint = (x) => x) => {
+    const h = fit(head);
+    // No tail at all when there is not room for two characters of it: a lone … is noise, and a third column over.
+    const t = tail && width - h.length - 2 >= 2 ? fit(tail, width - h.length - 2) : '';
+    return `${paint(h)}${t ? `  ${dim(t)}` : ''}`;
+  };
+  if (sendable.length) {
+    section(`Stories to send to ${host}`);
+    // Notes sit under the title they belong to: 4 indent, 2 number, 2 gap, verb and its space.
+    const under = ' '.repeat(4 + 2 + 2 + 9);
+    const note = (text) => lines.push(`${under}${dim(fit(text, width - under.length))}`);
+    sendable.forEach((e, i) => {
+      const bits = [STORY_STATUS[e.status] ?? shown(e.status)];
+      if (e.images) bits.push(plural(e.images, 'image'));
+      if (e.files?.length) bits.push(`${plural(e.files.length, 'file')} to send`);
+      lines.push(row(`    ${String(i + 1).padStart(2)}  ${(STORY_VERB[e.action] ?? shown(e.action)).padEnd(8)} ${storyTitle(e.title).padEnd(wide)}`, bits.join(', ')));
+      if (e.new_terms?.length) note(`makes ${e.new_terms.length === 1 ? 'the category or tag' : 'the categories or tags'} ${e.new_terms.map(shown).join(', ')}`);
+      for (const raw of e.notes ?? []) {
+        const [kind, a, b] = shown(raw).split(':');
+        const standIn = b || 'the first administrator';
+        if (kind === 'author') note(a ? `its author ${a} has no account on ${host}; it goes up as ${standIn}` : `it has no author here; it goes up as ${standIn}`);
+        if (kind === 'no_taxonomy') note(`${host} has no "${a}" grouping, so that part is left off`);
+      }
+    });
+  }
+  if (left.length || sendable.length) {
+    section('Left alone');
+    // Under a list of stories to send, the reasons start where the statuses
+    // above them do (a number, a gap and a verb further in), so the screen has
+    // two columns, not three.
+    const cell = wide + (sendable.length ? 13 : 0);
+    for (const e of left) lines.push(row(`    ${storyTitle(e.title).padEnd(cell)}`, (STORY_LEFT[e.reason] ?? (() => shown(e.reason)))(host, e), dim));
+    // Only beside a real plan: with nothing to send it is a row about nothing.
+    if (sendable.length) lines.push(row(`    ${REST.padEnd(cell)}`, `this only adds: nothing on ${host} is replaced or deleted`, dim));
+  }
+  return { lines, sendable };
+}
+
+/**
+ * The answer to "send which?": nothing or `all` is every one, otherwise
+ * numbers from the list. Anything else is null, and the caller sends
+ * nothing: a typo must not be read as "all".
+ */
+export function pickStories(answer, count) {
+  const text = String(answer).trim().toLowerCase();
+  if (text === '' || text === 'a' || text === 'all') return Array.from({ length: count }, (_, i) => i);
+  if (!/^\d+([\s,]+\d+)*$/.test(text)) return null;
+  const picked = [...new Set(text.split(/[\s,]+/).map(Number))];
+  return picked.every((n) => n >= 1 && n <= count) ? picked.map((n) => n - 1).sort((a, b) => a - b) : null;
+}
+
+/** -1, 0, 1 for two dotted versions, or null when either is not one (`6.2.0-beta.3` against `6.2.0`). */
+export function compareVersions(a, b) {
+  const parse = (v) => (/^\d+(\.\d+)*$/.test(String(v)) ? String(v).split('.').map(Number) : null);
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return null;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Where the two sites' plugins are not the same, for `push status`. Only
+ * differences come back: a list of forty matching plugins is forty lines
+ * nobody reads, with the two that matter somewhere inside.
+ *
+ * Left out on purpose: the agent plugins (local-only by design, so "missing
+ * on live" is the correct state, not a finding) and this tool's own plugin
+ * (both ends are refused unless it matches).
+ */
+export function comparePlugins(localList, liveList) {
+  const mine = (list) => new Map((Array.isArray(list) ? list : []).filter((pl) => pl && !LOCAL_AGENT_PLUGINS.includes(pl.dir) && pl.dir !== PLUGIN_SLUG).map((pl) => [pl.dir, pl]));
+  const here = mine(localList);
+  const there = mine(liveList);
+  const cell = (pl) => (pl ? `${pl.version || '?'}${pl.active ? '' : ' (off)'}` : 'not installed');
+  const rows = [];
+  for (const dir of [...new Set([...here.keys(), ...there.keys()])].sort()) {
+    const a = here.get(dir);
+    const b = there.get(dir);
+    if (a && b && a.version === b.version && a.active === b.active) continue;
+    const order = a && b ? compareVersions(a.version, b.version) : null;
+    rows.push({ name: (a ?? b).name || dir, local: cell(a), live: cell(b), newer: order === -1 ? 'live' : order === 1 ? 'local' : null });
+  }
+  const live = [...there.values()];
+  return {
+    rows,
+    auto: live.filter((pl) => pl.auto).map((pl) => pl.name),
+    waiting: live.filter((pl) => pl.update).map((pl) => `${pl.name} ${pl.version} ${STEP} ${pl.update}`),
+  };
 }
 
 /* ----------------------------------------------------------- endpoints -- */
@@ -634,15 +829,50 @@ async function runOnce(endpoint, op, args = {}) {
   }
 }
 
+/**
+ * `████████░░░░░░░░░░  42%` for a step that knows how far along it is. Plain
+ * characters, no colour of its own: the caller dims the empty part. Width is
+ * fixed so the numbers after it do not jitter as it fills.
+ */
+export function progressBar(done, total, width = 18) {
+  if (!(Number(total) > 0)) return null;
+  const ratio = Math.max(0, Math.min(1, Number(done) / Number(total)));
+  const full = Math.round(ratio * width);
+  return { full: '█'.repeat(full), empty: '░'.repeat(width - full), percent: `${String(Math.round(ratio * 100)).padStart(3)}%` };
+}
+
+/**
+ * One status line that rewrites itself, then leaves a past-tense receipt.
+ * `progress(done, total, note)` draws a bar (operator's ask, 2026-11-12: a
+ * full copy sat on "sending files" with a byte count and no sense of how
+ * much was left); `update(note)` is for a step with no total.
+ *
+ * The line is cut to the window, on the raw text: `\r` plus erase-line only
+ * clears ONE row, so a line that wraps leaves its first half behind on every
+ * repaint. Same failure as the chooser's rows (see CLAUDE.md), found there.
+ */
 function ticker(text) {
   const live = process.stdout.isTTY;
-  const write = (suffix) => {
-    if (live) process.stdout.write(`\r\x1b[2K  … ${text}${suffix ? dim(` ${suffix}`) : ''}`);
+  const fit = (raw, max) => (raw.length <= max ? raw : max < 2 ? '' : `${raw.slice(0, max - 1)}…`);
+  const paint = (bar, note) => {
+    if (!live) return;
+    const room = Math.max(20, (process.stdout.columns || 80) - 1);
+    const head = fit(`  … ${text}`, room);
+    let left = room - head.length;
+    let out = head;
+    if (bar && left >= bar.full.length + bar.empty.length + bar.percent.length + 4) {
+      out += `  ${bar.full}${dim(bar.empty)} ${bar.percent}`;
+      left -= bar.full.length + bar.empty.length + bar.percent.length + 3;
+    }
+    const tail = note ? fit(note, left - 2) : '';
+    if (tail) out += `  ${dim(tail)}`;
+    process.stdout.write(`\r\x1b[2K${out}`);
   };
-  if (live) write('');
+  if (live) paint(null, '');
   else console.log(`  … ${text}`);
   return {
-    update: write,
+    update: (note) => paint(null, note),
+    progress: (done, total, note) => paint(progressBar(done, total), note),
     done(receipt) {
       if (live) process.stdout.write('\r\x1b[2K');
       if (receipt) console.log(`  ${dim(`${STEP} ${receipt}`)}`);
@@ -657,6 +887,17 @@ async function confirm(question, { yes, expect = null } = {}) {
   try {
     const answer = (await rl.question(expect ? `? ${question}: ` : `? ${question} [y/N]: `)).trim();
     return expect ? answer === expect : /^y(es)?$/i.test(answer);
+  } finally {
+    rl.close();
+  }
+}
+
+/** A question with a typed answer. Not a terminal: the answer is null, which every caller reads as "no". */
+async function ask(question) {
+  if (!process.stdin.isTTY) return null;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(`? ${question}: `)).trim();
   } finally {
     rl.close();
   }
@@ -684,8 +925,8 @@ export async function pluginZip() {
 /** Move one session file from one end to the other, through a temp file on this machine. */
 async function carry(from, fromSession, to, toSession, name, work, tick) {
   const path = join(work, `${randomBytes(4).toString('hex')}-${name}`);
-  await from.getFile(fromSession, name, path, (done, total) => tick?.update(`down ${formatBytes(done)} of ${formatBytes(total)}`));
-  await to.putFile(toSession, name, path, (done, total) => tick?.update(`up ${formatBytes(done)} of ${formatBytes(total)}`));
+  await from.getFile(fromSession, name, path, (done, total) => tick?.progress(done, total, `down ${formatBytes(done)} of ${formatBytes(total)}`));
+  await to.putFile(toSession, name, path, (done, total) => tick?.progress(done, total, `up ${formatBytes(done)} of ${formatBytes(total)}`));
   const { size } = await stat(path);
   await rm(path, { force: true });
   return size;
@@ -693,7 +934,7 @@ async function carry(from, fromSession, to, toSession, name, work, tick) {
 
 async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   let tick = ticker(`reading the database on ${from.label}`);
-  const exported = await runSteps(from, 'db_export', { session: sessions.from, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.update(`table ${s.tables_done} of ${s.tables}`));
+  const exported = await runSteps(from, 'db_export', { session: sessions.from, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.progress(s.tables_done, s.tables, `table ${s.tables_done} of ${s.tables}`));
   tick.done(`read ${exported.rows} rows from ${exported.tables} tables (${formatBytes(exported.bytes)})`);
 
   tick = ticker(`sending the database to ${to.label}`);
@@ -701,7 +942,7 @@ async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   tick.done();
 
   tick = ticker(`loading it beside the current one on ${to.label}`);
-  const imported = await runSteps(to, 'db_import', { session: sessions.to, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
+  const imported = await runSteps(to, 'db_import', { session: sessions.to, own_tables: LOCAL_AGENT_TABLES }, (s) => tick.progress(s.bytes_done, s.bytes, `${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
   tick.done(`loaded ${imported.rows} rows; the site is still running on its old database`);
   // The sender was asked to leave the agent connector's tables out. If some
   // arrived anyway the receiver did not load them, and that is said, not
@@ -714,7 +955,7 @@ async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
   }
 
   tick = ticker(`switching ${to.label} to the new database`);
-  const swapped = await runOnce(to, 'db_swap', { ...swapArgs, own_option_prefixes: LOCAL_AGENT_OPTIONS, session: sessions.to });
+  const swapped = await runOnce(to, 'db_swap', { ...swapArgs, own_option_prefixes: OWN_OPTIONS, session: sessions.to });
   swapped.kept_admins = (swapped.kept_admins ?? []).map(shown);
   swapped.scrambled = (swapped.scrambled ?? []).map(shown);
   tick.done(`switched; kept this site's own settings and logins (${swapped.kept_admins.join(', ') || 'no administrators'})`);
@@ -728,7 +969,7 @@ async function copyDatabase(from, to, sessions, work, swapArgs = {}) {
 async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly = false, refuseCode = false } = {}) {
   let tick = ticker(`comparing files (${roots.join(', ')})`);
   const [a, b] = await Promise.all([
-    runSteps(from, 'files_manifest', { session: sessions.from, roots, hash: mode !== 'missing' }, (s) => tick.update(`${from.label} ${s.files_done} of ${s.files}`)),
+    runSteps(from, 'files_manifest', { session: sessions.from, roots, hash: mode !== 'missing' }, (s) => tick.progress(s.files_done, s.files, `${from.label} ${s.files_done} of ${s.files}`)),
     runSteps(to, 'files_manifest', { session: sessions.to, roots, hash: mode !== 'missing' }),
   ]);
   const fromList = join(work, 'from-manifest.ndjson');
@@ -747,7 +988,7 @@ async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly 
   await writeFile(want, plan.send.map((p) => JSON.stringify(p)).join('\n') + '\n', 'utf8');
   await from.putFile(sessions.from, 'want.ndjson', want);
   tick = ticker(`packing ${plan.send.length} file${plan.send.length === 1 ? '' : 's'} on ${from.label}`);
-  await runSteps(from, 'files_pack', { session: sessions.from }, (s) => tick.update(`${s.files_done} of ${s.files}`));
+  await runSteps(from, 'files_pack', { session: sessions.from }, (s) => tick.progress(s.files_done, s.files, `${s.files_done} of ${s.files}`));
   tick.done();
   tick = ticker(`sending files to ${to.label}`);
   await carry(from, sessions.from, to, sessions.to, 'files.pack', work, tick);
@@ -756,7 +997,7 @@ async function copyFiles(from, to, sessions, work, roots, mode, { skipLocalOnly 
   // roots: the receiver unpacks only what this job asked for. The pack was
   // built by the other site, and before this a pull would have unpacked a
   // `mu-plugins/x.php` the live site slipped in.
-  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots, refuse_code: refuseCode }, (s) => tick.update(`${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
+  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots, refuse_code: refuseCode }, (s) => tick.progress(s.bytes_done, s.bytes, `${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
   tick.done(`put ${unpacked.written} file${unpacked.written === 1 ? '' : 's'} in place`);
   sayRefused(unpacked, from.label);
   return plan;
@@ -888,20 +1129,178 @@ function designVerdict(localInfo, remoteInfo) {
 
 async function statusCommand(site) {
   const { localInfo, remoteInfo } = await bothEnds(site);
-  const row = (label, a, b) => console.log(`  ${label.padEnd(12)} ${String(a).padEnd(30)} ${b}`);
+  // Pad the RAW text, then colour: a differing row's live value is the one thing on this screen that is not dim-or-plain.
+  const row = (label, a, b, differs = false) => console.log(`  ${label.padEnd(12)} ${String(a).padEnd(30)} ${String(b)}${differs ? `  ${dim('differs')}` : ''}`);
+  const version = (label, a, b) => row(label, a ?? 'none', b ?? 'none', (a ?? '') !== (b ?? ''));
   console.log('');
   row('', bold('local'.padEnd(30)), bold('live'));
   row('address', localInfo.site_url, remoteInfo.site_url);
-  row('WordPress', localInfo.wp_version, remoteInfo.wp_version);
-  row('Oxygen', localInfo.oxygen_version ?? 'none', remoteInfo.oxygen_version ?? 'none');
+  version('WordPress', localInfo.wp_version, remoteInfo.wp_version);
+  version('PHP', localInfo.php_version, remoteInfo.php_version);
+  version('Oxygen', localInfo.oxygen_version, remoteInfo.oxygen_version);
   row('posts', localInfo.counts.post, remoteInfo.counts.post);
+  row('pages', localInfo.counts.page, remoteInfo.counts.page);
   row('media', localInfo.counts.attachment, remoteInfo.counts.attachment);
   row('design', `${localInfo.design_items} items`, `${remoteInfo.design_items} items`);
+  const seen = (info) => (info.search_visible ? 'shown to search engines' : 'hidden from search engines');
+  row('search', seen(localInfo), seen(remoteInfo));
+
+  const plugins = comparePlugins(localInfo.plugins, remoteInfo.plugins);
+  if (plugins.rows.length) {
+    console.log(`\n  ${bold('Plugins that differ')}`);
+    const cut = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`);
+    for (const pl of plugins.rows) console.log(`  ${cut(pl.name, 28).padEnd(29)}${pl.local.padEnd(18)}${pl.live}${pl.newer ? `  ${dim(`newer ${pl.newer === 'live' ? 'on live' : 'here'}`)}` : ''}`);
+  }
+
   const verdict = designVerdict(localInfo, remoteInfo);
   console.log('');
   if (verdict === 'same') console.log(`${green(OK)} The design is the same on both. Nothing to push.`);
   else if (verdict === 'different') console.log(`${dim(INFO)} The design differs. ${say(site, 'push --dry-run')} shows what a push would change.`);
+  // A real warning: a design push is refused until these match.
+  if (localInfo.oxygen_version && remoteInfo.oxygen_version && localInfo.oxygen_version !== remoteInfo.oxygen_version) {
+    console.log(`${yellow(WARN)} Oxygen is ${localInfo.oxygen_version} here and ${remoteInfo.oxygen_version} on live. A design only moves between the same version.`);
+  }
+  const ahead = plugins.rows.filter((pl) => pl.newer === 'live').map((pl) => pl.name);
+  if (ahead.length) console.log(`${cyan(STEP)} Newer on live: ${ahead.join(', ')}. Update ${ahead.length === 1 ? 'it' : 'them'} here (wp-admin ${STEP} Plugins) so you build against what live runs.`);
+  if (plugins.auto.length) console.log(`${dim(INFO)} Live updates ${plugins.auto.length === 1 ? 'this plugin' : `these ${plugins.auto.length} plugins`} by itself: ${plugins.auto.join(', ')}.`);
+  if (plugins.waiting.length) console.log(`${dim(INFO)} Updates waiting on live: ${plugins.waiting.join(', ')}.`);
+  // Live's only, not a row: this end is read through the command line, whose
+  // PHP has no memory limit and its own upload size, so a "local" column
+  // here printed `-1` and `16 MB` for a site whose web server allows neither
+  // (first run of this screen, 2026-11-12).
+  const limits = [
+    remoteInfo.upload_max_bytes ? `uploads up to ${formatBytes(remoteInfo.upload_max_bytes)}` : '',
+    remoteInfo.memory_limit ? (remoteInfo.memory_limit === '-1' ? 'no PHP memory limit' : `PHP memory ${shown(remoteInfo.memory_limit)}`) : '',
+  ].filter(Boolean);
+  if (limits.length) console.log(`${dim(INFO)} Live allows ${limits.join(', ')}.`);
+  if (Array.isArray(remoteInfo.editor_hidden)) {
+    // The names wp-admin uses, as the list itself prints them. The first run on the real server said "News".
+    const names = remoteInfo.editor_hidden.map((key) => EDITOR_LABELS[key] ?? shown(key));
+    console.log(names.length ? `${dim(INFO)} Editors on live do not see: ${names.join(', ')}. To change that: ${say(site, 'push editor')}` : `${dim(INFO)} Editors on live see everything an editor can, Pages included, and a design push replaces a page built in Oxygen. To hide things: ${say(site, 'push editor')}`);
+  }
   if (remoteInfo.has_undo) console.log(`${dim(INFO)} Live still holds the database from before the last full copy (${say(site, 'push undo --full')}).`);
+  // Only once the notes were taken against THIS live site does "no note"
+  // mean "written here". Before that every story would count.
+  if (localInfo.stories_synced_with === new URL(remoteInfo.site_url).host && localInfo.stories_unsent > 0) {
+    console.log(`${dim(INFO)} ${storyCount(localInfo.stories_unsent)} written here ${localInfo.stories_unsent === 1 ? 'is' : 'are'} not on live. ${say(site, 'push content')} sends ${localInfo.stories_unsent === 1 ? 'it' : 'them'}.`);
+  }
+}
+
+/**
+ * The stories on this site that could go up, worked out WITHOUT writing a
+ * note anywhere: what a dry run and a pull's warning ask. When the notes
+ * were never taken against this live site the answer needs its list of
+ * stories (see stories_level in the plugin).
+ */
+async function storiesWaiting(local, remote, localInfo, host, only = []) {
+  const args = { only };
+  if (localInfo.stories_synced_with !== host) {
+    args.index = (await remote.run('stories_index')).stories;
+    args.mark = host;
+  }
+  return local.run('stories_export', args);
+}
+
+/**
+ * Stories written here, up to live. The one way UP for content, for the one
+ * case the ownership rule had no answer to: the AI agent only works on the
+ * dev site (that is the point of keeping its plugins off the live one), so
+ * what it writes is born on the wrong side. Before this those stories had
+ * nowhere to go: a design push ignores them, a full copy would replace the
+ * editor's work to deliver them, and the next pull deleted them.
+ *
+ * It only ever ADDS. A story live already has is the editor's and is left
+ * alone, with one exception: one this command sent that nobody there has
+ * touched since. Everything is decided by the receiver, twice: once for the
+ * plan a person reads, and again from scratch when it acts.
+ */
+async function pushStories(site, { yes, dryRun, draft, positional = [] }) {
+  const { local, remote, localInfo, remoteInfo } = await bothEnds(site);
+  const host = new URL(remoteInfo.site_url).host;
+  const only = positional.slice(2).map(String);
+  console.log(`\n${bold('Push content')}  ${localInfo.site_url}  ${STEP}  ${remoteInfo.site_url}`);
+  // First time against this live site: note which stories it already has.
+  // Not on a dry run, which writes nothing, the notes included.
+  if (localInfo.stories_synced_with !== host && !dryRun) {
+    const tick = ticker(`checking which stories ${host} already has`);
+    const index = (await remote.run('stories_index')).stories;
+    const levelled = await local.run('stories_level', { mark: host, index });
+    tick.done(`noted ${storyCount(levelled.noted)} here that ${host} already has`);
+    localInfo.stories_synced_with = host;
+  }
+  const bundle = await storiesWaiting(local, remote, localInfo, host, only);
+  if (bundle.unknown?.length) throw new PushError(`No story here has the number or slug ${bundle.unknown.map(shown).join(', ')}.`);
+  for (const title of bundle.on_live ?? []) console.log(`  ${dim(`${INFO} ${storyTitle(title)}: ${STORY_LEFT.on_live(host)}`)}`);
+  if (!bundle.items.length) {
+    console.log(`${green(OK)} ${only.length ? 'Nothing there to send.' : `Every story here is already on ${host}. Nothing to send.`}`);
+    return;
+  }
+  if (bundle.items.length > 50) throw new PushError(`${storyCount(bundle.items.length)} are waiting. Send up to 50 at a time: name them by number or slug after ${pink('push content')}.`);
+  await withSessions(local, remote, async (sessions, work) => {
+    const file = join(work, 'stories.json');
+    await writeFile(file, JSON.stringify(bundle), 'utf8');
+    await remote.putFile(sessions.to, 'stories.json', file);
+    const planned = await remote.run('stories_import', { session: sessions.to, dry: true, draft });
+    const { lines, sendable } = describeStoryPlan(planned.plan, host, process.stdout.isTTY ? Math.max(40, (process.stdout.columns || 100) - 1) : Infinity);
+    for (const line of lines) console.log(line);
+    if (!sendable.length) {
+      console.log(`\n${dim(INFO)} Nothing can be sent as things stand.`);
+      return;
+    }
+    if (dryRun) {
+      console.log(`\n${dim(INFO)} Preview only: nothing was sent or changed.`);
+      console.log(`${cyan(STEP)} To send ${sendable.length === 1 ? 'it' : 'them'}: ${say(site, 'push content')}`);
+      return;
+    }
+    console.log('');
+    let chosen = sendable;
+    let asDrafts = draft;
+    if (!yes) {
+      if (sendable.length > 1) {
+        const picked = pickStories((await ask(`Send which? Enter for all ${sendable.length}, or numbers like 1,3`)) ?? 'none', sendable.length);
+        if (!picked?.length) throw new PushError('Nothing was sent.');
+        chosen = picked.map((i) => sendable[i]);
+      }
+      // The one thing here a person cannot take back by thinking again: a
+      // public story is public the second it lands. Named, then asked.
+      const goingPublic = asDrafts ? [] : chosen.filter((e) => e.status === 'publish');
+      if (goingPublic.length) {
+        console.log(`\n  ${goingPublic.length === 1 ? 'This one is' : `These ${goingPublic.length} are`} public on ${host} the moment ${goingPublic.length === 1 ? 'it arrives' : 'they arrive'}:`);
+        for (const e of goingPublic) console.log(`    ${storyTitle(e.title)}`);
+        const answer = ((await ask(`Send ${storyCount(chosen.length)} to ${host}? [y/N/d] ${dim('(d = send as drafts instead)')}`)) ?? '').toLowerCase();
+        if (/^d(rafts?)?$/.test(answer)) asDrafts = true;
+        else if (!/^y(es)?$/.test(answer)) throw new PushError('Nothing was sent.');
+      } else if (!(await confirm(`Send ${storyCount(chosen.length)} to ${host}${asDrafts ? ' as drafts' : ''}?`))) {
+        throw new PushError('Nothing was sent.');
+      }
+    }
+    const files = [...new Set(chosen.flatMap((e) => e.files ?? []))];
+    if (files.length) await sendPlanned(local, remote, sessions, work, { send: files }, ['uploads']);
+    const tick = ticker(`adding ${storyCount(chosen.length)} on ${host}`);
+    const done = await runOnce(remote, 'stories_import', { session: sessions.to, draft: asDrafts, only: chosen.map((e) => e.uid) });
+    // The note on this site is written only now, from what live says it has.
+    if (done.sent?.length) await local.run('stories_mark', { sent: done.sent });
+    const finished = await remote.run('finish', { session: sessions.to });
+    tick.done(`cleared ${finished.cleared.join(', ')}`);
+    // Those files are on both ends now: if the editor deletes one there, a
+    // design push must not offer it back (see readSeen).
+    if (files.length) await noteSeen(site, host, files);
+    console.log('');
+    let failed = 0;
+    for (const e of done.plan ?? []) {
+      if (e.action === 'failed') {
+        failed++;
+        console.log(`${red(BAD)} ${storyTitle(e.title)}: not sent, ${STORY_FAILED[e.reason] ?? shown(e.reason)}.`);
+      } else if (e.action === 'leave') {
+        // Planned a moment ago, refused now: live changed in between.
+        console.log(`${yellow(WARN)} ${storyTitle(e.title)}: left alone, ${(STORY_LEFT[e.reason] ?? (() => shown(e.reason)))(host, e)}.`);
+      } else {
+        console.log(`${green(OK)} ${storyTitle(e.title)}  ${dim(`${STORY_STATUS[e.status] ?? shown(e.status)}  ${shown(e.url ?? '')}`)}`);
+      }
+    }
+    if (failed) process.exitCode = 1;
+    if (done.undo) console.log(`${cyan(STEP)} Open ${done.sent.length === 1 ? 'it' : 'them'} and look. To take ${done.sent.length === 1 ? 'it' : 'them'} back: ${say(site, 'push undo --content')}`);
+  });
 }
 
 /** First copy: everything local, onto the remote. */
@@ -939,6 +1338,8 @@ async function pushFull(site, { yes, force, dryRun }) {
     // second local site standing in for live) is left as it was.
     // scramble: a dev password must not become a live one (see db_swap).
     copied = await copyDatabase(local, remote, sessions, work, { drop_plugin_dirs: LOCAL_AGENT_PLUGINS, keep_plugin_dirs: LOCAL_AGENT_PLUGINS, scramble_arriving_passwords: true });
+    // Every story here is on live now, and is live's from here on.
+    await local.run('stories_level', { mark: host });
     await settle(remote, sessions.to);
   });
   console.log(`\n${green(OK)} ${remoteInfo.site_url} is now a copy of this site.`);
@@ -975,35 +1376,33 @@ async function pushDesign(site, { yes, dryRun }) {
     // Of the themes, only the one this site runs on (see withoutUnusedThemes).
     const code = await copyFilesPlan(local, remote, sessions, work, ['mu-plugins', 'themes'], 'mirror', (list) => withoutUnusedThemes(list, localInfo.themes_in_use));
     const unusedThemes = [...new Set(code.leftOut.map((path) => path.split('/')[1]))];
-    const themeLine = unusedThemes.length
-      ? `${code.leftOut.length} file${code.leftOut.length === 1 ? '' : 's'} in ${unusedThemes.length === 1 ? 'a theme' : 'themes'} this site does not run on (${unusedThemes.slice(0, 3).map(shown).join(', ')}${unusedThemes.length > 3 ? ', …' : ''})`
-      : '';
     // ...and not one live HAD and no longer has: that was deleted there.
     const media = holdBackDeleted(await copyFilesPlan(local, remote, sessions, work, ['uploads'], 'missing'), await readSeen(site.cwd, host));
-    const heldLine = media.held.length
-      ? `${media.held.length} upload file${media.held.length === 1 ? ' that was' : 's that were'} deleted on ${host} ${media.held.length === 1 ? 'is' : 'are'} left alone (${media.held.slice(0, 2).join(', ')}${media.held.length > 2 ? ', …' : ''})`
-      : '';
+    const screen = designPlanScreen({
+      host,
+      changes: designChanges(plan),
+      code: code.send,
+      media: { count: media.send.length, bytes: media.bytes },
+      held: media.held,
+      themes: { files: code.leftOut.length, names: unusedThemes },
+      width: process.stdout.isTTY ? Math.max(40, (process.stdout.columns || 100) - 1) : Infinity,
+    });
     if (!lines.length && !code.send.length && !media.send.length) {
       // Nothing visible to change, but if items were only matched by name,
       // record their permanent ids now so the next push does not have to guess again.
       if ((plan.changes ?? []).some((c) => c.action === 'adopt') && !dryRun) await runOnce(remote, 'design_apply', { session: sessions.to });
-      console.log(`${green(OK)} ${host} already has this design. Nothing to push.`);
-      if (heldLine) console.log(`  ${dim(`${INFO} ${heldLine}`)}`);
-      if (themeLine) console.log(`  ${dim(`${INFO} Not sent: ${themeLine}`)}`);
+      console.log(`\n${green(OK)} ${host} already has this design. Nothing to push.`);
+      for (const line of screen) console.log(line);
       if (!dryRun) await noteSeen(site, host, media.target.keys());
       return;
     }
-    console.log(`\n  On ${host} this will:`);
-    for (const line of lines) console.log(`    ${line}`);
-    if (code.send.length) console.log(`    ${'send'.padEnd(7)} ${'code'.padEnd(9)} ${code.send.length} file${code.send.length === 1 ? '' : 's'} (${code.send.slice(0, 3).join(', ')}${code.send.length > 3 ? ', …' : ''})`);
-    if (media.send.length) console.log(`    ${'send'.padEnd(7)} ${'media'.padEnd(9)} ${media.send.length} file${media.send.length === 1 ? '' : 's'} live does not have (${formatBytes(media.bytes)})`);
-    if (heldLine) console.log(`    ${'leave'.padEnd(7)} ${'media'.padEnd(9)} ${heldLine}`);
-    if (themeLine) console.log(`    ${'leave'.padEnd(7)} ${'themes'.padEnd(9)} ${themeLine}`);
-    console.log(`  ${dim("Stories, users, comments and the editor's own uploads are not touched.")}`);
+    for (const line of screen) console.log(line);
     if (dryRun) {
-      console.log(`\n${dim(INFO)} Dry run: nothing was changed.`);
+      console.log(`\n${dim(INFO)} Preview only: nothing was sent or changed.`);
+      console.log(`${cyan(STEP)} To send it: ${say(site, 'push')}`);
       return;
     }
+    console.log('');
     if (!(await confirm(`Push this to ${host}?`, { yes }))) throw new PushError('Nothing was changed.');
     // One pack for both lists: a session holds a single files.pack.
     if (code.send.length || media.send.length) await sendPlanned(local, remote, sessions, work, { send: [...code.send, ...media.send] }, ['mu-plugins', 'themes', 'uploads']);
@@ -1052,21 +1451,44 @@ async function sendPlanned(from, to, sessions, work, plan, roots) {
   const want = join(work, 'want.ndjson');
   await writeFile(want, plan.send.map((p) => JSON.stringify(p)).join('\n') + '\n', 'utf8');
   await from.putFile(sessions.from, 'want.ndjson', want);
-  await runSteps(from, 'files_pack', { session: sessions.from });
   const tick = ticker(`sending ${plan.send.length} file${plan.send.length === 1 ? '' : 's'} to ${to.label}`);
+  await runSteps(from, 'files_pack', { session: sessions.from }, (s) => tick.progress(s.files_done, s.files, `packing ${s.files_done} of ${s.files}`));
   await carry(from, sessions.from, to, sessions.to, 'files.pack', work, tick);
-  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots });
+  const unpacked = await runSteps(to, 'files_unpack', { session: sessions.to, roots }, (s) => tick.progress(s.bytes_done, s.bytes, `putting in place ${formatBytes(s.bytes_done)} of ${formatBytes(s.bytes)}`));
   tick.done(`put ${unpacked.written} file${unpacked.written === 1 ? '' : 's'} in place`);
 }
 
-async function pushUndo(site, { full, yes }) {
-  const { remote, remoteInfo } = await bothEnds(site);
+async function pushUndo(site, { full, content, yes }) {
+  const { local, remote, remoteInfo } = await bothEnds(site);
   const host = new URL(remoteInfo.site_url).host;
+  if (content) {
+    const plan = await remote.run('stories_undo', { dry: true });
+    const binned = (plan.binned ?? []).map(storyTitle);
+    const reverted = (plan.reverted ?? []).map(storyTitle);
+    if (!binned.length && !reverted.length) {
+      console.log(`${green(OK)} The stories last sent to ${host} are already gone from it. Nothing to take back.`);
+      return;
+    }
+    console.log(`\n  Taking back the stories last sent to ${host} will:`);
+    for (const title of binned) console.log(`    ${'bin'.padEnd(8)} ${title}`);
+    for (const title of reverted) console.log(`    ${'restore'.padEnd(8)} ${title}  ${dim('the text it had before')}`);
+    console.log(`  ${dim(`They go to the bin on ${host}, not deleted. Images stay in its media library. Nothing changes on this site.`)}`);
+    if (!(await confirm(`Take ${binned.length + reverted.length === 1 ? 'it' : 'them'} back on ${host}?`, { yes }))) throw new PushError('Nothing was changed.');
+    const res = await runOnce(remote, 'stories_undo');
+    // Here they are stories written here again, so they can be sent again.
+    await local.run('stories_mark', { unsent: res.uids ?? [], changed: res.reverted_uids ?? [] });
+    await remote.run('finish');
+    console.log(`${green(OK)} Took back ${storyCount((res.binned ?? []).length + (res.reverted ?? []).length)} on ${host}.`);
+    return;
+  }
   if (full) {
     if (!remoteInfo.has_undo) throw new PushError(`${host} holds no earlier database to go back to.`);
     if (!(await confirm(`Put ${host} back on the database it had before the last full copy?`, { yes }))) throw new PushError('Nothing was changed.');
     const res = await runOnce(remote, 'db_undo');
     await settle(remote);
+    // Live's stories are the earlier set again, so the notes taken at the
+    // full copy ("live has every story here") are wrong. Take them afresh.
+    await local.run('stories_level', { mark: host, index: (await remote.run('stories_index')).stories, reset: true });
     console.log(`${green(OK)} ${host} is back on its earlier database (${res.restored} tables). Files were not rolled back.`);
     return;
   }
@@ -1112,6 +1534,15 @@ export async function pullCommand(site, { yes, force, dryRun, positional = [] })
       throw new PushError(`Push your design first (${say(site, 'push')}), or add ${pink('--force')} to drop the local design changes.`);
     }
   }
+  // A pull replaces the database, and stories written here live in it. Before
+  // this check they were deleted without a word (found by reading, 2026-11-12).
+  const waiting = (await storiesWaiting(local, remote, localInfo, host)).items;
+  if (waiting.length) {
+    console.log(`\n${yellow(WARN)} ${storyCount(waiting.length)} here ${waiting.length === 1 ? 'is' : 'are'} not on ${host}, and a pull would delete ${waiting.length === 1 ? 'it' : 'them'}:`);
+    for (const item of waiting.slice(0, 8)) console.log(`    ${storyTitle(item.post_title)}  ${dim(item.fresh ? 'written here' : 'changed here since it was sent')}`);
+    if (waiting.length > 8) console.log(`    ${dim(`and ${waiting.length - 8} more`)}`);
+    if (!force) throw new PushError(`Send ${waiting.length === 1 ? 'it' : 'them'} first (${say(site, 'push content')}), or add ${pink('--force')} to drop ${waiting.length === 1 ? 'it' : 'them'}.`);
+  }
   if (dryRun) {
     console.log(`\n${dim(INFO)} Dry run: nothing was changed.`);
     return;
@@ -1127,20 +1558,104 @@ export async function pullCommand(site, { yes, force, dryRun, positional = [] })
     await copyDatabase(remote, local, sessions, work, { keep_plugin_dirs: LOCAL_AGENT_PLUGINS, keep_theme: true });
     const files = await copyFiles(remote, local, sessions, work, ['uploads'], 'mirror', { refuseCode: true });
     await noteSeen(site, host, files.source.keys());
+    // Every story here came from live a moment ago.
+    await local.run('stories_level', { mark: host });
     await settle(local, sessions.to);
   });
   console.log(`\n${green(OK)} This site now has everything on ${host}.`);
   console.log(`  ${dim(INFO)} The database it had before is kept: ${say(site, 'pull undo')}`);
 }
 
-export async function pushCommand(site, { yes, force, dryRun, full, positional = [] }) {
+export async function pushCommand(site, { yes, force, dryRun, full, draft, content, positional = [] }) {
   const sub = positional[1];
   if (sub === 'connect') return connectCommand(site, positional[2]);
   if (sub === 'plugin') return pluginCommand(site);
   if (sub === 'status') return statusCommand(site);
-  if (sub === 'undo') return pushUndo(site, { full, yes });
-  if (sub) throw new PushError(`Unknown: push ${sub}. Try push, push --full, push status, push undo, push plugin or push connect.`);
+  if (sub === 'undo') return pushUndo(site, { full, content, yes });
+  if (sub === 'editor') return editorCommand(site, positional[2], positional.slice(3), { yes });
+  if (sub === 'pages') return pagesCommand(site, positional[2], { yes });
+  // `content` is the name, to sit beside "Pull content" (operator's call,
+  // 2026-11-12). What it sends is stories, so the older words still work.
+  if (sub === 'content' || sub === 'stories' || sub === 'posts') return pushStories(site, { yes, dryRun, draft, positional });
+  if (sub) throw new PushError(`Unknown: push ${sub}. Try push, push content, push --full, push status, push editor, push undo, push plugin or push connect.`);
   return full ? pushFull(site, { yes, force, dryRun }) : pushDesign(site, { yes, dryRun });
+}
+
+/** The plugin's keys as wp-admin names them, for a line that has no list from the live site to read them off. */
+const EDITOR_LABELS = { pages: 'Pages', comments: 'Comments', tools: 'Tools', news: 'WordPress news' };
+
+/** What each thing an editor can be kept from seeing is, in a few words. Keys are the plugin's. */
+const EDITOR_NOTES = {
+  pages: 'hidden = locked: only administrators edit pages',
+  comments: 'the Comments screen and the toolbar bubble',
+  tools: 'the Tools menu',
+  news: 'the news box on the dashboard and the W menu',
+};
+
+/** The list `push editor` shows, numbered: the number is what "Switch which?" takes. */
+export function editorViewScreen(items, host, width = Infinity) {
+  const fit = (text, max = width) => (text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`);
+  const wide = Math.max(...items.map((item) => shown(item.label).length));
+  const lines = ['', bold(fit(`  What editors see on ${host}`))];
+  items.forEach((item, i) => {
+    const head = fit(`    ${String(i + 1).padStart(2)}  ${shown(item.label).padEnd(wide)}  ${(item.hidden ? 'hidden' : 'shown').padEnd(6)}`);
+    const note = EDITOR_NOTES[item.key] ?? '';
+    const tail = note && width - head.length - 2 >= 2 ? fit(note, width - head.length - 2) : '';
+    lines.push(`${head}${tail ? `  ${dim(tail)}` : ''}`);
+  });
+  lines.push('', dim(fit('  Administrators always see everything. Posts, Media and Profile stay: they are the job.')));
+  lines.push(dim(fit('  Appearance, Plugins, Users, Settings and Oxygen never show for an editor.')));
+  return lines;
+}
+
+/** "2,3" as row numbers to flip. Enter flips NOTHING (unlike "send which?", where Enter is all); a typo is null. */
+export function pickSwitches(answer, count) {
+  return String(answer).trim() === '' ? [] : /^(a|all)$/i.test(String(answer).trim()) ? null : pickStories(answer, count);
+}
+
+/**
+ * What people who are not administrators are shown in the live site's
+ * wp-admin. Pages is a real lock (see pagesCommand's old note below); the
+ * rest tidies the menu for a client who writes stories and needs nothing
+ * else. With no action it shows the list and, at a terminal, asks which to
+ * flip, so the site menu can offer it as one item.
+ */
+async function editorCommand(site, action, keys, { yes } = {}) {
+  if (action && action !== 'hide' && action !== 'show') throw new PushError(`Unknown: push editor ${shown(action)}. Use push editor, push editor hide <what> or push editor show <what>.`);
+  const wanted = keys.map((key) => String(key).toLowerCase());
+  if (action && !wanted.length) throw new PushError(`Say what to ${action}: ${Object.keys(EDITOR_NOTES).join(', ')}.`);
+  const { remote, remoteInfo } = await bothEnds(site);
+  const host = new URL(remoteInfo.site_url).host;
+  const width = process.stdout.isTTY ? Math.max(40, (process.stdout.columns || 100) - 1) : Infinity;
+  const said = (items, keysChanged) =>
+    items
+      .filter((item) => keysChanged.includes(item.key))
+      .map((item) => `${shown(item.label)} ${item.hidden ? 'hidden' : 'shown'}`)
+      .join(', ');
+  let state = await remote.run('editor_view', action ? { [action]: wanted } : {});
+  for (const line of editorViewScreen(state.items, host, width)) console.log(line);
+  if (action) {
+    console.log(`\n${green(OK)} On ${host}: ${said(state.items, wanted)}.`);
+    return;
+  }
+  if (yes || !process.stdin.isTTY) return;
+  console.log('');
+  const picked = pickSwitches((await ask('Switch which? Numbers like 2,3 flip them. Enter changes nothing')) ?? '', state.items.length);
+  if (picked === null) throw new PushError('Nothing was changed.');
+  if (!picked.length) {
+    console.log(`${dim(INFO)} Nothing was changed.`);
+    return;
+  }
+  const flip = picked.map((i) => state.items[i]);
+  state = await remote.run('editor_view', { hide: flip.filter((item) => !item.hidden).map((item) => item.key), show: flip.filter((item) => item.hidden).map((item) => item.key) });
+  for (const line of editorViewScreen(state.items, host, width)) console.log(line);
+  console.log(`\n${green(OK)} On ${host}: ${said(state.items, flip.map((item) => item.key))}.`);
+}
+
+/** `push pages`, kept from 0.1.10: Pages alone, by its old words. The same switch as `push editor hide pages`. */
+async function pagesCommand(site, action, options) {
+  if (action && action !== 'open' && action !== 'lock') throw new PushError(`Unknown: push pages ${shown(action)}. Use push pages, push pages open or push pages lock.`);
+  return editorCommand(site, action ? (action === 'open' ? 'show' : 'hide') : undefined, action ? ['pages'] : [], action ? options : { yes: true });
 }
 
 /** Shared wrapper: a PushError is a message for the user, anything else is a bug and keeps its stack. */
